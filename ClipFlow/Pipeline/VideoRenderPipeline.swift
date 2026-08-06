@@ -16,6 +16,7 @@
 import Foundation
 import AVFoundation
 import CoreVideo
+import VideoToolbox
 import os.signpost
 
 struct RenderJob: Sendable {

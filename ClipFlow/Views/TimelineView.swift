@@ -328,7 +328,8 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
 
     /// Le glissement de sélection ne démarre QUE sur la sélection courante ;
     /// ailleurs, le défilement standard du scroll view garde la main.
-    func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+    /// (`override` : UIView déclare déjà cette méthode.)
+    override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
         guard recognizer is UIPanGestureRecognizer,
               recognizer.view === scrollView || recognizer.view === contentView else { return true }
         guard let frame = currentSelectionFrame else { return false }

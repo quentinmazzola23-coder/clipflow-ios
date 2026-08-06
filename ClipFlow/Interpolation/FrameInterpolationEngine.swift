@@ -64,20 +64,25 @@ enum InterpolationEngineFactory {
 
     /// Meilleur moteur disponible sur cet appareil pour ces dimensions.
     /// Ordre : VideoToolbox (qualité) → secours (duplication, nommé honnêtement).
+    /// Le moteur VideoToolbox n'existe pas dans le SDK simulateur.
     static func bestEngine(width: Int, height: Int) -> FrameInterpolationEngine {
+        #if !targetEnvironment(simulator)
         if #available(iOS 26.0, *) {
             if VideoToolboxFrameInterpolationEngine.isSupported(width: width, height: height) {
                 return VideoToolboxFrameInterpolationEngine()
             }
         }
+        #endif
         return PassthroughRetimeEngine()
     }
 
     /// Le moteur haute qualité est-il disponible ? (pour l'afficher dans l'UI)
     static var highQualityAvailable: Bool {
+        #if !targetEnvironment(simulator)
         if #available(iOS 26.0, *) {
             return VideoToolboxFrameInterpolationEngine.isSupported(width: 3840, height: 2160)
         }
+        #endif
         return false
     }
 }

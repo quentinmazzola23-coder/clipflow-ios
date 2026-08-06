@@ -18,6 +18,10 @@ import CoreVideo
 import CoreMedia
 import VideoToolbox
 
+// Les classes VTFrameProcessor n'existent pas dans le SDK simulateur —
+// moteur compilé uniquement pour appareil réel.
+#if !targetEnvironment(simulator)
+
 @available(iOS 26.0, *)
 final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
 
@@ -164,3 +168,5 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
         return buffer
     }
 }
+
+#endif
