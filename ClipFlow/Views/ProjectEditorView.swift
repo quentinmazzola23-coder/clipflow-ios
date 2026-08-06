@@ -128,8 +128,8 @@ struct ProjectEditorView: View {
                     onSelectionDrag: handleSelectionDrag,
                     onSelectionDragEnded: persistAfterMove
                 )
-                .frame(height: isLandscape ? 140 : 170)
-                controlBar
+                .frame(height: isLandscape ? 120 : 170)
+                controlBar(isLandscape: isLandscape)
             }
         }
         .navigationTitle(project.name)
@@ -170,6 +170,10 @@ struct ProjectEditorView: View {
         .task { await observeProxyStatus() }
         .onAppear {
             RenderQueueController.shared.configure(container: modelContext.container)
+            // La timeline suit la lecture (le scrubbing manuel, lui, met en pause).
+            playback.onTick = { time in
+                handlePlaybackTick(time)
+            }
         }
     }
 
@@ -254,86 +258,103 @@ struct ProjectEditorView: View {
             .background(color.opacity(0.25), in: Capsule())
     }
 
-    /// Barre de commandes sur DEUX rangées : une seule ligne débordait de
-    /// l'écran en portrait (13 contrôles). Rangée 1 : transport ; rangée 2 :
-    /// actions sur la sélection.
-    private var controlBar: some View {
-        VStack(spacing: 4) {
-            // Rangée transport.
-            HStack(spacing: 0) {
-                Group {
-                    // Navigation manuelle entre rushes (aucun passage automatique).
-                    Button { goToRush(offset: -1) } label: { Image(systemName: "chevron.backward.2") }
-                        .disabled((currentRushIndex ?? 0) <= 0)
-                        .keyboardShortcut(.leftArrow, modifiers: [.command])
-                    Button { goToRush(offset: 1) } label: { Image(systemName: "chevron.forward.2") }
-                        .disabled(currentRushIndex.map { $0 >= project.rushes.count - 1 } ?? true)
-                        .keyboardShortcut(.rightArrow, modifiers: [.command])
-                    // Saut direct au prochain rush sans passage validé.
-                    Button { goToNextUntreatedRush() } label: { Image(systemName: "arrow.right.to.line") }
-                        .disabled(project.rushes.isEmpty)
-                        .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
+    // MARK: Barre de commandes — adaptative.
+    // Portrait : deux rangées (une seule débordait, 13 contrôles).
+    // Paysage : une rangée compacte pour maximiser la visionneuse (§9).
 
-                    Divider().frame(height: 20)
+    @ViewBuilder
+    private var transportButtons: some View {
+        // Navigation manuelle entre rushes (aucun passage automatique).
+        Button { goToRush(offset: -1) } label: { Image(systemName: "chevron.backward.2") }
+            .disabled((currentRushIndex ?? 0) <= 0)
+            .keyboardShortcut(.leftArrow, modifiers: [.command])
+        Button { goToRush(offset: 1) } label: { Image(systemName: "chevron.forward.2") }
+            .disabled(currentRushIndex.map { $0 >= project.rushes.count - 1 } ?? true)
+            .keyboardShortcut(.rightArrow, modifiers: [.command])
+        // Saut direct au prochain rush sans passage validé.
+        Button { goToNextUntreatedRush() } label: { Image(systemName: "arrow.right.to.line") }
+            .disabled(project.rushes.isEmpty)
+            .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
 
-                    // Image par image sur la sélection.
-                    Button { nudgeSelection(frames: -1) } label: { Image(systemName: "backward.frame") }
-                        .keyboardShortcut(.leftArrow, modifiers: [])
-                        .disabled(selectionRange == nil)
-                    Button {
-                        playback.isPlaying ? playback.pause() : playback.play()
-                    } label: {
-                        Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+        Divider().frame(height: 20)
+
+        // Image par image sur la sélection.
+        Button { nudgeSelection(frames: -1) } label: { Image(systemName: "backward.frame") }
+            .keyboardShortcut(.leftArrow, modifiers: [])
+            .disabled(selectionRange == nil)
+        Button {
+            playback.isPlaying ? playback.pause() : playback.play()
+        } label: {
+            Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+        }
+        .keyboardShortcut(.space, modifiers: [])
+        Button { nudgeSelection(frames: 1) } label: { Image(systemName: "forward.frame") }
+            .keyboardShortcut(.rightArrow, modifiers: [])
+            .disabled(selectionRange == nil)
+
+        // Boucle de la sélection courante.
+        Button { playSelectionLoop() } label: { Image(systemName: "repeat") }
+            .disabled(selectionRange == nil)
+
+        // Bascule prévisualisation ralentie 0,5× (n'affecte pas l'export).
+        Button {
+            slowPreview.toggle()
+            playback.slowPreview = slowPreview
+            playback.refreshRate()
+        } label: {
+            Image(systemName: slowPreview ? "tortoise.fill" : "tortoise")
+        }
+        .foregroundStyle(slowPreview ? .blue : .primary)
+    }
+
+    @ViewBuilder
+    private var actionButtons: some View {
+        Button {
+            showCategories = true
+        } label: {
+            Image(systemName: "tag")
+                .overlay(alignment: .topTrailing) {
+                    if !pendingCategories.isEmpty {
+                        Circle().fill(.blue).frame(width: 8, height: 8).offset(x: 4, y: -4)
                     }
-                    .keyboardShortcut(.space, modifiers: [])
-                    Button { nudgeSelection(frames: 1) } label: { Image(systemName: "forward.frame") }
-                        .keyboardShortcut(.rightArrow, modifiers: [])
-                        .disabled(selectionRange == nil)
-
-                    // Boucle de la sélection courante.
-                    Button { playSelectionLoop() } label: { Image(systemName: "repeat") }
-                        .disabled(selectionRange == nil)
-
-                    // Bascule prévisualisation ralentie 0,5× (n'affecte pas l'export).
-                    Button {
-                        slowPreview.toggle()
-                        playback.slowPreview = slowPreview
-                        playback.refreshRate()
-                    } label: {
-                        Image(systemName: slowPreview ? "tortoise.fill" : "tortoise")
-                    }
-                    .foregroundStyle(slowPreview ? .blue : .primary)
                 }
-                .frame(maxWidth: .infinity)
-            }
-            .font(.title3)
+        }
+        .font(.title3)
 
-            // Rangée actions.
-            HStack(spacing: 14) {
-                Button {
-                    showCategories = true
-                } label: {
-                    Image(systemName: "tag")
-                        .overlay(alignment: .topTrailing) {
-                            if !pendingCategories.isEmpty {
-                                Circle().fill(.blue).frame(width: 8, height: 8).offset(x: 4, y: -4)
-                            }
-                        }
+        Spacer()
+
+        Button("Rejeter", role: .destructive) {
+            selectionRange = nil
+            selectionRushIndex = nil
+        }
+        .disabled(selectionRange == nil)
+
+        Button("Valider") { validateSelection() }
+            .buttonStyle(.borderedProminent)
+            .disabled(selectionRange == nil)
+            .keyboardShortcut(.return, modifiers: [])
+    }
+
+    private func controlBar(isLandscape: Bool) -> some View {
+        Group {
+            if isLandscape {
+                HStack(spacing: 16) {
+                    transportButtons
+                    Divider().frame(height: 20)
+                    actionButtons
                 }
                 .font(.title3)
-
-                Spacer()
-
-                Button("Rejeter", role: .destructive) {
-                    selectionRange = nil
-                    selectionRushIndex = nil
+            } else {
+                VStack(spacing: 4) {
+                    HStack(spacing: 0) {
+                        Group { transportButtons }
+                            .frame(maxWidth: .infinity)
+                    }
+                    .font(.title3)
+                    HStack(spacing: 14) {
+                        actionButtons
+                    }
                 }
-                .disabled(selectionRange == nil)
-
-                Button("Valider") { validateSelection() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(selectionRange == nil)
-                    .keyboardShortcut(.return, modifiers: [])
             }
         }
         .padding(.horizontal, 12)
@@ -411,11 +432,34 @@ struct ProjectEditorView: View {
     // MARK: - Actions timeline
 
     private func handleScrub(_ globalTime: Double) {
+        // Le scrubbing manuel prend toujours la main : toute lecture en cours
+        // (boucle automatique comprise) est mise en pause.
+        if playback.isPlaying {
+            playback.pause()
+        }
         playhead = globalTime
         guard let index = rushIndex(atGlobalTime: globalTime) else { return }
         let local = globalTime - segmentStart(rushIndex: index)
         playback.load(rush: project.orderedRushes[index])
         playback.seek(to: CMTime(seconds: local, preferredTimescale: 600))
+    }
+
+    /// Suivi de lecture : la timeline défile pour rester alignée sur l'image
+    /// affichée. Throttlé, et via jeton one-shot (pas de boucle de rétroaction :
+    /// setPlayhead supprime son propre rappel de scrubbing).
+    private func handlePlaybackTick(_ time: CMTime) {
+        guard playback.isPlaying, let index = currentRushIndex else { return }
+        let rushDuration = project.orderedRushes[index].duration.seconds
+        // Borné STRICTEMENT dans le rush courant : atteindre la frontière
+        // ferait basculer currentRushIndex et rechargerait le média en boucle.
+        let global = min(
+            segmentStart(rushIndex: index) + time.seconds,
+            segmentStart(rushIndex: index) + max(rushDuration - 0.01, 0)
+        )
+        guard abs(global - playhead) > 0.04 else { return }
+        playhead = global
+        seekCounter += 1
+        seek = ProgrammaticSeek(token: seekCounter, time: global)
     }
 
     /// Déplacement manuel vers le rush précédent (-1) ou suivant (+1).

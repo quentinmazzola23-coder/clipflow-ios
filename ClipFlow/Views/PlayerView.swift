@@ -28,6 +28,10 @@ final class ProxyPlaybackEngine {
     var slowPreview = false
     private var playbackRate: Float { slowPreview ? 0.5 : 1.0 }
 
+    /// Rappel périodique (~60 Hz) du temps de lecture courant — permet à la
+    /// timeline de suivre la lecture. Appelé sur le MainActor.
+    var onTick: ((CMTime) -> Void)?
+
     init() {
         player.automaticallyWaitsToMinimizeStalling = false
         // Observation périodique pour le bouclage de sélection.
@@ -36,7 +40,11 @@ final class ProxyPlaybackEngine {
             queue: .main
         ) { [weak self] time in
             Task { @MainActor [weak self] in
-                guard let self, let range = self.loopRange, self.isPlaying else { return }
+                guard let self else { return }
+                if self.isPlaying {
+                    self.onTick?(time)
+                }
+                guard let range = self.loopRange, self.isPlaying else { return }
                 if CMTimeCompare(time, range.end) >= 0 {
                     await self.player.seek(to: range.start, toleranceBefore: .zero, toleranceAfter: .zero)
                 }
