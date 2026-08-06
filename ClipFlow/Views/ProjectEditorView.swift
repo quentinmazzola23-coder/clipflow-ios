@@ -43,6 +43,8 @@ struct ProjectEditorView: View {
     @State private var showExports = false
     @State private var pendingCategories: Set<String> = []
     @State private var errorMessage: String?
+    @State private var slowPreview = false
+    @State private var showReleaseConfirm = false
 
     private let validateHaptic = UINotificationFeedbackGenerator()
 
@@ -143,13 +145,27 @@ struct ProjectEditorView: View {
         .sheet(isPresented: $showExports) {
             NavigationStack { RenderQueueView(project: project) }
         }
-        .alert("Erreur", isPresented: Binding(
+        .alert("ClipFlow", isPresented: Binding(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
         )) {
             Button("OK") { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
+        }
+        .confirmationDialog(
+            "Libérer les copies sources ?",
+            isPresented: $showReleaseConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Libérer l'espace", role: .destructive) {
+                let freed = MediaAvailabilityService.releaseSources(in: project)
+                try? modelContext.save()
+                errorMessage = "Espace libéré : \(StorageManager.formatBytes(freed)). Les originaux restent intacts dans Photos."
+            }
+            Button("Annuler", role: .cancel) {}
+        } message: {
+            Text("Supprime les copies locales des rushes dont tous les passages sont déjà mis en cache pour l'export. Les originaux dans Photos ne sont jamais touchés. Une nouvelle sélection dans un rush libéré ne pourra plus être exportée sans réimporter la vidéo.")
         }
         .task { await observeProxyStatus() }
         .onAppear {
@@ -201,6 +217,11 @@ struct ProjectEditorView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            // Progression globale du triage.
+            let treated = project.orderedRushes.filter { !$0.passages.isEmpty }.count
+            Text("\(treated)/\(project.rushes.count) traités · \(project.passages.count) passages")
+                .font(.footnote.monospacedDigit())
+                .foregroundStyle(treated == project.rushes.count && !project.rushes.isEmpty ? .green : .secondary)
             if let status = proxyStatus, status.completed < status.totalQueued {
                 HStack(spacing: 4) {
                     ProgressView().controlSize(.mini)
@@ -223,6 +244,7 @@ struct ProjectEditorView: View {
         case .importing: ("import…", .orange)
         case .needsICloudDownload: ("iCloud requis", .red)
         case .unavailable: ("indisponible", .red)
+        case .sourceReleased: ("source libérée", .orange)
         case .unknown: ("?", .gray)
         }
         return Text(text)
@@ -241,8 +263,22 @@ struct ProjectEditorView: View {
             Button { goToRush(offset: 1) } label: { Image(systemName: "chevron.forward.2") }
                 .disabled(currentRushIndex.map { $0 >= project.rushes.count - 1 } ?? true)
                 .keyboardShortcut(.rightArrow, modifiers: [.command])
+            // Saut direct au prochain rush sans passage validé.
+            Button { goToNextUntreatedRush() } label: { Image(systemName: "arrow.right.to.line") }
+                .disabled(project.rushes.isEmpty)
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
 
             Divider().frame(height: 22)
+
+            // Bascule prévisualisation ralentie 0,5× (n'affecte pas l'export).
+            Button {
+                slowPreview.toggle()
+                playback.slowPreview = slowPreview
+                playback.refreshRate()
+            } label: {
+                Image(systemName: slowPreview ? "tortoise.fill" : "tortoise")
+            }
+            .foregroundStyle(slowPreview ? .blue : .primary)
 
             // Image par image sur la sélection.
             Button { nudgeSelection(frames: -1) } label: { Image(systemName: "backward.frame") }
@@ -313,7 +349,16 @@ struct ProjectEditorView: View {
             Menu {
                 durationMenu
                 Toggle("Toucher = centre de la sélection", isOn: $project.touchAnchorIsCenter)
+                Toggle("Export automatique après validation", isOn: $project.autoExportOnValidate)
                 Toggle("Proxys 240p", isOn: $project.proxy240p)
+                Button {
+                    showReleaseConfirm = true
+                } label: {
+                    let releasable = MediaAvailabilityService.releasableSources(in: project)
+                        .reduce(Int64(0)) { $0 + $1.bytes }
+                    Label("Libérer l'espace (\(StorageManager.formatBytes(releasable)))",
+                          systemImage: "internaldrive")
+                }
                 Button {
                     showReview = true
                 } label: {
@@ -364,13 +409,34 @@ struct ProjectEditorView: View {
     private func goToRush(offset: Int) {
         let rushes = project.orderedRushes
         guard !rushes.isEmpty else { return }
-        let target = min(max((currentRushIndex ?? 0) + offset, 0), rushes.count - 1)
+        jump(toRushIndex: min(max((currentRushIndex ?? 0) + offset, 0), rushes.count - 1))
+    }
+
+    /// Saute au prochain rush SANS passage validé (recherche circulaire).
+    private func goToNextUntreatedRush() {
+        let rushes = project.orderedRushes
+        guard !rushes.isEmpty else { return }
+        let start = (currentRushIndex ?? -1) + 1
+        let order = Array(start..<rushes.count) + Array(0..<min(start, rushes.count))
+        guard let target = order.first(where: { rushes[$0].passages.isEmpty }) else {
+            errorMessage = "Tous les rushes ont au moins un passage validé. 🎉"
+            return
+        }
+        jump(toRushIndex: target)
+    }
+
+    /// Positionne la timeline sur un rush et lance sa lecture en boucle
+    /// (arrivée via bouton uniquement — jamais pendant un scrubbing manuel).
+    private func jump(toRushIndex target: Int) {
+        let rushes = project.orderedRushes
+        guard target >= 0, target < rushes.count else { return }
+        let rush = rushes[target]
         let time = segmentStart(rushIndex: target)
         playhead = time
         seekCounter += 1
         seek = ProgrammaticSeek(token: seekCounter, time: time)
-        playback.load(rush: rushes[target])
-        playback.seek(to: .zero)
+        playback.load(rush: rush)
+        playback.playLoop(range: CMTimeRange(start: .zero, duration: rush.duration))
     }
 
     private func handleTap(_ globalTime: Double) {
@@ -447,6 +513,12 @@ struct ProjectEditorView: View {
         // Mise en cache de la plage source pleine qualité (export hors-ligne).
         cacheSourceRange(for: passage, rush: rush)
 
+        // Export en tâche de fond dès la validation (un rendu à la fois,
+        // régulation thermique gérée par la file).
+        if project.autoExportOnValidate {
+            RenderQueueController.shared.enqueue(passageIDs: [passage.persistentModelID])
+        }
+
         // AUCUN passage automatique au rush suivant : l'interface reste
         // exactement sur le rush et la position courants ; navigation manuelle
         // via les boutons rush précédent/suivant.
@@ -491,25 +563,46 @@ struct ProjectEditorView: View {
 
     // MARK: - Importation
 
+    /// Importation RUSH PAR RUSH : chaque élément est intégré et sauvegardé dès
+    /// son arrivée. Une interruption ne perd que l'élément en cours ; en
+    /// re-sélectionnant, les doublons (même identifiant PhotoKit) sont ignorés.
     private func startImport(_ items: [PhotosPickerItem]) {
         pickerItems = []
         importStartedAt = .now
         importTask = Task {
-            do {
-                let imported = try await PhotoImporter.importItems(items) { progress in
-                    importProgress = progress
+            var errors: [String] = []
+            for (index, item) in items.enumerated() {
+                if Task.isCancelled { break }
+                importProgress = ImportProgress(
+                    completed: index, total: items.count,
+                    currentName: "vidéo \(index + 1)", errors: errors
+                )
+                do {
+                    let info = try await PhotoImporter.importSingle(item, pickOrder: index)
+                    await integrateOne(info)
+                } catch is CancellationError {
+                    break
+                } catch {
+                    errors.append("Vidéo \(index + 1) : \(error.localizedDescription)")
                 }
-                await integrate(imported)
-                // Recale la timeline sur la position courante après le
-                // redimensionnement du contenu (nouveaux rushes ajoutés).
-                seekCounter += 1
-                seek = ProgrammaticSeek(token: seekCounter, time: playhead)
-                playback.load(rush: currentRush)
-                // Signal de fin : son système + haptique de succès.
-                AudioServicesPlaySystemSound(1001)
-                validateHaptic.notificationOccurred(.success)
-            } catch {
-                errorMessage = "Importation interrompue : \(error.localizedDescription)"
+            }
+            importProgress = ImportProgress(
+                completed: items.count, total: items.count,
+                currentName: "", errors: errors
+            )
+            // Tri chronologique global rejoué sur l'ensemble du projet.
+            resortRushes()
+            touch()
+            // Recale la timeline après le redimensionnement du contenu.
+            seekCounter += 1
+            seek = ProgrammaticSeek(token: seekCounter, time: playhead)
+            playback.load(rush: currentRush)
+            // Signal de fin : son système + haptique de succès.
+            AudioServicesPlaySystemSound(1001)
+            validateHaptic.notificationOccurred(.success)
+            if !errors.isEmpty {
+                errorMessage = "Importation terminée avec \(errors.count) erreur(s) :\n"
+                    + errors.prefix(5).joined(separator: "\n")
             }
             importProgress = nil
             importStartedAt = nil
@@ -517,10 +610,65 @@ struct ProjectEditorView: View {
         }
     }
 
+    /// Intègre un rush importé (dédupliqué) et lance son proxy en arrière-plan.
     @MainActor
-    private func integrate(_ imported: [ImportedRushInfo]) async {
-        // Tri chronologique par cascade de replis.
-        let keys = imported.map {
+    private func integrateOne(_ info: ImportedRushInfo) async {
+        // Doublon (réimportation après interruption) : suppression de la copie
+        // fraîchement transférée, rien d'autre à faire.
+        if let id = info.assetIdentifier,
+           project.rushes.contains(where: { $0.assetIdentifier == id }) {
+            try? FileManager.default.removeItem(
+                at: StorageManager.url(forSourceRelativePath: info.localRelativePath)
+            )
+            return
+        }
+
+        let rush = Rush()
+        rush.orderIndex = (project.rushes.map(\.orderIndex).max() ?? -1) + 1
+        rush.assetIdentifier = info.assetIdentifier
+        rush.originalFilename = info.originalFilename
+        rush.captureDate = info.captureDate
+        rush.fileCreationDate = info.fileCreationDate
+        rush.pickOrder = info.pickOrder
+        rush.durationValue = info.duration.value
+        rush.durationTimescale = info.duration.timescale
+        rush.width = info.width
+        rush.height = info.height
+        rush.nominalFrameRate = info.nominalFrameRate
+        rush.codec = info.codec
+        rush.rotationDegrees = info.rotationDegrees
+        rush.colorimetry = info.colorimetry
+        rush.is10Bit = info.is10Bit
+        rush.localSourceRelativePath = info.localRelativePath
+        rush.availability = .localReady
+        rush.project = project
+        modelContext.insert(rush)
+        try? modelContext.save() // persistance immédiate — reprise possible
+
+        // Proxy en arrière-plan — travail possible dès les premiers rushes.
+        let sourceURL = StorageManager.url(forSourceRelativePath: info.localRelativePath)
+        let proxyName = "proxy-\(UUID().uuidString).mp4"
+        let rushID = rush.persistentModelID
+        let use240p = project.proxy240p
+        await ProxyGenerator.shared.enqueue(ProxyGenerator.ProxyJob(
+            sourceURL: sourceURL,
+            proxyFilename: proxyName,
+            use240p: use240p
+        ) { relativePath in
+            await MainActor.run {
+                if let saved = self.modelContext.model(for: rushID) as? Rush {
+                    saved.proxyRelativePath = relativePath
+                    saved.availability = MediaAvailabilityService.evaluate(rush: saved)
+                    try? self.modelContext.save()
+                }
+            }
+        })
+    }
+
+    /// Rejoue le tri chronologique (cascade de replis) sur tous les rushes.
+    private func resortRushes() {
+        let rushes = project.orderedRushes
+        let keys = rushes.map {
             RushSortKey(
                 assetCreationDate: $0.captureDate,
                 fileCreationDate: $0.fileCreationDate,
@@ -529,53 +677,9 @@ struct ProjectEditorView: View {
                 pickOrder: $0.pickOrder
             )
         }
-        let order = ChronoSort.sortedIndices(keys)
-        var nextIndex = (project.rushes.map(\.orderIndex).max() ?? -1) + 1
-
-        for position in order {
-            let info = imported[position]
-            let rush = Rush()
-            rush.orderIndex = nextIndex
-            nextIndex += 1
-            rush.assetIdentifier = info.assetIdentifier
-            rush.originalFilename = info.originalFilename
-            rush.captureDate = info.captureDate
-            rush.fileCreationDate = info.fileCreationDate
-            rush.pickOrder = info.pickOrder
-            rush.durationValue = info.duration.value
-            rush.durationTimescale = info.duration.timescale
-            rush.width = info.width
-            rush.height = info.height
-            rush.nominalFrameRate = info.nominalFrameRate
-            rush.codec = info.codec
-            rush.rotationDegrees = info.rotationDegrees
-            rush.colorimetry = info.colorimetry
-            rush.is10Bit = info.is10Bit
-            rush.localSourceRelativePath = info.localRelativePath
-            rush.availability = .localReady
-            rush.project = project
-            modelContext.insert(rush)
-
-            // Proxy en arrière-plan — travail possible dès les premiers rushes.
-            let sourceURL = StorageManager.url(forSourceRelativePath: info.localRelativePath)
-            let proxyName = "proxy-\(UUID().uuidString).mp4"
-            let rushID = rush.persistentModelID
-            let use240p = project.proxy240p
-            await ProxyGenerator.shared.enqueue(ProxyGenerator.ProxyJob(
-                sourceURL: sourceURL,
-                proxyFilename: proxyName,
-                use240p: use240p
-            ) { relativePath in
-                await MainActor.run {
-                    if let saved = self.modelContext.model(for: rushID) as? Rush {
-                        saved.proxyRelativePath = relativePath
-                        saved.availability = MediaAvailabilityService.evaluate(rush: saved)
-                        try? self.modelContext.save()
-                    }
-                }
-            })
+        for (newIndex, oldPosition) in ChronoSort.sortedIndices(keys).enumerated() {
+            rushes[oldPosition].orderIndex = newIndex
         }
-        touch()
     }
 
     private func observeProxyStatus() async {

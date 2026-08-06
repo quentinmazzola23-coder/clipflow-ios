@@ -82,56 +82,25 @@ struct ImportProgress: Sendable {
 
 final class PhotoImporter {
 
-    /// Importe une liste d'éléments du picker. Retourne les rushes dans l'ordre
-    /// de sélection ; le tri chronologique est appliqué ensuite par l'appelant.
-    ///
-    /// `onProgress` est appelé sur l'acteur principal après chaque élément.
-    /// L'annulation coopérative (Task.checkCancellation) interrompt proprement.
-    static func importItems(
-        _ items: [PhotosPickerItem],
-        onProgress: @MainActor @escaping (ImportProgress) -> Void
-    ) async throws -> [ImportedRushInfo] {
-
-        var results: [ImportedRushInfo] = []
-        var errors: [String] = []
-
-        for (index, item) in items.enumerated() {
-            try Task.checkCancellation()
-
-            let displayName = item.itemIdentifier ?? "vidéo \(index + 1)"
-            await onProgress(ImportProgress(
-                completed: index, total: items.count,
-                currentName: displayName, errors: errors
-            ))
-
-            do {
-                guard let transfer = try await item.loadTransferable(type: VideoFileTransfer.self) else {
-                    throw ImportError.transferFailed(displayName)
-                }
-                var info = try await extractMetadata(from: transfer.url, pickOrder: index)
-                info.assetIdentifier = item.itemIdentifier
-                // Date de capture PHAsset si l'accès Photos en lecture est accordé.
-                if let id = item.itemIdentifier,
-                   PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized
-                    || PHPhotoLibrary.authorizationStatus(for: .readWrite) == .limited {
-                    let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
-                    if let asset = fetch.firstObject {
-                        info.captureDate = asset.creationDate
-                    }
-                }
-                results.append(info)
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                errors.append("\(displayName) : \(error.localizedDescription)")
+    /// Importe UN élément du picker. L'appelant intègre chaque rush au fur et à
+    /// mesure : une interruption (appel, fermeture) ne perd que l'élément en
+    /// cours, et la re-sélection est dédupliquée par identifiant PhotoKit.
+    static func importSingle(_ item: PhotosPickerItem, pickOrder: Int) async throws -> ImportedRushInfo {
+        let displayName = item.itemIdentifier ?? "vidéo \(pickOrder + 1)"
+        guard let transfer = try await item.loadTransferable(type: VideoFileTransfer.self) else {
+            throw ImportError.transferFailed(displayName)
+        }
+        var info = try await extractMetadata(from: transfer.url, pickOrder: pickOrder)
+        info.assetIdentifier = item.itemIdentifier
+        // Date de capture PHAsset si l'accès Photos en lecture est accordé.
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if let id = item.itemIdentifier, status == .authorized || status == .limited {
+            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
+            if let asset = fetch.firstObject {
+                info.captureDate = asset.creationDate
             }
         }
-
-        await onProgress(ImportProgress(
-            completed: items.count, total: items.count,
-            currentName: "", errors: errors
-        ))
-        return results
+        return info
     }
 
     /// Extraction asynchrone des métadonnées — API `load(...)` moderne d'AVFoundation.

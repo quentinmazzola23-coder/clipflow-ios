@@ -28,9 +28,52 @@ enum MediaAvailabilityService {
         if hasLocalSource {
             return .localReady
         }
-        // Sans copie locale : les passages validés restent exportables hors ligne
-        // uniquement si leur plage source est cachée (vérifié passage par passage).
+        if hasProxy {
+            // Source libérée volontairement : navigation via proxy, exports via
+            // les plages cachées des passages existants.
+            return .sourceReleased
+        }
         return .unavailable
+    }
+
+    // MARK: - Libération d'espace
+
+    /// Rushes dont la copie source peut être libérée sans rien perdre :
+    /// au moins un passage, et Tous les passages ont leur plage cachée sur disque.
+    static func releasableSources(in project: ClipProject) -> [(rush: Rush, url: URL, bytes: Int64)] {
+        project.rushes.compactMap { rush in
+            guard let path = rush.localSourceRelativePath else { return nil }
+            let url = StorageManager.url(forSourceRelativePath: path)
+            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+            guard !rush.passages.isEmpty else { return nil }
+            let allCached = rush.passages.allSatisfy { passage in
+                guard let cached = passage.cachedRangeRelativePath else { return false }
+                return FileManager.default.fileExists(
+                    atPath: StorageManager.url(forCachedRangeRelativePath: cached).path
+                )
+            }
+            guard allCached else { return nil }
+            let bytes = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            return (rush, url, bytes)
+        }
+    }
+
+    /// Supprime les copies sources libérables. Retourne les octets récupérés.
+    /// Ne touche JAMAIS aux originaux dans Photos ni aux plages cachées.
+    @discardableResult
+    static func releaseSources(in project: ClipProject) -> Int64 {
+        var freed: Int64 = 0
+        for entry in releasableSources(in: project) {
+            do {
+                try FileManager.default.removeItem(at: entry.url)
+                entry.rush.localSourceRelativePath = nil
+                entry.rush.availability = evaluate(rush: entry.rush)
+                freed += entry.bytes
+            } catch {
+                // Fichier verrouillé ? On passe — retentable depuis le menu.
+            }
+        }
+        return freed
     }
 
     /// Un passage est-il prêt pour un export hors ligne ?

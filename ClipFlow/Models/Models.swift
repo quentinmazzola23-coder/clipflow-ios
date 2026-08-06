@@ -25,6 +25,9 @@ enum RushAvailability: Int, Codable {
     case offlineReady = 4
     /// Source introuvable (élément supprimé de Photos, cache purgé...).
     case unavailable = 5
+    /// Copie source libérée volontairement — proxy conservé, passages
+    /// exportables via leurs plages cachées.
+    case sourceReleased = 6
 }
 
 /// Statut éditorial d'un passage.
@@ -63,6 +66,8 @@ final class ClipProject {
     var touchAnchorIsCenter: Bool = false
     /// Mode hors-ligne garanti : copie intégrale des sources dans l'app.
     var guaranteedOfflineMode: Bool = false
+    /// Lancer automatiquement le rendu d'un passage dès sa validation.
+    var autoExportOnValidate: Bool = true
     /// Proxy 240p au lieu de 144p.
     var proxy240p: Bool = false
     /// Conserver l'audio ralenti (non implémenté dans le MVP, exposé pour le schéma).

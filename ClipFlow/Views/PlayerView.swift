@@ -22,6 +22,12 @@ final class ProxyPlaybackEngine {
     private var timeObserver: Any?
     private(set) var isPlaying = false
 
+    /// Prévisualisation au ralenti 0,5× (bascule tortue). N'affecte que la
+    /// lecture — l'export n'en dépend jamais. La préview 0,5× est saccadée
+    /// (pas d'interpolation ici) ; le rendu final, lui, est interpolé.
+    var slowPreview = false
+    private var playbackRate: Float { slowPreview ? 0.5 : 1.0 }
+
     init() {
         player.automaticallyWaitsToMinimizeStalling = false
         // Observation périodique pour le bouclage de sélection.
@@ -70,16 +76,23 @@ final class ProxyPlaybackEngine {
 
     func play() {
         loopRange = nil
-        player.play()
+        player.playImmediately(atRate: playbackRate)
         isPlaying = true
     }
 
-    /// Lecture en boucle de la sélection uniquement.
+    /// Lecture en boucle d'une plage (sélection ou rush entier).
     func playLoop(range: CMTimeRange) {
         loopRange = range
         player.seek(to: range.start, toleranceBefore: .zero, toleranceAfter: .zero)
-        player.play()
+        player.playImmediately(atRate: playbackRate)
         isPlaying = true
+    }
+
+    /// Applique immédiatement le changement de vitesse si une lecture est en cours.
+    func refreshRate() {
+        if isPlaying {
+            player.rate = playbackRate
+        }
     }
 
     func pause() {
