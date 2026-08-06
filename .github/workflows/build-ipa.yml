@@ -1,0 +1,91 @@
+name: Build IPA (non signée)
+
+# Compile ClipFlow sur un runner macOS GitHub et produit une IPA NON SIGNÉE.
+# La signature est faite ensuite sur le PC Windows par Sideloadly avec
+# l'identifiant Apple personnel (gratuit, validité 7 jours).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    # Image macOS avec Xcode 26 (SDK iOS 26 requis par le projet).
+    # Si le label macos-26 n'existe pas encore : remplacer par macos-latest
+    # et vérifier la version Xcode listée à l'étape "Versions disponibles".
+    runs-on: macos-26
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versions disponibles
+        run: |
+          ls /Applications | grep -i xcode || true
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Sélectionner Xcode 26 si présent
+        run: |
+          XCODE_26=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$XCODE_26" ]; then
+            sudo xcode-select -s "$XCODE_26"
+          fi
+          xcodebuild -version
+
+      - name: Compiler (sans signature)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ClipFlow.xcodeproj \
+            -scheme ClipFlow \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Empaqueter l'IPA
+        run: |
+          mkdir -p Payload
+          cp -R "build/Build/Products/Release-iphoneos/ClipFlow.app" Payload/
+          zip -qry ClipFlow-unsigned.ipa Payload
+          ls -la ClipFlow-unsigned.ipa
+
+      - name: Publier l'artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipFlow-ipa
+          path: ClipFlow-unsigned.ipa
+          retention-days: 14
+
+  tests:
+    runs-on: macos-26
+    timeout-minutes: 40
+    continue-on-error: true # informatif : l'IPA reste produite même si un test casse
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sélectionner Xcode 26 si présent
+        run: |
+          XCODE_26=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$XCODE_26" ]; then
+            sudo xcode-select -s "$XCODE_26"
+          fi
+          xcodebuild -version
+
+      - name: Tests unitaires (simulateur)
+        run: |
+          set -o pipefail
+          DEVICE=$(xcrun simctl list devices available | grep -m1 -oE "iPhone [0-9]+[^(]*" | head -1 | xargs || echo "iPhone 16 Pro")
+          echo "Simulateur : $DEVICE"
+          xcodebuild \
+            -project ClipFlow.xcodeproj \
+            -scheme ClipFlow \
+            -destination "platform=iOS Simulator,name=$DEVICE" \
+            CODE_SIGNING_ALLOWED=NO \
+            test
