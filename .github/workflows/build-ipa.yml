@@ -12,19 +12,17 @@ on:
 jobs:
   build:
     # Image macOS avec Xcode 26 (SDK iOS 26 requis par le projet).
-    # Si le label macos-26 n'existe pas encore : remplacer par macos-latest
-    # et vérifier la version Xcode listée à l'étape "Versions disponibles".
+    # AUCUNE action GitHub (uses:) dans ce job : clone git direct et publication
+    # en release via gh préinstallé — insensible aux pannes du service de
+    # résolution d'actions ("Failed to resolve action download info").
     runs-on: macos-26
     timeout-minutes: 40
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Versions disponibles
+      - name: Cloner le dépôt
         run: |
-          ls /Applications | grep -i xcode || true
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-version
+          git clone --depth 1 --branch "${GITHUB_REF_NAME}" \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" src
 
       - name: Sélectionner Xcode 26 si présent
         run: |
@@ -35,6 +33,7 @@ jobs:
           xcodebuild -version
 
       - name: Compiler (sans signature)
+        working-directory: src
         run: |
           set -o pipefail
           xcodebuild \
@@ -49,18 +48,23 @@ jobs:
             build
 
       - name: Empaqueter l'IPA
+        working-directory: src
         run: |
           mkdir -p Payload
           cp -R "build/Build/Products/Release-iphoneos/ClipFlow.app" Payload/
           zip -qry ClipFlow-unsigned.ipa Payload
           ls -la ClipFlow-unsigned.ipa
 
-      - name: Publier l'artefact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ClipFlow-ipa
-          path: ClipFlow-unsigned.ipa
-          retention-days: 14
+      - name: Publier en release
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-${{ github.run_number }}-r${{ github.run_attempt }}"
+          gh release create "$TAG" ClipFlow-unsigned.ipa \
+            --title "IPA $TAG (${GITHUB_SHA:0:7})" \
+            --notes "IPA non signée — à signer avec Sideloadly." \
+            -R "${{ github.repository }}"
 
   tests:
     runs-on: macos-26
