@@ -344,7 +344,10 @@ final class VideoRenderPipeline {
 
     // MARK: - Vérification
 
-    /// Durée et nombre d'images du fichier rendu (comptage passthrough exact).
+    /// Durée et nombre d'images du fichier rendu.
+    /// Comptage en DÉCODANT : le mode passthrough peut regrouper ou ajouter des
+    /// échantillons conteneur (observé : +4 constants) ; seuls les buffers
+    /// décodés comptent les images réellement présentées.
     static func verify(outputURL: URL) async throws -> (duration: Double, frameCount: Int) {
         let asset = AVURLAsset(url: outputURL)
         let duration = try await asset.load(.duration)
@@ -352,13 +355,21 @@ final class VideoRenderPipeline {
             throw RenderError.writerFailed("fichier produit sans piste vidéo")
         }
         let reader = try AVAssetReader(asset: asset)
-        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        ])
+        output.alwaysCopiesSampleData = false
         reader.add(output)
         guard reader.startReading() else {
             throw RenderError.writerFailed("relecture de vérification impossible")
         }
         var count = 0
-        while output.copyNextSampleBuffer() != nil { count += 1 }
+        while let sample = output.copyNextSampleBuffer() {
+            if CMSampleBufferGetImageBuffer(sample) != nil { count += 1 }
+        }
+        if reader.status == .failed {
+            throw RenderError.writerFailed("vérification interrompue : \(reader.error?.localizedDescription ?? "?")")
+        }
         return (duration.seconds, count)
     }
 }
