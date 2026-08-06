@@ -254,77 +254,90 @@ struct ProjectEditorView: View {
             .background(color.opacity(0.25), in: Capsule())
     }
 
+    /// Barre de commandes sur DEUX rangées : une seule ligne débordait de
+    /// l'écran en portrait (13 contrôles). Rangée 1 : transport ; rangée 2 :
+    /// actions sur la sélection.
     private var controlBar: some View {
-        HStack(spacing: 14) {
-            // Navigation manuelle entre rushes (aucun passage automatique).
-            Button { goToRush(offset: -1) } label: { Image(systemName: "chevron.backward.2") }
-                .disabled((currentRushIndex ?? 0) <= 0)
-                .keyboardShortcut(.leftArrow, modifiers: [.command])
-            Button { goToRush(offset: 1) } label: { Image(systemName: "chevron.forward.2") }
-                .disabled(currentRushIndex.map { $0 >= project.rushes.count - 1 } ?? true)
-                .keyboardShortcut(.rightArrow, modifiers: [.command])
-            // Saut direct au prochain rush sans passage validé.
-            Button { goToNextUntreatedRush() } label: { Image(systemName: "arrow.right.to.line") }
-                .disabled(project.rushes.isEmpty)
-                .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
+        VStack(spacing: 4) {
+            // Rangée transport.
+            HStack(spacing: 0) {
+                Group {
+                    // Navigation manuelle entre rushes (aucun passage automatique).
+                    Button { goToRush(offset: -1) } label: { Image(systemName: "chevron.backward.2") }
+                        .disabled((currentRushIndex ?? 0) <= 0)
+                        .keyboardShortcut(.leftArrow, modifiers: [.command])
+                    Button { goToRush(offset: 1) } label: { Image(systemName: "chevron.forward.2") }
+                        .disabled(currentRushIndex.map { $0 >= project.rushes.count - 1 } ?? true)
+                        .keyboardShortcut(.rightArrow, modifiers: [.command])
+                    // Saut direct au prochain rush sans passage validé.
+                    Button { goToNextUntreatedRush() } label: { Image(systemName: "arrow.right.to.line") }
+                        .disabled(project.rushes.isEmpty)
+                        .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
 
-            Divider().frame(height: 22)
+                    Divider().frame(height: 20)
 
-            // Bascule prévisualisation ralentie 0,5× (n'affecte pas l'export).
-            Button {
-                slowPreview.toggle()
-                playback.slowPreview = slowPreview
-                playback.refreshRate()
-            } label: {
-                Image(systemName: slowPreview ? "tortoise.fill" : "tortoise")
-            }
-            .foregroundStyle(slowPreview ? .blue : .primary)
-
-            // Image par image sur la sélection.
-            Button { nudgeSelection(frames: -1) } label: { Image(systemName: "backward.frame") }
-                .keyboardShortcut(.leftArrow, modifiers: [])
-            Button {
-                playback.isPlaying ? playback.pause() : playback.play()
-            } label: {
-                Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
-            }
-            .keyboardShortcut(.space, modifiers: [])
-            Button { nudgeSelection(frames: 1) } label: { Image(systemName: "forward.frame") }
-                .keyboardShortcut(.rightArrow, modifiers: [])
-
-            Button {
-                playSelectionLoop()
-            } label: {
-                Image(systemName: "repeat")
-            }
-            .disabled(selectionRange == nil)
-
-            Spacer()
-
-            Button {
-                showCategories = true
-            } label: {
-                Image(systemName: "tag")
-                    .overlay(alignment: .topTrailing) {
-                        if !pendingCategories.isEmpty {
-                            Circle().fill(.blue).frame(width: 8, height: 8).offset(x: 4, y: -4)
-                        }
+                    // Image par image sur la sélection.
+                    Button { nudgeSelection(frames: -1) } label: { Image(systemName: "backward.frame") }
+                        .keyboardShortcut(.leftArrow, modifiers: [])
+                        .disabled(selectionRange == nil)
+                    Button {
+                        playback.isPlaying ? playback.pause() : playback.play()
+                    } label: {
+                        Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
                     }
-            }
+                    .keyboardShortcut(.space, modifiers: [])
+                    Button { nudgeSelection(frames: 1) } label: { Image(systemName: "forward.frame") }
+                        .keyboardShortcut(.rightArrow, modifiers: [])
+                        .disabled(selectionRange == nil)
 
-            Button("Rejeter", role: .destructive) {
-                selectionRange = nil
-                selectionRushIndex = nil
-            }
-            .disabled(selectionRange == nil)
+                    // Boucle de la sélection courante.
+                    Button { playSelectionLoop() } label: { Image(systemName: "repeat") }
+                        .disabled(selectionRange == nil)
 
-            Button("Valider") { validateSelection() }
-                .buttonStyle(.borderedProminent)
+                    // Bascule prévisualisation ralentie 0,5× (n'affecte pas l'export).
+                    Button {
+                        slowPreview.toggle()
+                        playback.slowPreview = slowPreview
+                        playback.refreshRate()
+                    } label: {
+                        Image(systemName: slowPreview ? "tortoise.fill" : "tortoise")
+                    }
+                    .foregroundStyle(slowPreview ? .blue : .primary)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .font(.title3)
+
+            // Rangée actions.
+            HStack(spacing: 14) {
+                Button {
+                    showCategories = true
+                } label: {
+                    Image(systemName: "tag")
+                        .overlay(alignment: .topTrailing) {
+                            if !pendingCategories.isEmpty {
+                                Circle().fill(.blue).frame(width: 8, height: 8).offset(x: 4, y: -4)
+                            }
+                        }
+                }
+                .font(.title3)
+
+                Spacer()
+
+                Button("Rejeter", role: .destructive) {
+                    selectionRange = nil
+                    selectionRushIndex = nil
+                }
                 .disabled(selectionRange == nil)
-                .keyboardShortcut(.return, modifiers: [])
+
+                Button("Valider") { validateSelection() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selectionRange == nil)
+                    .keyboardShortcut(.return, modifiers: [])
+            }
         }
-        .font(.title3)
-        .padding(10)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     @ToolbarContentBuilder
@@ -412,14 +425,15 @@ struct ProjectEditorView: View {
         jump(toRushIndex: min(max((currentRushIndex ?? 0) + offset, 0), rushes.count - 1))
     }
 
-    /// Saute au prochain rush SANS passage validé (recherche circulaire).
+    /// Saute au prochain rush SANS passage validé (recherche circulaire,
+    /// logique pure dans TriageNavigation — testée unitairement).
     private func goToNextUntreatedRush() {
         let rushes = project.orderedRushes
-        guard !rushes.isEmpty else { return }
-        let start = (currentRushIndex ?? -1) + 1
-        let order = Array(start..<rushes.count) + Array(0..<min(start, rushes.count))
-        guard let target = order.first(where: { rushes[$0].passages.isEmpty }) else {
-            errorMessage = "Tous les rushes ont au moins un passage validé. 🎉"
+        let treated = rushes.map { !$0.passages.isEmpty }
+        guard let target = TriageNavigation.nextUntreatedIndex(after: currentRushIndex, treated: treated) else {
+            if !rushes.isEmpty {
+                errorMessage = "Tous les rushes ont au moins un passage validé. 🎉"
+            }
             return
         }
         jump(toRushIndex: target)
