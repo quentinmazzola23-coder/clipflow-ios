@@ -17,7 +17,7 @@ import Observation
 final class ProxyPlaybackEngine {
 
     let player = AVPlayer()
-    private var currentProxyPath: String?
+    private var currentKey: String?
     private var loopRange: CMTimeRange?
     private var timeObserver: Any?
     private(set) var isPlaying = false
@@ -38,17 +38,28 @@ final class ProxyPlaybackEngine {
         }
     }
 
-    /// Charge le proxy d'un rush (sans relancer si déjà chargé).
-    func load(proxyPath: String?) {
-        guard proxyPath != currentProxyPath else { return }
-        currentProxyPath = proxyPath
+    /// Charge la meilleure source de lecture d'un rush : proxy si prêt,
+    /// sinon repli sur le fichier ORIGINAL (décodage matériel AVPlayer —
+    /// permet de visualiser immédiatement pendant la génération des proxys).
+    func load(rush: Rush?) {
+        var url: URL?
+        if let proxyPath = rush?.proxyRelativePath {
+            let candidate = StorageManager.url(forProxyRelativePath: proxyPath)
+            if FileManager.default.fileExists(atPath: candidate.path) { url = candidate }
+        }
+        if url == nil, let sourcePath = rush?.localSourceRelativePath {
+            let candidate = StorageManager.url(forSourceRelativePath: sourcePath)
+            if FileManager.default.fileExists(atPath: candidate.path) { url = candidate }
+        }
+        let key = url?.path
+        guard key != currentKey else { return }
+        currentKey = key
         loopRange = nil
         pause()
-        guard let proxyPath else {
+        guard let url else {
             player.replaceCurrentItem(with: nil)
             return
         }
-        let url = StorageManager.url(forProxyRelativePath: proxyPath)
         player.replaceCurrentItem(with: AVPlayerItem(url: url))
     }
 

@@ -102,9 +102,9 @@ struct ReviewView: View {
 
     private func playOne(_ passage: Passage) {
         stopPlayAll()
-        guard let proxyPath = passage.rush?.proxyRelativePath else { return }
+        guard let rush = passage.rush else { return }
         currentPassageID = passage.persistentModelID
-        playback.load(proxyPath: proxyPath)
+        playback.load(rush: rush)
         playback.playLoop(range: passage.sourceRange)
     }
 
@@ -115,9 +115,9 @@ struct ReviewView: View {
         playAllTask = Task {
             for passage in passages {
                 guard !Task.isCancelled else { break }
-                guard let proxyPath = passage.rush?.proxyRelativePath else { continue }
+                guard let rush = passage.rush else { continue }
                 currentPassageID = passage.persistentModelID
-                playback.load(proxyPath: proxyPath)
+                playback.load(rush: rush)
                 playback.playLoop(range: passage.sourceRange)
                 // Durée de lecture réelle du segment source (les proxys conservent
                 // la base de temps du rush).

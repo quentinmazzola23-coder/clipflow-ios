@@ -166,18 +166,25 @@ actor ProxyGenerator {
         writer.startSession(atSourceTime: .zero)
 
         // Pompage des échantillons — timestamps source préservés tels quels.
+        // ATTENTION : le système peut rappeler ce bloc APRÈS la fin du flux ;
+        // `finished` (sérialisé par pumpQueue) garantit une reprise UNIQUE de la
+        // continuation — sans lui, double resume = crash immédiat.
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let pumpQueue = DispatchQueue(label: "clipflow.proxy.pump")
+            var finished = false
             writerInput.requestMediaDataWhenReady(on: pumpQueue) {
+                guard !finished else { return }
                 while writerInput.isReadyForMoreMediaData {
                     if let sample = readerOutput.copyNextSampleBuffer() {
                         if !writerInput.append(sample) {
+                            finished = true
                             reader.cancelReading()
                             writerInput.markAsFinished()
                             continuation.resume(throwing: writer.error ?? NSError(domain: "ClipFlow.Proxy", code: 2))
                             return
                         }
                     } else {
+                        finished = true
                         writerInput.markAsFinished()
                         continuation.resume()
                         return

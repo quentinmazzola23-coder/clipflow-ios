@@ -49,9 +49,10 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
     var onSelectionDrag: ((Double) -> Void)?      // delta en secondes (déjà affiné si besoin)
     var onSelectionDragEnded: (() -> Void)?
 
-    // Zoom : points par seconde.
+    // Zoom : points par seconde. Minimum très bas = vue globale du montage
+    // (2 pt/s ≈ 3 min de rushes visibles par écran) pour naviguer vite.
     private var pointsPerSecond: CGFloat = 60 {
-        didSet { pointsPerSecond = min(max(pointsPerSecond, 8), 600) }
+        didSet { pointsPerSecond = min(max(pointsPerSecond, 2), 600) }
     }
     private let tileWidth: CGFloat = 60
     private let scrollView = UIScrollView()
@@ -239,11 +240,13 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
             separatorLayers.append(separator)
 
             let label = CATextLayer()
-            label.string = segment.title
-            label.fontSize = 10
+            label.string = " \(segment.title) "
+            label.fontSize = 11
             label.foregroundColor = UIColor.white.cgColor
+            label.backgroundColor = UIColor.black.withAlphaComponent(0.65).cgColor
+            label.cornerRadius = 3
             label.contentsScale = UIScreen.main.scale
-            label.frame = CGRect(x: x(forTime: segment.startOffset) + 4, y: 1, width: 200, height: 12)
+            label.frame = CGRect(x: x(forTime: segment.startOffset) + 3, y: 1, width: 190, height: 14)
             contentView.layer.addSublayer(label)
             labelLayers.append(label)
         }
@@ -359,16 +362,29 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
 
 // MARK: - Pont SwiftUI
 
+/// Demande de positionnement one-shot : le jeton garantit UNE seule application
+/// (un temps brut ré-appliqué à chaque rafraîchissement SwiftUI figeait le scroll).
+struct ProgrammaticSeek: Equatable {
+    var token: Int
+    var time: Double
+}
+
 struct TimelineView: UIViewRepresentable {
     var segments: [TimelineSegment]
     var overlays: [TimelineOverlay]
-    /// Temps global imposé de l'extérieur (suivi de lecture) ; nil = libre.
-    var programmaticTime: Double?
+    /// Positionnement demandé de l'extérieur (boutons rush précédent/suivant...).
+    var seek: ProgrammaticSeek?
 
     var onScrub: (Double) -> Void
     var onTap: (Double) -> Void
     var onSelectionDrag: (Double) -> Void
     var onSelectionDragEnded: () -> Void
+
+    final class Coordinator {
+        var lastAppliedToken = -1
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> TimelineUIView {
         let view = TimelineUIView()
@@ -386,8 +402,13 @@ struct TimelineView: UIViewRepresentable {
         view.onTap = onTap
         view.onSelectionDrag = onSelectionDrag
         view.onSelectionDragEnded = onSelectionDragEnded
-        if let time = programmaticTime {
-            view.setPlayhead(time: time, animated: false)
+        if let seek, seek.token != context.coordinator.lastAppliedToken {
+            context.coordinator.lastAppliedToken = seek.token
+            // Différé d'un cycle : garantit un layout à jour après un changement
+            // de segments dans la même passe.
+            DispatchQueue.main.async {
+                view.setPlayhead(time: seek.time, animated: false)
+            }
         }
     }
 }

@@ -11,6 +11,7 @@ import SwiftUI
 import SwiftData
 import PhotosUI
 import AVFoundation
+import AudioToolbox
 
 struct ProjectEditorView: View {
     @Bindable var project: ClipProject
@@ -20,13 +21,16 @@ struct ProjectEditorView: View {
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var importProgress: ImportProgress?
     @State private var importTask: Task<Void, Never>?
+    @State private var importStartedAt: Date?
 
     // Proxys.
     @State private var proxyStatus: ProxyGenerationStatus?
 
-    // Navigation temporelle.
+    // Navigation temporelle. Le positionnement externe passe par un jeton
+    // one-shot (voir ProgrammaticSeek).
     @State private var playhead: Double = 0
-    @State private var programmaticTime: Double?
+    @State private var seek: ProgrammaticSeek?
+    @State private var seekCounter = 0
 
     // Sélection courante (temps LOCAL au rush, base source).
     @State private var selectionRushIndex: Int?
@@ -116,13 +120,13 @@ struct ProjectEditorView: View {
                 TimelineView(
                     segments: segments,
                     overlays: overlays,
-                    programmaticTime: programmaticTime,
+                    seek: seek,
                     onScrub: handleScrub,
                     onTap: handleTap,
                     onSelectionDrag: handleSelectionDrag,
                     onSelectionDragEnded: persistAfterMove
                 )
-                .frame(height: isLandscape ? 120 : 150)
+                .frame(height: isLandscape ? 140 : 170)
                 controlBar
             }
         }
@@ -158,44 +162,57 @@ struct ProjectEditorView: View {
     private var playerArea: some View {
         ZStack {
             PlayerLayerView(player: playback.player)
-            if project.rushes.isEmpty {
+            if project.rushes.isEmpty && importProgress == nil {
                 ContentUnavailableView(
                     "Aucun rush",
                     systemImage: "photo.badge.plus",
                     description: Text("Importez des vidéos avec le bouton +.")
                 )
             }
+            if let progress = importProgress {
+                ImportProgressCard(
+                    progress: progress,
+                    startedAt: importStartedAt,
+                    onCancel: { importTask?.cancel() }
+                )
+            }
         }
         .onChange(of: currentRushIndex) { _, _ in
-            playback.load(proxyPath: currentRush?.proxyRelativePath)
+            playback.load(rush: currentRush)
         }
     }
 
     private var statusBar: some View {
         HStack(spacing: 10) {
             if let rush = currentRush, let index = currentRushIndex {
-                Text("Rush \(index + 1)/\(project.rushes.count) — \(rush.originalFilename)")
-                    .font(.caption)
+                Text("Rush \(index + 1)/\(project.rushes.count)")
+                    .font(.footnote.bold().monospacedDigit())
+                Text(rush.originalFilename)
+                    .font(.footnote)
                     .lineLimit(1)
+                    .foregroundStyle(.secondary)
+                Text(String(format: "%.1f s", rush.duration.seconds))
+                    .font(.footnote.monospacedDigit())
+                    .foregroundStyle(.secondary)
                 availabilityBadge(rush.availability)
+            } else {
+                Text("Touchez la timeline pour créer une sélection de \(project.finalDuration.label)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
-            if let progress = importProgress, progress.completed < progress.total {
+            if let status = proxyStatus, status.completed < status.totalQueued {
                 HStack(spacing: 4) {
-                    ProgressView(value: Double(progress.completed), total: Double(progress.total))
-                        .frame(width: 70)
-                    Text("Import \(progress.completed)/\(progress.total)").font(.caption2)
-                    Button("Annuler") { importTask?.cancel() }.font(.caption2)
+                    ProgressView().controlSize(.mini)
+                    Text("Proxys \(status.completed)/\(status.totalQueued)")
+                        .font(.footnote.monospacedDigit())
                 }
-            } else if let status = proxyStatus, status.completed < status.totalQueued {
-                Text("Proxys \(status.completed)/\(status.totalQueued)")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
+                .foregroundStyle(.orange)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(.black.opacity(0.85))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.black.opacity(0.9))
         .foregroundStyle(.white)
     }
 
@@ -217,6 +234,16 @@ struct ProjectEditorView: View {
 
     private var controlBar: some View {
         HStack(spacing: 14) {
+            // Navigation manuelle entre rushes (aucun passage automatique).
+            Button { goToRush(offset: -1) } label: { Image(systemName: "chevron.backward.2") }
+                .disabled((currentRushIndex ?? 0) <= 0)
+                .keyboardShortcut(.leftArrow, modifiers: [.command])
+            Button { goToRush(offset: 1) } label: { Image(systemName: "chevron.forward.2") }
+                .disabled(currentRushIndex.map { $0 >= project.rushes.count - 1 } ?? true)
+                .keyboardShortcut(.rightArrow, modifiers: [.command])
+
+            Divider().frame(height: 22)
+
             // Image par image sur la sélection.
             Button { nudgeSelection(frames: -1) } label: { Image(systemName: "backward.frame") }
                 .keyboardShortcut(.leftArrow, modifiers: [])
@@ -269,7 +296,9 @@ struct ProjectEditorView: View {
         ToolbarItem(placement: .topBarTrailing) {
             PhotosPicker(
                 selection: $pickerItems,
-                selectionBehavior: .ordered,     // ordre de sélection visible
+                selectionBehavior: .default,     // .default = sélection rapide par
+                                                 // glissement du doigt (le mode
+                                                 // .ordered la désactivait)
                 matching: .videos,               // vidéos uniquement
                 preferredItemEncoding: .current  // encodage original privilégié
             ) {
@@ -325,11 +354,23 @@ struct ProjectEditorView: View {
 
     private func handleScrub(_ globalTime: Double) {
         playhead = globalTime
-        programmaticTime = nil
         guard let index = rushIndex(atGlobalTime: globalTime) else { return }
         let local = globalTime - segmentStart(rushIndex: index)
-        playback.load(proxyPath: project.orderedRushes[index].proxyRelativePath)
+        playback.load(rush: project.orderedRushes[index])
         playback.seek(to: CMTime(seconds: local, preferredTimescale: 600))
+    }
+
+    /// Déplacement manuel vers le rush précédent (-1) ou suivant (+1).
+    private func goToRush(offset: Int) {
+        let rushes = project.orderedRushes
+        guard !rushes.isEmpty else { return }
+        let target = min(max((currentRushIndex ?? 0) + offset, 0), rushes.count - 1)
+        let time = segmentStart(rushIndex: target)
+        playhead = time
+        seekCounter += 1
+        seek = ProgrammaticSeek(token: seekCounter, time: time)
+        playback.load(rush: rushes[target])
+        playback.seek(to: .zero)
     }
 
     private func handleTap(_ globalTime: Double) {
@@ -374,7 +415,7 @@ struct ProjectEditorView: View {
 
     private func playSelectionLoop() {
         guard let index = selectionRushIndex, let range = selectionRange else { return }
-        playback.load(proxyPath: project.orderedRushes[index].proxyRelativePath)
+        playback.load(rush: project.orderedRushes[index])
         playback.playLoop(range: range)
     }
 
@@ -406,12 +447,10 @@ struct ProjectEditorView: View {
         // Mise en cache de la plage source pleine qualité (export hors-ligne).
         cacheSourceRange(for: passage, rush: rush)
 
-        // Passage au rush suivant.
-        if index + 1 < project.orderedRushes.count {
-            let nextStart = segmentStart(rushIndex: index + 1)
-            playhead = nextStart
-            programmaticTime = nextStart
-        }
+        // AUCUN passage automatique au rush suivant : l'interface reste
+        // exactement sur le rush et la position courants ; navigation manuelle
+        // via les boutons rush précédent/suivant.
+        _ = index
     }
 
     /// Copie passthrough (sans réencodage) de la plage sélectionnée + marge,
@@ -454,16 +493,26 @@ struct ProjectEditorView: View {
 
     private func startImport(_ items: [PhotosPickerItem]) {
         pickerItems = []
+        importStartedAt = .now
         importTask = Task {
             do {
                 let imported = try await PhotoImporter.importItems(items) { progress in
                     importProgress = progress
                 }
                 await integrate(imported)
+                // Recale la timeline sur la position courante après le
+                // redimensionnement du contenu (nouveaux rushes ajoutés).
+                seekCounter += 1
+                seek = ProgrammaticSeek(token: seekCounter, time: playhead)
+                playback.load(rush: currentRush)
+                // Signal de fin : son système + haptique de succès.
+                AudioServicesPlaySystemSound(1001)
+                validateHaptic.notificationOccurred(.success)
             } catch {
                 errorMessage = "Importation interrompue : \(error.localizedDescription)"
             }
             importProgress = nil
+            importStartedAt = nil
             importTask = nil
         }
     }
@@ -539,5 +588,66 @@ struct ProjectEditorView: View {
     private func touch() {
         project.updatedAt = .now
         try? modelContext.save()
+    }
+}
+
+// MARK: - Carte de progression d'importation
+
+/// Progression détaillée : pourcentage, barre, estimation du temps restant,
+/// annulation. Le signal sonore de fin est joué par startImport.
+private struct ImportProgressCard: View {
+    let progress: ImportProgress
+    let startedAt: Date?
+    let onCancel: () -> Void
+
+    private var fraction: Double {
+        guard progress.total > 0 else { return 0 }
+        return Double(progress.completed) / Double(progress.total)
+    }
+
+    /// Estimation à partir de la moyenne par élément déjà importé.
+    private var remainingText: String? {
+        guard let startedAt, progress.completed >= 1, progress.completed < progress.total else { return nil }
+        let elapsed = Date.now.timeIntervalSince(startedAt)
+        let perItem = elapsed / Double(progress.completed)
+        let remaining = perItem * Double(progress.total - progress.completed)
+        if remaining < 60 {
+            return String(format: "≈ %.0f s restantes", remaining)
+        }
+        return String(format: "≈ %d min %02d s restantes", Int(remaining) / 60, Int(remaining) % 60)
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Label("Importation en cours", systemImage: "square.and.arrow.down")
+                .font(.headline)
+            ProgressView(value: fraction)
+                .progressViewStyle(.linear)
+                .tint(.blue)
+            HStack {
+                Text("\(Int((fraction * 100).rounded())) %")
+                    .font(.title2.bold().monospacedDigit())
+                Spacer()
+                Text("\(progress.completed)/\(progress.total) vidéos")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            if let remainingText {
+                Text(remainingText)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            if !progress.errors.isEmpty {
+                Text("\(progress.errors.count) erreur(s) — détails en fin d'importation")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            Button("Annuler l'importation", role: .destructive, action: onCancel)
+                .font(.subheadline)
+        }
+        .padding(18)
+        .frame(maxWidth: 340)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .padding()
     }
 }
