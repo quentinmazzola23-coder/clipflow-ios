@@ -180,6 +180,7 @@ struct ProjectEditorView: View {
             Text("Supprime les copies locales des rushes dont tous les passages sont déjà mis en cache pour l'export. Les originaux dans Photos ne sont jamais touchés. Une nouvelle sélection dans un rush libéré ne pourra plus être exportée sans réimporter la vidéo.")
         }
         .task { await observeProxyStatus() }
+        .task { await regenerateMissingProxies() }
         .onAppear {
             RenderQueueController.shared.configure(container: modelContext.container)
             // La timeline suit la lecture (le scrubbing manuel, lui, met en pause).
@@ -760,6 +761,38 @@ struct ProjectEditorView: View {
                 }
             }
         })
+    }
+
+    /// Régénère les proxys manquants (supprimés via la page Stockage, purgés
+    /// par le système, ou après changement 144p/240p) à l'ouverture du projet.
+    @MainActor
+    private func regenerateMissingProxies() async {
+        for rush in project.orderedRushes {
+            let proxyMissing = rush.proxyRelativePath.map {
+                !FileManager.default.fileExists(atPath: StorageManager.url(forProxyRelativePath: $0).path)
+            } ?? true
+            guard proxyMissing,
+                  let sourcePath = rush.localSourceRelativePath,
+                  FileManager.default.fileExists(atPath: StorageManager.url(forSourceRelativePath: sourcePath).path)
+            else { continue }
+
+            let sourceURL = StorageManager.url(forSourceRelativePath: sourcePath)
+            let proxyName = "proxy-\(UUID().uuidString).mp4"
+            let rushID = rush.persistentModelID
+            await ProxyGenerator.shared.enqueue(ProxyGenerator.ProxyJob(
+                sourceURL: sourceURL,
+                proxyFilename: proxyName,
+                use240p: project.proxy240p
+            ) { relativePath in
+                await MainActor.run {
+                    if let saved = self.modelContext.model(for: rushID) as? Rush {
+                        saved.proxyRelativePath = relativePath
+                        saved.availability = MediaAvailabilityService.evaluate(rush: saved)
+                        try? self.modelContext.save()
+                    }
+                }
+            })
+        }
     }
 
     /// Rejoue le tri chronologique (cascade de replis) sur tous les rushes.
