@@ -229,12 +229,20 @@ final class VideoRenderPipeline {
         var outputFrameIndex = 0
 
         /// Avance le décodeur jusqu'à l'index demandé (séquentiel strict).
+        /// Les images décodées avant le premier timestamp attendu (pré-roll
+        /// éventuel du décodeur) sont ignorées pour rester aligné avec la
+        /// liste de timestamps de la passe 1.
+        let firstExpectedPTS = sourcePTS[0]
         func advanceTo(index: Int) throws {
             while sourceIndex < index {
                 guard let sample = readerOutput.copyNextSampleBuffer() else {
                     throw RenderError.readerFailed("fin de flux prématurée (image \(index))")
                 }
                 guard let imageBuffer = CMSampleBufferGetImageBuffer(sample) else { continue }
+                let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                if CMTimeCompare(pts, CMTimeSubtract(firstExpectedPTS, FramePlanner.matchTolerance)) < 0 {
+                    continue // pré-roll : avant la plage attendue
+                }
                 previousBuffer = currentBuffer
                 currentBuffer = imageBuffer
                 sourceIndex += 1
@@ -351,7 +359,15 @@ final class VideoRenderPipeline {
         var timestamps: [CMTime] = []
         while let sample = output.copyNextSampleBuffer() {
             let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-            if pts.isValid { timestamps.append(pts) }
+            // FILTRAGE STRICT à la plage : en passthrough, le reader livre
+            // aussi les échantillons de pré-roll depuis l'image clé précédant
+            // la plage. Sans ce filtre, la liste de timestamps est décalée par
+            // rapport à la passe décodée → les premières images de sortie
+            // pointaient sur de mauvaises images sources (début « lent » puis
+            // accélération brutale).
+            if pts.isValid, CMTimeRangeContainsTime(range, time: pts) {
+                timestamps.append(pts)
+            }
         }
         timestamps.sort { CMTimeCompare($0, $1) < 0 }
         return timestamps

@@ -12,6 +12,7 @@ import Foundation
 import SwiftData
 import CoreMedia
 import Observation
+import UIKit
 
 /// Progression publiée vers l'interface.
 struct RenderQueueSnapshot: Sendable {
@@ -154,6 +155,20 @@ final class RenderQueueController {
             snapshot.currentPassageName = filename
             snapshot.currentProgress = 0
             try? context.save() // état persistant AVANT le rendu
+
+            // Tâche de fond système : si l'écran se verrouille pendant le
+            // rendu, iOS accorde ~30 s — assez pour TERMINER le clip en cours
+            // (pas pour enchaîner ; le reste reprend à la réouverture).
+            var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+            backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "ClipFlow.Render") {
+                UIApplication.shared.endBackgroundTask(backgroundTask)
+                backgroundTask = .invalid
+            }
+            defer {
+                if backgroundTask != .invalid {
+                    UIApplication.shared.endBackgroundTask(backgroundTask)
+                }
+            }
 
             do {
                 let result = try await VideoRenderPipeline.render(job: job) { progress in

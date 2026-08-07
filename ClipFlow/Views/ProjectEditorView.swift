@@ -214,6 +214,10 @@ struct ProjectEditorView: View {
                 handlePlaybackTick(time)
             }
         }
+        .onDisappear {
+            // Retour à la liste des projets : la lecture s'arrête toujours.
+            playback.pause()
+        }
     }
 
     // MARK: - Sous-vues
@@ -576,14 +580,13 @@ struct ProjectEditorView: View {
 
     private func handleSelectionDrag(_ deltaSeconds: Double) {
         guard let index = selectionRushIndex, let range = selectionRange else { return }
-        // Pendant le déplacement : lecture suspendue (la boucle repartira du
-        // nouvel emplacement au relâcher).
-        if playback.isPlaying {
-            playback.pause()
-        }
         let rush = project.orderedRushes[index]
         let delta = CMTime(seconds: deltaSeconds, preferredTimescale: 600)
-        selectionRange = SelectionEngine.move(range, by: delta, rushDuration: rush.duration)
+        let moved = SelectionEngine.move(range, by: delta, rushDuration: rush.duration)
+        selectionRange = moved
+        // La boucle SUIT le doigt : relance depuis le nouveau début à chaque
+        // mouvement (seeks coalescés dans le moteur — fluide, pas de tempête).
+        playback.dragLoop(range: moved)
     }
 
     private func persistAfterMove() {

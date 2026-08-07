@@ -2,9 +2,14 @@
 //  PlayerView.swift
 //  ClipFlow
 //
-//  Visionneuse basée sur les PROXYS (jamais les 4K pendant la navigation).
-//  Gère : lecture simple, lecture en boucle d'une sélection, seek de scrubbing
-//  à tolérance nulle (proxys tout-intra → seek instantané).
+//  Moteur de lecture basé sur AVQueuePlayer + AVPlayerLooper :
+//  les boucles de sélection sont SANS COUTURE (le système précharge
+//  l'itération suivante — aucun hoquet au rebouclage, contrairement à un
+//  seek manuel qui redécode depuis l'image clé à chaque tour).
+//
+//  Pendant le déplacement de la sélection, un mode « boucle légère »
+//  (seeks coalescés) suit le doigt ; au relâcher, la vraie boucle
+//  AVPlayerLooper prend le relais.
 //
 
 import SwiftUI
@@ -16,87 +21,129 @@ import Observation
 @Observable
 final class ProxyPlaybackEngine {
 
-    let player = AVPlayer()
-    private var currentKey: String?
-    private var loopRange: CMTimeRange?
+    let player = AVQueuePlayer()
+
+    private var currentURL: URL?
+    private var looper: AVPlayerLooper?
+    private var looperDuration: Double?
+    /// Boucle légère du mode glissement (seeks coalescés, sans looper).
+    private var manualLoopRange: CMTimeRange?
+    private var seekInFlight = false
+    private var pendingSeekTarget: CMTime?
     private var timeObserver: Any?
     private(set) var isPlaying = false
 
-    /// Prévisualisation au ralenti 0,5× (bascule tortue). N'affecte que la
-    /// lecture — l'export n'en dépend jamais. La préview 0,5× est saccadée
-    /// (pas d'interpolation ici) ; le rendu final, lui, est interpolé.
+    /// Prévisualisation au ralenti 0,5× (bascule tortue). Lecture uniquement.
     var slowPreview = false
     private var playbackRate: Float { slowPreview ? 0.5 : 1.0 }
 
-    /// Rappel périodique (~60 Hz) du temps de lecture courant — permet à la
-    /// timeline de suivre la lecture. Appelé sur le MainActor.
+    /// Rappel périodique pendant la lecture (suivi de timeline).
     var onTick: ((CMTime) -> Void)?
+
+    /// Durée de la boucle active (nil si lecture libre).
+    var activeLoopDuration: Double? { looperDuration ?? manualLoopRange?.duration.seconds }
 
     init() {
         player.automaticallyWaitsToMinimizeStalling = false
-        // Observation périodique pour le bouclage de sélection.
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(value: 1, timescale: 60),
             queue: .main
         ) { [weak self] time in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                if self.isPlaying {
-                    self.onTick?(time)
-                }
-                guard let range = self.loopRange, self.isPlaying else { return }
-                if CMTimeCompare(time, range.end) >= 0 {
-                    await self.player.seek(to: range.start, toleranceBefore: .zero, toleranceAfter: .zero)
+                guard let self, self.isPlaying else { return }
+                self.onTick?(time)
+                // Rebouclage de la boucle LÉGÈRE uniquement (le looper gère la sienne).
+                if let range = self.manualLoopRange,
+                   CMTimeCompare(time, range.end) >= 0 {
+                    self.requestSeek(to: range.start)
                 }
             }
         }
     }
 
-    /// Durée de la boucle active (nil si lecture libre) — l'interface s'en
-    /// sert pour ne pas faire défiler la timeline pendant les boucles courtes.
-    var activeLoopDuration: Double? { loopRange?.duration.seconds }
+    // MARK: - Chargement
 
-    /// Charge le fichier ORIGINAL du rush (pas de proxys : lecture directe,
-    /// décodage matériel plafonné à 720p pour rester fluide en 4K).
+    private func makeItem(url: URL) -> AVPlayerItem {
+        let item = AVPlayerItem(url: url)
+        // Plafond 720p : netteté suffisante pour juger, décodage léger.
+        // L'export lit toujours la pleine résolution par ailleurs.
+        item.preferredMaximumResolution = CGSize(width: 1280, height: 720)
+        return item
+    }
+
+    /// Charge le fichier ORIGINAL du rush (lecture directe, sans proxys).
     func load(rush: Rush?) {
         var url: URL?
         if let sourcePath = rush?.localSourceRelativePath {
             let candidate = StorageManager.url(forSourceRelativePath: sourcePath)
             if FileManager.default.fileExists(atPath: candidate.path) { url = candidate }
         }
-        let key = url?.path
-        guard key != currentKey else { return }
-        currentKey = key
-        loopRange = nil
+        guard url?.path != currentURL?.path else { return }
+        currentURL = url
+        teardownLoops()
         pause()
-        guard let url else {
-            player.replaceCurrentItem(with: nil)
-            return
+        player.removeAllItems()
+        if let url {
+            player.insert(makeItem(url: url), after: nil)
         }
-        let item = AVPlayerItem(url: url)
-        // Plafond 720p : netteté suffisante pour juger, décodage léger.
-        // L'export lit toujours la pleine résolution par ailleurs.
-        item.preferredMaximumResolution = CGSize(width: 1280, height: 720)
-        player.replaceCurrentItem(with: item)
     }
 
-    /// Positionne la lecture (scrubbing) — tolérance nulle, proxy tout-intra.
+    private func teardownLoops() {
+        looper?.disableLooping()
+        looper = nil
+        looperDuration = nil
+        manualLoopRange = nil
+    }
+
+    // MARK: - Transport
+
+    /// Positionne la lecture (scrubbing) — tolérance nulle.
     func seek(to time: CMTime) {
         player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
+    /// Lecture libre (sans boucle).
     func play() {
-        loopRange = nil
+        teardownLoops()
+        rebuildSingleItemIfNeeded()
         player.playImmediately(atRate: playbackRate)
         isPlaying = true
     }
 
-    /// Lecture en boucle d'une plage (sélection ou rush entier).
+    /// Boucle SANS COUTURE d'une plage : AVPlayerLooper précharge chaque
+    /// itération — aucun hoquet au rebouclage.
     func playLoop(range: CMTimeRange) {
-        loopRange = range
-        player.seek(to: range.start, toleranceBefore: .zero, toleranceAfter: .zero)
+        guard let currentURL else { return }
+        teardownLoops()
+        player.pause()
+        player.removeAllItems()
+        looper = AVPlayerLooper(player: player, templateItem: makeItem(url: currentURL), timeRange: range)
+        looperDuration = range.duration.seconds
         player.playImmediately(atRate: playbackRate)
         isPlaying = true
+    }
+
+    /// Boucle LÉGÈRE pendant le glissement de la sélection : relance la
+    /// lecture depuis le nouveau début à chaque mouvement, avec des seeks
+    /// coalescés (jamais plus d'un seek en vol — pas de tempête de seeks).
+    func dragLoop(range: CMTimeRange) {
+        if looper != nil {
+            looper?.disableLooping()
+            looper = nil
+            looperDuration = nil
+            rebuildSingleItemIfNeeded()
+        }
+        manualLoopRange = range
+        requestSeek(to: range.start)
+        if !isPlaying {
+            player.playImmediately(atRate: playbackRate)
+            isPlaying = true
+        }
+    }
+
+    func pause() {
+        player.pause()
+        isPlaying = false
     }
 
     /// Applique immédiatement le changement de vitesse si une lecture est en cours.
@@ -106,9 +153,40 @@ final class ProxyPlaybackEngine {
         }
     }
 
-    func pause() {
-        player.pause()
-        isPlaying = false
+    // MARK: - Interne
+
+    /// Après un looper, la file contient les items de boucle : reconstruire
+    /// un item simple pour la lecture libre / le scrubbing.
+    private func rebuildSingleItemIfNeeded() {
+        guard let currentURL else { return }
+        if player.items().count != 1 || player.currentItem == nil {
+            player.removeAllItems()
+            player.insert(makeItem(url: currentURL), after: nil)
+        }
+    }
+
+    /// Seek coalescé : si un seek est déjà en vol, mémorise la dernière cible
+    /// et l'exécute à la fin du seek courant.
+    private func requestSeek(to target: CMTime) {
+        guard !seekInFlight else {
+            pendingSeekTarget = target
+            return
+        }
+        seekInFlight = true
+        player.seek(
+            to: target,
+            toleranceBefore: .zero,
+            toleranceAfter: CMTime(value: 1, timescale: 30)
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.seekInFlight = false
+                if let pending = self.pendingSeekTarget {
+                    self.pendingSeekTarget = nil
+                    self.requestSeek(to: pending)
+                }
+            }
+        }
     }
 }
 
