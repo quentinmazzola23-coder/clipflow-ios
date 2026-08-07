@@ -12,6 +12,7 @@ struct ProjectListView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \ClipProject.updatedAt, order: .reverse) private var projects: [ClipProject]
     @State private var showStorage = false
+    @State private var pendingDeletion: ClipProject?
 
     var body: some View {
         List {
@@ -20,7 +21,9 @@ struct ProjectListView: View {
                     ProjectRow(project: project)
                 }
             }
-            .onDelete(perform: deleteProjects)
+            .onDelete { offsets in
+                if let index = offsets.first { pendingDeletion = projects[index] }
+            }
         }
         .overlay {
             if projects.isEmpty {
@@ -56,6 +59,61 @@ struct ProjectListView: View {
         .sheet(isPresented: $showStorage) {
             NavigationStack { StorageView() }
         }
+        .confirmationDialog(
+            "Supprimer ce projet ?",
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Supprimer projet et fichiers (\(pendingDeletionSize))", role: .destructive) {
+                if let project = pendingDeletion {
+                    deleteProjectAndFiles(project)
+                }
+                pendingDeletion = nil
+            }
+            Button("Annuler", role: .cancel) { pendingDeletion = nil }
+        } message: {
+            Text("Supprime le projet, ses copies de rushes et ses caches sur l'iPhone. Les vidéos originales de Photos et les clips déjà exportés ne sont pas touchés.")
+        }
+    }
+
+    private var pendingDeletionSize: String {
+        guard let project = pendingDeletion else { return "" }
+        var bytes: Int64 = 0
+        for rush in project.rushes {
+            if let path = rush.localSourceRelativePath {
+                let url = StorageManager.url(forSourceRelativePath: path)
+                bytes += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            }
+        }
+        for passage in project.passages {
+            if let path = passage.cachedRangeRelativePath {
+                let url = StorageManager.url(forCachedRangeRelativePath: path)
+                bytes += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            }
+        }
+        return StorageManager.formatBytes(bytes)
+    }
+
+    /// La cascade SwiftData efface les entités, PAS les fichiers : suppression
+    /// disque explicite (sources copiées + plages cachées) — sinon fuite
+    /// d'espace silencieuse à chaque projet supprimé.
+    private func deleteProjectAndFiles(_ project: ClipProject) {
+        for rush in project.rushes {
+            if let path = rush.localSourceRelativePath {
+                try? FileManager.default.removeItem(at: StorageManager.url(forSourceRelativePath: path))
+            }
+        }
+        for passage in project.passages {
+            if let path = passage.cachedRangeRelativePath {
+                try? FileManager.default.removeItem(at: StorageManager.url(forCachedRangeRelativePath: path))
+            }
+        }
+        modelContext.delete(project)
+        try? modelContext.save()
+        ThumbnailCache.shared.clearMemory()
     }
 
     private func createProject() {
@@ -67,12 +125,6 @@ struct ProjectListView: View {
         try? modelContext.save()
     }
 
-    private func deleteProjects(at offsets: IndexSet) {
-        for index in offsets {
-            modelContext.delete(projects[index])
-        }
-        try? modelContext.save()
-    }
 }
 
 private struct ProjectRow: View {

@@ -161,10 +161,11 @@ final class RenderQueueController {
                         RenderQueueController.shared.snapshot.currentProgress = progress
                     }
                 }
-                try await PhotoExportService.saveToPhotos(fileURL: result.outputURL)
+                let assetID = try await PhotoExportService.saveToPhotos(fileURL: result.outputURL)
 
                 passage.exportState = .exported
                 passage.exportedFilename = filename
+                passage.exportedAssetIdentifier = assetID
                 passage.lastExportError = nil
                 project.nextExportNumber += 1
                 snapshot.finishedJobs += 1

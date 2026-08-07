@@ -19,8 +19,6 @@ struct ReviewView: View {
     @State private var playback = ProxyPlaybackEngine()
     @State private var playAllTask: Task<Void, Never>?
     @State private var currentPassageID: PersistentIdentifier?
-    @State private var editingPassage: Passage?
-    @State private var editingCategories: Set<String> = []
 
     /// Ordre de relecture = ordre de capture (rush, puis position dans le rush).
     private var reviewOrder: [Passage] {
@@ -66,12 +64,6 @@ struct ReviewView: View {
                         } label: {
                             Label("Supprimer", systemImage: "trash")
                         }
-                        Button {
-                            editingPassage = passage
-                            editingCategories = Set(passage.categories)
-                        } label: {
-                            Label("Catégories", systemImage: "tag")
-                        }
                     }
                 }
             }
@@ -86,14 +78,6 @@ struct ReviewView: View {
                     dismiss()
                 }
             }
-        }
-        .sheet(item: $editingPassage) { passage in
-            CategoryPanelView(groups: project.categoryGroups, selected: $editingCategories)
-                .presentationDetents([.medium])
-                .onDisappear {
-                    passage.categories = editingCategories.sorted()
-                    try? modelContext.save()
-                }
         }
         .onDisappear { stopPlayAll() }
     }
@@ -158,20 +142,11 @@ private struct PassageRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("\(passage.validationIndex + 1) · \(passage.rush?.originalFilename ?? "rush supprimé")")
                     .font(.subheadline)
-                HStack(spacing: 6) {
-                    Text(String(format: "%.2f s → %@",
-                                passage.sourceDuration.seconds,
-                                ExactDuration(centiseconds: passage.finalDurationCentiseconds).label))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    ForEach(passage.categories.prefix(3), id: \.self) { category in
-                        Text(category.split(separator: ":").last.map(String.init) ?? category)
-                            .font(.caption2)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color(.systemGray5), in: Capsule())
-                    }
-                }
+                Text(String(format: "%.2f s → %@",
+                            passage.sourceDuration.seconds,
+                            ExactDuration(centiseconds: passage.finalDurationCentiseconds).label))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
             if passage.exportState == .exported {

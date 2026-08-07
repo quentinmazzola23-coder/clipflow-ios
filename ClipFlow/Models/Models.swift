@@ -193,6 +193,8 @@ final class Passage {
     var cachedRangeOffsetTimescale: Int32 = 600
     var exportStateRaw: Int = ExportState.notExported.rawValue
     var exportedFilename: String?
+    /// Identifiant PhotoKit de l'asset exporté (album, relecture future).
+    var exportedAssetIdentifier: String?
     var lastExportError: String?
 
     var rush: Rush?

@@ -24,6 +24,9 @@ struct TimelineSegment: Equatable {
     var title: String
     /// Fichier original servant aux vignettes (nil si source indisponible).
     var mediaURL: URL?
+    /// Identité STABLE du rush pour le cache de vignettes — jamais l'index
+    /// (un réordonnancement mélangerait les images entre rushes).
+    var thumbKey: String
     var startOffset: Double   // secondes depuis le début de la timeline
     var duration: Double
 }
@@ -68,7 +71,6 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
 
     private var totalDuration: Double { segments.last.map { $0.startOffset + $0.duration } ?? 0 }
     private var lastRushIndexUnderPlayhead = -1
-    private var fineAdjust = false
     private var suppressScrubCallback = false
 
     private let boundaryHaptic = UIImpactFeedbackGenerator(style: .light)
@@ -89,7 +91,15 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
         playheadLayer.backgroundColor = UIColor.systemRed.cgColor
         layer.addSublayer(playheadLayer)
 
+        // Pose + ajustement en UN SEUL geste : appui ≥ 0,12 s → la sélection
+        // se pose immédiatement, glisser ajuste, relâcher lance la boucle.
+        let placeAndDrag = UILongPressGestureRecognizer(target: self, action: #selector(handlePlaceAndDrag(_:)))
+        placeAndDrag.minimumPressDuration = 0.12
+        scrollView.addGestureRecognizer(placeAndDrag)
+
+        // Toucher bref (< 0,12 s) : pose simple au relâcher.
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        tap.require(toFail: placeAndDrag)
         scrollView.addGestureRecognizer(tap)
 
         let drag = UIPanGestureRecognizer(target: self, action: #selector(handleSelectionDrag(_:)))
@@ -99,9 +109,12 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
         addGestureRecognizer(pinch)
 
-        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
-        longPress.minimumPressDuration = 0.4
-        scrollView.addGestureRecognizer(longPress)
+        // Double-tap à DEUX doigts : bascule zoom travail ↔ vue globale
+        // (deux doigts = aucun conflit avec la pose de sélection).
+        let zoomToggle = UITapGestureRecognizer(target: self, action: #selector(handleZoomToggle(_:)))
+        zoomToggle.numberOfTapsRequired = 2
+        zoomToggle.numberOfTouchesRequired = 2
+        scrollView.addGestureRecognizer(zoomToggle)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) non pris en charge") }
@@ -214,19 +227,19 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
     }
 
     /// Toutes les tuiles d'un rush partagent la MÊME image (milieu du rush) :
-    /// une seule génération par rush, puis cache instantané.
+    /// une seule génération par rush, puis cache instantané. Le cache est
+    /// indexé par l'identité du FICHIER (thumbKey), pas par la position.
     private func populate(tile: CALayer, segment: TimelineSegment, key: String) {
         guard let mediaURL = segment.mediaURL else { return }
         let midpoint = max(min(segment.duration / 2, segment.duration - 0.05), 0)
         let requestTime = CMTime(seconds: midpoint, preferredTimescale: 600)
-        let imageKey = "rush-\(segment.rushIndex)"
 
-        if let hit = ThumbnailCache.shared.cachedThumbnail(key: imageKey, time: requestTime) {
+        if let hit = ThumbnailCache.shared.cachedThumbnail(key: segment.thumbKey, time: requestTime) {
             tile.contents = hit.cgImage
             return
         }
         ThumbnailCache.shared.requestThumbnail(
-            fileURL: mediaURL, key: imageKey, time: requestTime
+            fileURL: mediaURL, key: segment.thumbKey, time: requestTime
         ) { [weak self] image in
             guard let self, let image else { return }
             // L'image arrive une fois : peupler TOUTES les tuiles du rush
@@ -307,30 +320,57 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
         onTap?(time(forX: location.x))
     }
 
-    @objc private func handleSelectionDrag(_ recognizer: UIPanGestureRecognizer) {
+    /// Appui maintenu : pose (ou saisit) la sélection puis l'ajuste en continu.
+    private var placeDragLastX: CGFloat = 0
+
+    @objc private func handlePlaceAndDrag(_ recognizer: UILongPressGestureRecognizer) {
+        let location = recognizer.location(in: contentView)
         switch recognizer.state {
+        case .began:
+            scrollView.isScrollEnabled = false
+            placeDragLastX = location.x
+            if currentSelectionFrame?.insetBy(dx: -12, dy: 0).contains(location) == true {
+                // Appui sur la sélection existante : simple saisie pour déplacer.
+                selectionHaptic.impactOccurred(intensity: 0.6)
+            } else {
+                // Appui ailleurs : pose immédiate, le glissement ajustera.
+                selectionHaptic.impactOccurred()
+                onTap?(time(forX: location.x))
+            }
         case .changed:
-            let translation = recognizer.translation(in: contentView)
-            recognizer.setTranslation(.zero, in: contentView)
-            var delta = Double(translation.x / pointsPerSecond)
-            if fineAdjust { delta /= 10 } // réglage fin après appui long
-            onSelectionDrag?(delta)
-        case .ended, .cancelled:
-            fineAdjust = false
+            let delta = Double((location.x - placeDragLastX) / pointsPerSecond)
+            placeDragLastX = location.x
+            if delta != 0 { onSelectionDrag?(delta) }
+        case .ended, .cancelled, .failed:
+            scrollView.isScrollEnabled = true
             onSelectionDragEnded?()
         default:
             break
         }
     }
 
-    @objc private func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
-        if recognizer.state == .began {
-            let location = recognizer.location(in: contentView)
-            if currentSelectionFrame?.contains(location) == true {
-                fineAdjust = true
-                selectionHaptic.impactOccurred()
-            }
+    @objc private func handleSelectionDrag(_ recognizer: UIPanGestureRecognizer) {
+        switch recognizer.state {
+        case .changed:
+            let translation = recognizer.translation(in: contentView)
+            recognizer.setTranslation(.zero, in: contentView)
+            let delta = Double(translation.x / pointsPerSecond)
+            onSelectionDrag?(delta)
+        case .ended, .cancelled:
+            onSelectionDragEnded?()
+        default:
+            break
         }
+    }
+
+    /// Deux niveaux de zoom mémorisés : travail (60 pt/s) ↔ vue globale (5 pt/s).
+    @objc private func handleZoomToggle(_ recognizer: UITapGestureRecognizer) {
+        let anchorTime = playheadTime
+        pointsPerSecond = pointsPerSecond > 15 ? 5 : 60
+        boundaryHaptic.impactOccurred()
+        setNeedsLayout()
+        layoutIfNeeded()
+        setPlayhead(time: anchorTime, animated: false)
     }
 
     @objc private func handlePinch(_ recognizer: UIPinchGestureRecognizer) {

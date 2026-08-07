@@ -35,11 +35,11 @@ struct ProjectEditorView: View {
 
     // UI.
     @State private var playback = ProxyPlaybackEngine()
-    @State private var showCategories = false
     @State private var showReview = false
     @State private var showExports = false
-    @State private var pendingCategories: Set<String> = []
     @State private var errorMessage: String?
+    @State private var exportToast: String?
+    @State private var showGrid = false
     @State private var slowPreview = false
     @State private var showReleaseConfirm = false
 
@@ -66,6 +66,7 @@ struct ProjectEditorView: View {
                 rushIndex: index,
                 title: isUUIDName ? "\(index + 1)" : "\(index + 1) · \(stem)",
                 mediaURL: rush.localSourceRelativePath.map { StorageManager.url(forSourceRelativePath: $0) },
+                thumbKey: rush.localSourceRelativePath ?? rush.originalFilename,
                 startOffset: offset,
                 duration: rush.duration.seconds
             )
@@ -144,12 +145,42 @@ struct ProjectEditorView: View {
         .navigationTitle(project.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
-        .sheet(isPresented: $showCategories) {
-            CategoryPanelView(groups: project.categoryGroups, selected: $pendingCategories)
-                .presentationDetents([.medium])
+        .overlay(alignment: .bottom) {
+            // Toast de fin d'exports : la file tourne en fond, l'utilisateur
+            // n'a jamais à ouvrir l'écran Exports pour savoir si c'est fini.
+            if let exportToast {
+                Text(exportToast)
+                    .font(.subheadline.bold())
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 9)
+                    .background(.green.opacity(0.9), in: Capsule())
+                    .foregroundStyle(.white)
+                    .padding(.bottom, 110)
+                    .transition(.opacity)
+            }
+        }
+        .onChange(of: RenderQueueController.shared.snapshot.isRunning) { wasRunning, isRunning in
+            let snapshot = RenderQueueController.shared.snapshot
+            if wasRunning, !isRunning, snapshot.finishedJobs > 0 {
+                let failures = snapshot.failedJobs > 0 ? " · \(snapshot.failedJobs) échec(s)" : ""
+                withAnimation { exportToast = "\(snapshot.finishedJobs) export(s) terminé(s) ✓\(failures)" }
+                AudioServicesPlaySystemSound(1001)
+                Task {
+                    try? await Task.sleep(for: .seconds(4))
+                    withAnimation { exportToast = nil }
+                }
+            }
         }
         .sheet(isPresented: $showReview) {
             NavigationStack { ReviewView(project: project) }
+        }
+        .sheet(isPresented: $showGrid) {
+            NavigationStack {
+                RushGridView(project: project) { index in
+                    showGrid = false
+                    jump(toRushIndex: index)
+                }
+            }
         }
         .sheet(isPresented: $showExports) {
             NavigationStack { RenderQueueView(project: project) }
@@ -233,6 +264,12 @@ struct ProjectEditorView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+            // Timecodes de la sélection courante (début → fin dans le rush).
+            if let range = selectionRange {
+                Text(String(format: "✂︎ %.2f → %.2f s", range.start.seconds, range.end.seconds))
+                    .font(.footnote.monospacedDigit())
+                    .foregroundStyle(.yellow)
+            }
             Spacer()
             // Progression globale du triage.
             let treated = project.orderedRushes.filter { !$0.passages.isEmpty }.count
@@ -314,18 +351,6 @@ struct ProjectEditorView: View {
 
     @ViewBuilder
     private var actionButtons: some View {
-        Button {
-            showCategories = true
-        } label: {
-            Image(systemName: "tag")
-                .overlay(alignment: .topTrailing) {
-                    if !pendingCategories.isEmpty {
-                        Circle().fill(.blue).frame(width: 8, height: 8).offset(x: 4, y: -4)
-                    }
-                }
-        }
-        .font(.title3)
-
         Spacer()
 
         Button("Rejeter", role: .destructive) {
@@ -387,6 +412,14 @@ struct ProjectEditorView: View {
                 guard !items.isEmpty else { return }
                 startImport(items)
             }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                showGrid = true
+            } label: {
+                Image(systemName: "square.grid.3x3")
+            }
+            .disabled(project.rushes.isEmpty)
         }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
@@ -597,7 +630,6 @@ struct ProjectEditorView: View {
         passage.finalDurationCentiseconds = project.finalDurationCentiseconds
         passage.speedNumerator = project.speedNumerator
         passage.speedDenominator = project.speedDenominator
-        passage.categories = pendingCategories.sorted()
         passage.rush = rush
         passage.project = project
         modelContext.insert(passage)
@@ -606,7 +638,6 @@ struct ProjectEditorView: View {
         validateHaptic.notificationOccurred(.success)
         selectionRange = nil
         selectionRushIndex = nil
-        pendingCategories = []
 
         // Mise en cache de la plage source pleine qualité (export hors-ligne).
         cacheSourceRange(for: passage, rush: rush)
@@ -688,8 +719,8 @@ struct ProjectEditorView: View {
                 completed: items.count, total: items.count,
                 currentName: "", errors: errors
             )
-            // Tri chronologique global rejoué sur l'ensemble du projet.
-            resortRushes()
+            // Ordre = ORDRE DE SÉLECTION dans le picker (aucun tri
+            // chronologique : l'utilisateur maîtrise l'ordre en sélectionnant).
             touch()
             // Recale la timeline après le redimensionnement du contenu.
             seekCounter += 1
@@ -742,23 +773,6 @@ struct ProjectEditorView: View {
         rush.project = project
         modelContext.insert(rush)
         try? modelContext.save() // persistance immédiate — reprise possible
-    }
-
-    /// Rejoue le tri chronologique (cascade de replis) sur tous les rushes.
-    private func resortRushes() {
-        let rushes = project.orderedRushes
-        let keys = rushes.map {
-            RushSortKey(
-                assetCreationDate: $0.captureDate,
-                fileCreationDate: $0.fileCreationDate,
-                timecodeSeconds: nil,
-                filename: $0.originalFilename,
-                pickOrder: $0.pickOrder
-            )
-        }
-        for (newIndex, oldPosition) in ChronoSort.sortedIndices(keys).enumerated() {
-            rushes[oldPosition].orderIndex = newIndex
-        }
     }
 
     /// Sauvegarde automatique après chaque modification importante.
