@@ -9,6 +9,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Nécessaire pour publier l'IPA en release avec le jeton par défaut.
+permissions:
+  contents: write
+
 jobs:
   build:
     # Image macOS avec Xcode 26 (SDK iOS 26 requis par le projet).
