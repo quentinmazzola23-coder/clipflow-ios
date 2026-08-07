@@ -16,14 +16,20 @@ final class ThumbnailCache: @unchecked Sendable {
     static let shared = ThumbnailCache()
 
     private let cache = NSCache<NSString, UIImage>()
-    /// Générateurs par fichier — réutilisés (création coûteuse).
+    /// Générateurs par fichier — réutilisés, mais BORNÉS en LRU : un
+    /// générateur retient son AVAsset ouvert ; en garder un par rush pour
+    /// toujours = centaines d'assets ouverts (pression mémoire/décodeur).
     private var generators: [String: AVAssetImageGenerator] = [:]
+    private var generatorOrder: [String] = []
+    private let maxGenerators = 12
     private let lock = NSLock()
     /// Demandes en cours pour éviter les doublons.
     private var inFlight = Set<String>()
 
     private init() {
-        cache.countLimit = 300
+        cache.countLimit = 120
+        // ~48 Mo maximum d'images décodées (coût = octets réels).
+        cache.totalCostLimit = 48 * 1024 * 1024
     }
 
     /// Clé : identifiant appelant + seconde arrondie au dixième.
@@ -62,7 +68,8 @@ final class ThumbnailCache: @unchecked Sendable {
             do {
                 let (cgImage, _) = try await generator.image(at: time)
                 image = UIImage(cgImage: cgImage)
-                self.cache.setObject(image!, forKey: ck)
+                let cost = cgImage.bytesPerRow * cgImage.height
+                self.cache.setObject(image!, forKey: ck, cost: cost)
             } catch {
                 // Fichier indisponible ou temps hors bornes : ignorer.
             }
@@ -74,8 +81,14 @@ final class ThumbnailCache: @unchecked Sendable {
         }
     }
 
+    /// Appelé sous `lock`.
     private func generator(for fileURL: URL, key: String) -> AVAssetImageGenerator {
-        if let existing = generators[key] { return existing }
+        if let existing = generators[key] {
+            // LRU : replacer la clé en fin de file.
+            generatorOrder.removeAll { $0 == key }
+            generatorOrder.append(key)
+            return existing
+        }
         let asset = AVURLAsset(url: fileURL)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
@@ -85,6 +98,12 @@ final class ThumbnailCache: @unchecked Sendable {
         generator.requestedTimeToleranceAfter = .positiveInfinity
         generator.maximumSize = CGSize(width: 640, height: 360)
         generators[key] = generator
+        generatorOrder.append(key)
+        // Éviction du plus ancien au-delà de la borne.
+        while generatorOrder.count > maxGenerators {
+            let evicted = generatorOrder.removeFirst()
+            generators.removeValue(forKey: evicted)
+        }
         return generator
     }
 
@@ -92,6 +111,7 @@ final class ThumbnailCache: @unchecked Sendable {
         cache.removeAllObjects()
         lock.lock()
         generators.removeAll()
+        generatorOrder.removeAll()
         lock.unlock()
     }
 }

@@ -209,6 +209,7 @@ struct ProjectEditorView: View {
         }
         .onAppear {
             RenderQueueController.shared.configure(container: modelContext.container)
+            playback.lightPreview = project.previewLight
             // La timeline suit la lecture (le scrubbing manuel, lui, met en pause).
             playback.onTick = { time in
                 handlePlaybackTick(time)
@@ -429,7 +430,15 @@ struct ProjectEditorView: View {
             Menu {
                 durationMenu
                 Toggle("Toucher = centre de la sélection", isOn: $project.touchAnchorIsCenter)
-                Toggle("Export automatique après validation", isOn: $project.autoExportOnValidate)
+                Toggle("Aperçu léger (540p, + fluide)", isOn: Binding(
+                    get: { project.previewLight },
+                    set: { newValue in
+                        project.previewLight = newValue
+                        playback.lightPreview = newValue
+                        playback.applyPreviewQualityChange()
+                        touch()
+                    }
+                ))
                 Button {
                     showReleaseConfirm = true
                 } label: {
@@ -645,11 +654,9 @@ struct ProjectEditorView: View {
         // Mise en cache de la plage source pleine qualité (export hors-ligne).
         cacheSourceRange(for: passage, rush: rush)
 
-        // Export en tâche de fond dès la validation (un rendu à la fois,
-        // régulation thermique gérée par la file).
-        if project.autoExportOnValidate {
-            RenderQueueController.shared.enqueue(passageIDs: [passage.persistentModelID])
-        }
+        // PAS d'export automatique : le rendu (décodage 4K + flux optique +
+        // encodage) en parallèle de l'édition affame le décodeur de l'aperçu.
+        // L'export est une phase séparée, lancée depuis l'écran Exports.
 
         // AUCUN passage automatique au rush suivant : l'interface reste
         // exactement sur le rush et la position courants ; navigation manuelle

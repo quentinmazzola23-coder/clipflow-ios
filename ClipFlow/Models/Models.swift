@@ -67,7 +67,12 @@ final class ClipProject {
     /// Mode hors-ligne garanti : copie intégrale des sources dans l'app.
     var guaranteedOfflineMode: Bool = false
     /// Lancer automatiquement le rendu d'un passage dès sa validation.
-    var autoExportOnValidate: Bool = true
+    /// DÉSACTIVÉ : le rendu concurrent de l'édition affamait le décodeur
+    /// (lecteur noir) — l'export est une phase séparée, lancée explicitement.
+    var autoExportOnValidate: Bool = false
+    /// Aperçu léger (540p au lieu de 720p) — réserve du décodeur pour la
+    /// fluidité sur les très longs projets.
+    var previewLight: Bool = false
     /// true = proxys légers 240p (économie d'espace) ; false (défaut) =
     /// proxys 720p tout-intra, prévisualisation nette et scrubbing instantané.
     var proxy240p: Bool = false

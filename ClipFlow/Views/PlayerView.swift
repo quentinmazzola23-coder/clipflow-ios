@@ -37,6 +37,9 @@ final class ProxyPlaybackEngine {
     var slowPreview = false
     private var playbackRate: Float { slowPreview ? 0.5 : 1.0 }
 
+    /// Aperçu léger : 540p au lieu de 720p (réserve de décodeur).
+    var lightPreview = false
+
     /// Rappel périodique pendant la lecture (suivi de timeline).
     var onTick: ((CMTime) -> Void)?
 
@@ -45,8 +48,10 @@ final class ProxyPlaybackEngine {
 
     init() {
         player.automaticallyWaitsToMinimizeStalling = false
+        // 30 Hz suffisent au suivi de timeline et au rebouclage léger —
+        // moitié moins de travail sur le fil principal qu'à 60 Hz.
         timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(value: 1, timescale: 60),
+            forInterval: CMTime(value: 1, timescale: 30),
             queue: .main
         ) { [weak self] time in
             Task { @MainActor [weak self] in
@@ -65,10 +70,23 @@ final class ProxyPlaybackEngine {
 
     private func makeItem(url: URL) -> AVPlayerItem {
         let item = AVPlayerItem(url: url)
-        // Plafond 720p : netteté suffisante pour juger, décodage léger.
-        // L'export lit toujours la pleine résolution par ailleurs.
-        item.preferredMaximumResolution = CGSize(width: 1280, height: 720)
+        // Plafond 720p (ou 540p en aperçu léger) : netteté suffisante pour
+        // juger, décodage léger. L'export lit toujours la pleine résolution.
+        item.preferredMaximumResolution = lightPreview
+            ? CGSize(width: 960, height: 540)
+            : CGSize(width: 1280, height: 720)
         return item
+    }
+
+    /// Rebâtit l'item courant après un changement de qualité d'aperçu.
+    func applyPreviewQualityChange() {
+        guard let currentURL else { return }
+        let wasPlaying = isPlaying
+        teardownLoops()
+        pause()
+        player.removeAllItems()
+        player.insert(makeItem(url: currentURL), after: nil)
+        if wasPlaying { play() }
     }
 
     /// Charge le fichier ORIGINAL du rush (lecture directe, sans proxys).
