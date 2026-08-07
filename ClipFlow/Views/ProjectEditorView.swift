@@ -23,9 +23,6 @@ struct ProjectEditorView: View {
     @State private var importTask: Task<Void, Never>?
     @State private var importStartedAt: Date?
 
-    // Proxys.
-    @State private var proxyStatus: ProxyGenerationStatus?
-
     // Navigation temporelle. Le positionnement externe passe par un jeton
     // one-shot (voir ProgrammaticSeek).
     @State private var playhead: Double = 0
@@ -68,7 +65,7 @@ struct ProjectEditorView: View {
             let segment = TimelineSegment(
                 rushIndex: index,
                 title: isUUIDName ? "\(index + 1)" : "\(index + 1) · \(stem)",
-                proxyPath: rush.proxyRelativePath,
+                mediaURL: rush.localSourceRelativePath.map { StorageManager.url(forSourceRelativePath: $0) },
                 startOffset: offset,
                 duration: rush.duration.seconds
             )
@@ -179,8 +176,6 @@ struct ProjectEditorView: View {
         } message: {
             Text("Supprime les copies locales des rushes dont tous les passages sont déjà mis en cache pour l'export. Les originaux dans Photos ne sont jamais touchés. Une nouvelle sélection dans un rush libéré ne pourra plus être exportée sans réimporter la vidéo.")
         }
-        .task { await observeProxyStatus() }
-        .task { await regenerateMissingProxies() }
         .onAppear {
             RenderQueueController.shared.configure(container: modelContext.container)
             // La timeline suit la lecture (le scrubbing manuel, lui, met en pause).
@@ -244,14 +239,6 @@ struct ProjectEditorView: View {
             Text("\(treated)/\(project.rushes.count) traités · \(project.passages.count) passages")
                 .font(.footnote.monospacedDigit())
                 .foregroundStyle(treated == project.rushes.count && !project.rushes.isEmpty ? .green : .secondary)
-            if let status = proxyStatus, status.completed < status.totalQueued {
-                HStack(spacing: 4) {
-                    ProgressView().controlSize(.mini)
-                    Text("Proxys \(status.completed)/\(status.totalQueued)")
-                        .font(.footnote.monospacedDigit())
-                }
-                .foregroundStyle(.orange)
-            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -406,7 +393,6 @@ struct ProjectEditorView: View {
                 durationMenu
                 Toggle("Toucher = centre de la sélection", isOn: $project.touchAnchorIsCenter)
                 Toggle("Export automatique après validation", isOn: $project.autoExportOnValidate)
-                Toggle("Proxys légers (240p, économie d'espace)", isOn: $project.proxy240p)
                 Button {
                     showReleaseConfirm = true
                 } label: {
@@ -752,61 +738,10 @@ struct ProjectEditorView: View {
         rush.colorimetry = info.colorimetry
         rush.is10Bit = info.is10Bit
         rush.localSourceRelativePath = info.localRelativePath
-        rush.availability = .localReady
+        rush.availability = .offlineReady
         rush.project = project
         modelContext.insert(rush)
         try? modelContext.save() // persistance immédiate — reprise possible
-
-        // Proxy en arrière-plan — travail possible dès les premiers rushes.
-        let sourceURL = StorageManager.url(forSourceRelativePath: info.localRelativePath)
-        let proxyName = "proxy-\(UUID().uuidString).mp4"
-        let rushID = rush.persistentModelID
-        let use240p = project.proxy240p
-        await ProxyGenerator.shared.enqueue(ProxyGenerator.ProxyJob(
-            sourceURL: sourceURL,
-            proxyFilename: proxyName,
-            use240p: use240p
-        ) { relativePath in
-            await MainActor.run {
-                if let saved = self.modelContext.model(for: rushID) as? Rush {
-                    saved.proxyRelativePath = relativePath
-                    saved.availability = MediaAvailabilityService.evaluate(rush: saved)
-                    try? self.modelContext.save()
-                }
-            }
-        })
-    }
-
-    /// Régénère les proxys manquants (supprimés via la page Stockage, purgés
-    /// par le système, ou après changement 144p/240p) à l'ouverture du projet.
-    @MainActor
-    private func regenerateMissingProxies() async {
-        for rush in project.orderedRushes {
-            let proxyMissing = rush.proxyRelativePath.map {
-                !FileManager.default.fileExists(atPath: StorageManager.url(forProxyRelativePath: $0).path)
-            } ?? true
-            guard proxyMissing,
-                  let sourcePath = rush.localSourceRelativePath,
-                  FileManager.default.fileExists(atPath: StorageManager.url(forSourceRelativePath: sourcePath).path)
-            else { continue }
-
-            let sourceURL = StorageManager.url(forSourceRelativePath: sourcePath)
-            let proxyName = "proxy-\(UUID().uuidString).mp4"
-            let rushID = rush.persistentModelID
-            await ProxyGenerator.shared.enqueue(ProxyGenerator.ProxyJob(
-                sourceURL: sourceURL,
-                proxyFilename: proxyName,
-                use240p: project.proxy240p
-            ) { relativePath in
-                await MainActor.run {
-                    if let saved = self.modelContext.model(for: rushID) as? Rush {
-                        saved.proxyRelativePath = relativePath
-                        saved.availability = MediaAvailabilityService.evaluate(rush: saved)
-                        try? self.modelContext.save()
-                    }
-                }
-            })
-        }
     }
 
     /// Rejoue le tri chronologique (cascade de replis) sur tous les rushes.
@@ -823,12 +758,6 @@ struct ProjectEditorView: View {
         }
         for (newIndex, oldPosition) in ChronoSort.sortedIndices(keys).enumerated() {
             rushes[oldPosition].orderIndex = newIndex
-        }
-    }
-
-    private func observeProxyStatus() async {
-        for await status in await ProxyGenerator.shared.statusStream() {
-            proxyStatus = status
         }
     }
 

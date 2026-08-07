@@ -22,7 +22,8 @@ import CoreMedia
 struct TimelineSegment: Equatable {
     var rushIndex: Int
     var title: String
-    var proxyPath: String?
+    /// Fichier original servant aux vignettes (nil si source indisponible).
+    var mediaURL: URL?
     var startOffset: Double   // secondes depuis le début de la timeline
     var duration: Double
 }
@@ -149,9 +150,9 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
         if !animated { suppressScrubCallback = false }
     }
 
-    // MARK: Vignettes — UNE par rush
+    // MARK: Vignettes — l'image du rush RÉPÉTÉE sur toute sa longueur
 
-    /// Largeur de la vignette unique affichée en tête de chaque rush.
+    /// Largeur d'une tuile ; la même image du rush est répétée tuile par tuile.
     private let thumbnailWidth: CGFloat = 84
 
     private func updateVisibleTiles() {
@@ -166,26 +167,33 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
             let segmentMaxX = x(forTime: segment.startOffset + segment.duration)
             guard segmentMaxX > visibleMinX, segmentMinX < visibleMaxX else { continue }
 
-            let key = "\(segment.rushIndex)"
-            neededKeys.insert(key)
-            let frame = CGRect(
-                x: segmentMinX, y: 14,
-                width: min(thumbnailWidth, max(segmentMaxX - segmentMinX, 8)),
-                height: bounds.height - 14
-            )
-            if let tile = activeTiles[key] {
-                // Reposition systématique : le zoom déplace les segments.
-                tile.frame = frame
-            } else {
-                let tile = dequeueTile()
-                tile.frame = frame
-                contentView.layer.addSublayer(tile)
-                activeTiles[key] = tile
-                populate(tile: tile, segment: segment)
+            let firstTile = max(0, Int((visibleMinX - segmentMinX) / thumbnailWidth))
+            let lastTile = max(firstTile, Int((min(visibleMaxX, segmentMaxX) - segmentMinX) / thumbnailWidth))
+
+            for tileIndex in firstTile...lastTile {
+                let tileX = segmentMinX + CGFloat(tileIndex) * thumbnailWidth
+                guard tileX < segmentMaxX else { continue }
+                let key = "\(segment.rushIndex)#\(tileIndex)"
+                neededKeys.insert(key)
+                let frame = CGRect(
+                    x: tileX, y: 14,
+                    width: min(thumbnailWidth, segmentMaxX - tileX),
+                    height: bounds.height - 14
+                )
+                if let tile = activeTiles[key] {
+                    // Reposition systématique : le zoom déplace les segments.
+                    tile.frame = frame
+                } else {
+                    let tile = dequeueTile()
+                    tile.frame = frame
+                    contentView.layer.addSublayer(tile)
+                    activeTiles[key] = tile
+                    populate(tile: tile, segment: segment, key: key)
+                }
             }
         }
 
-        // Recyclage des vignettes sorties de la zone visible.
+        // Recyclage des tuiles sorties de la zone visible.
         for (key, tile) in activeTiles where !neededKeys.contains(key) {
             tile.removeFromSuperlayer()
             tile.contents = nil
@@ -199,26 +207,34 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
         let tile = CALayer()
         tile.contentsGravity = .resizeAspectFill
         tile.masksToBounds = true
-        tile.cornerRadius = 3
+        tile.borderWidth = 0.5
+        tile.borderColor = UIColor(white: 0, alpha: 0.4).cgColor
         tile.backgroundColor = UIColor(white: 0.18, alpha: 1).cgColor
         return tile
     }
 
-    /// Image représentative unique : le milieu du rush.
-    private func populate(tile: CALayer, segment: TimelineSegment) {
-        guard let proxyPath = segment.proxyPath else { return }
+    /// Toutes les tuiles d'un rush partagent la MÊME image (milieu du rush) :
+    /// une seule génération par rush, puis cache instantané.
+    private func populate(tile: CALayer, segment: TimelineSegment, key: String) {
+        guard let mediaURL = segment.mediaURL else { return }
         let midpoint = max(min(segment.duration / 2, segment.duration - 0.05), 0)
         let requestTime = CMTime(seconds: midpoint, preferredTimescale: 600)
+        let imageKey = "rush-\(segment.rushIndex)"
 
-        if let hit = ThumbnailCache.shared.cachedThumbnail(proxyPath: proxyPath, time: requestTime) {
+        if let hit = ThumbnailCache.shared.cachedThumbnail(key: imageKey, time: requestTime) {
             tile.contents = hit.cgImage
             return
         }
-        let key = "\(segment.rushIndex)"
-        ThumbnailCache.shared.requestThumbnail(proxyPath: proxyPath, time: requestTime) { [weak self] image in
-            guard let self, let image,
-                  let current = self.activeTiles[key] else { return }
-            current.contents = image.cgImage
+        ThumbnailCache.shared.requestThumbnail(
+            fileURL: mediaURL, key: imageKey, time: requestTime
+        ) { [weak self] image in
+            guard let self, let image else { return }
+            // L'image arrive une fois : peupler TOUTES les tuiles du rush
+            // actuellement affichées.
+            let prefix = "\(segment.rushIndex)#"
+            for (tileKey, layer) in self.activeTiles where tileKey.hasPrefix(prefix) {
+                layer.contents = image.cgImage
+            }
         }
     }
 

@@ -2,8 +2,9 @@
 //  ThumbnailCache.swift
 //  ClipFlow
 //
-//  Cache de miniatures pour la timeline. Génère depuis les PROXYS (tout-intra,
-//  décodage instantané), mémoire bornée par NSCache. Jamais depuis les 4K.
+//  Cache de vignettes pour la timeline, générées depuis les fichiers ORIGINAUX
+//  (une image par rush, réutilisée pour toutes les tuiles du segment).
+//  Mémoire bornée par NSCache.
 //
 
 import Foundation
@@ -15,43 +16,44 @@ final class ThumbnailCache: @unchecked Sendable {
     static let shared = ThumbnailCache()
 
     private let cache = NSCache<NSString, UIImage>()
-    /// Générateurs par proxy — réutilisés (création coûteuse).
+    /// Générateurs par fichier — réutilisés (création coûteuse).
     private var generators: [String: AVAssetImageGenerator] = [:]
     private let lock = NSLock()
     /// Demandes en cours pour éviter les doublons.
     private var inFlight = Set<String>()
 
     private init() {
-        cache.countLimit = 600 // ~600 miniatures 144p ≈ quelques dizaines de Mo max
+        cache.countLimit = 300
     }
 
-    /// Clé : chemin proxy + seconde arrondie au dixième.
-    private func key(proxyPath: String, time: CMTime) -> NSString {
+    /// Clé : identifiant appelant + seconde arrondie au dixième.
+    private func cacheKey(_ key: String, time: CMTime) -> NSString {
         let tenth = Int((time.seconds * 10).rounded())
-        return "\(proxyPath)#\(tenth)" as NSString
+        return "\(key)#\(tenth)" as NSString
     }
 
-    /// Miniature immédiate si en cache, sinon nil (et lancement de la génération).
-    func cachedThumbnail(proxyPath: String, time: CMTime) -> UIImage? {
-        cache.object(forKey: key(proxyPath: proxyPath, time: time))
+    /// Vignette immédiate si en cache, sinon nil.
+    func cachedThumbnail(key: String, time: CMTime) -> UIImage? {
+        cache.object(forKey: cacheKey(key, time: time))
     }
 
-    /// Génère (si nécessaire) puis rappelle sur le MainActor.
-    func requestThumbnail(proxyPath: String,
+    /// Génère (si nécessaire) depuis `fileURL` puis rappelle sur le MainActor.
+    func requestThumbnail(fileURL: URL,
+                          key: String,
                           time: CMTime,
                           completion: @MainActor @escaping (UIImage?) -> Void) {
-        let cacheKey = key(proxyPath: proxyPath, time: time)
-        if let hit = cache.object(forKey: cacheKey) {
+        let ck = cacheKey(key, time: time)
+        if let hit = cache.object(forKey: ck) {
             Task { @MainActor in completion(hit) }
             return
         }
         lock.lock()
-        if inFlight.contains(cacheKey as String) {
+        if inFlight.contains(ck as String) {
             lock.unlock()
             return
         }
-        inFlight.insert(cacheKey as String)
-        let generator = self.generator(for: proxyPath)
+        inFlight.insert(ck as String)
+        let generator = self.generator(for: fileURL, key: key)
         lock.unlock()
 
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -60,29 +62,29 @@ final class ThumbnailCache: @unchecked Sendable {
             do {
                 let (cgImage, _) = try await generator.image(at: time)
                 image = UIImage(cgImage: cgImage)
-                self.cache.setObject(image!, forKey: cacheKey)
+                self.cache.setObject(image!, forKey: ck)
             } catch {
-                // Proxy pas encore prêt ou temps hors bornes : ignorer.
+                // Fichier indisponible ou temps hors bornes : ignorer.
             }
             self.lock.lock()
-            self.inFlight.remove(cacheKey as String)
+            self.inFlight.remove(ck as String)
             self.lock.unlock()
             let result = image
             await MainActor.run { completion(result) }
         }
     }
 
-    private func generator(for proxyPath: String) -> AVAssetImageGenerator {
-        if let existing = generators[proxyPath] { return existing }
-        let url = StorageManager.url(forProxyRelativePath: proxyPath)
-        let asset = AVURLAsset(url: url)
+    private func generator(for fileURL: URL, key: String) -> AVAssetImageGenerator {
+        if let existing = generators[key] { return existing }
+        let asset = AVURLAsset(url: fileURL)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
-        // Proxy tout-intra : tolérance large = image la plus proche, décodée en O(1).
-        generator.requestedTimeToleranceBefore = CMTime(value: 1, timescale: 4)
-        generator.requestedTimeToleranceAfter = CMTime(value: 1, timescale: 4)
+        // Une seule image représentative par rush : tolérance large, l'image
+        // clé la plus proche suffit et se décode vite même en 4K.
+        generator.requestedTimeToleranceBefore = .positiveInfinity
+        generator.requestedTimeToleranceAfter = .positiveInfinity
         generator.maximumSize = CGSize(width: 640, height: 360)
-        generators[proxyPath] = generator
+        generators[key] = generator
         return generator
     }
 

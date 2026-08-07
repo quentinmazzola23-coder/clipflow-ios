@@ -56,20 +56,11 @@ final class ProxyPlaybackEngine {
     /// sert pour ne pas faire défiler la timeline pendant les boucles courtes.
     var activeLoopDuration: Double? { loopRange?.duration.seconds }
 
-    /// Charge la meilleure source de lecture d'un rush : proxy si prêt,
-    /// sinon repli sur le fichier ORIGINAL (décodage matériel AVPlayer —
-    /// permet de visualiser immédiatement pendant la génération des proxys).
+    /// Charge le fichier ORIGINAL du rush (pas de proxys : lecture directe,
+    /// décodage matériel plafonné à 720p pour rester fluide en 4K).
     func load(rush: Rush?) {
         var url: URL?
-        var isProxy = false
-        if let proxyPath = rush?.proxyRelativePath {
-            let candidate = StorageManager.url(forProxyRelativePath: proxyPath)
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                url = candidate
-                isProxy = true
-            }
-        }
-        if url == nil, let sourcePath = rush?.localSourceRelativePath {
+        if let sourcePath = rush?.localSourceRelativePath {
             let candidate = StorageManager.url(forSourceRelativePath: sourcePath)
             if FileManager.default.fileExists(atPath: candidate.path) { url = candidate }
         }
@@ -83,11 +74,9 @@ final class ProxyPlaybackEngine {
             return
         }
         let item = AVPlayerItem(url: url)
-        if !isProxy {
-            // Original 4K : décodage plafonné à 720p — bon équilibre netteté /
-            // fluidité pour l'aperçu. L'export lit toujours la pleine résolution.
-            item.preferredMaximumResolution = CGSize(width: 1280, height: 720)
-        }
+        // Plafond 720p : netteté suffisante pour juger, décodage léger.
+        // L'export lit toujours la pleine résolution par ailleurs.
+        item.preferredMaximumResolution = CGSize(width: 1280, height: 720)
         player.replaceCurrentItem(with: item)
     }
 

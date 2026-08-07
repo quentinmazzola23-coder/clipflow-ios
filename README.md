@@ -39,8 +39,7 @@ ClipFlow-iOS/
 │   ├── Services/
 │   │   ├── PhotoImporter.swift          PhotosPicker → fichier (jamais de Data), métadonnées
 │   │   ├── MediaAvailabilityService.swift  États local/iCloud/hors-ligne, source d'export
-│   │   ├── ProxyGenerator.swift         Proxys 144p/240p tout-intra, file en arrière-plan
-│   │   ├── ThumbnailCache.swift         Miniatures NSCache depuis les proxys
+│   │   ├── ThumbnailCache.swift         Vignettes NSCache depuis les originaux (1/rush)
 │   │   ├── StorageManager.swift         App Support / Caches / Temporary, exclusion backup
 │   │   ├── ThermalMonitor.swift         Température, batterie, veille
 │   │   ├── RenderQueue.swift            File de rendu : 1 passage à la fois, pause/reprise

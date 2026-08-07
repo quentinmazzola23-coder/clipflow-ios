@@ -55,6 +55,7 @@ enum RenderError: Error, LocalizedError {
     case readerFailed(String)
     case writerFailed(String)
     case verificationFailed(expected: Int, actual: Int)
+    case interpolationUnavailable
     case cancelled
 
     var errorDescription: String? {
@@ -67,6 +68,8 @@ enum RenderError: Error, LocalizedError {
             return "Échec d'encodage : \(details)"
         case .verificationFailed(let expected, let actual):
             return "Vérification échouée : \(actual) images produites au lieu de \(expected)."
+        case .interpolationUnavailable:
+            return "Interpolation par flux optique indisponible sur cet appareil pour cette vidéo. Export bloqué : aucun repli en duplication d'images (rendu saccadé) n'est appliqué silencieusement."
         case .cancelled:
             return "Rendu annulé."
         }
@@ -130,10 +133,22 @@ final class VideoRenderPipeline {
         )
 
         // --- Moteur d'interpolation. ---
+        // Qualité maximale exigée : si le flux optique VideoToolbox n'est pas
+        // disponible et que des images intermédiaires sont nécessaires, l'export
+        // ÉCHOUE explicitement — jamais de duplication d'images silencieuse.
         let needsInterpolation = plan.contains { if case .interpolate = $0 { return true } ; return false }
-        let engine: FrameInterpolationEngine = job.forceFastEngine
-            ? PassthroughRetimeEngine()
-            : InterpolationEngineFactory.bestEngine(width: encodeWidth, height: encodeHeight)
+        let engine: FrameInterpolationEngine
+        if job.forceFastEngine {
+            engine = PassthroughRetimeEngine()
+        } else if let highQuality = InterpolationEngineFactory.bestEngine(width: encodeWidth, height: encodeHeight) {
+            engine = highQuality
+        } else if needsInterpolation {
+            throw RenderError.interpolationUnavailable
+        } else {
+            // Aucune interpolation requise (ex. source 120 fps → 0,5× 60 fps) :
+            // toutes les images finales sont des copies exactes.
+            engine = PassthroughRetimeEngine()
+        }
         if needsInterpolation {
             try await engine.startSession(width: encodeWidth, height: encodeHeight)
         }

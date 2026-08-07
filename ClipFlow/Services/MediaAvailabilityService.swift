@@ -13,27 +13,24 @@ import AVFoundation
 enum MediaAvailabilityService {
 
     /// Réévalue la disponibilité d'un rush d'après l'état du disque.
+    /// (Plus de proxys : la copie source locale est l'unique média de lecture.)
     static func evaluate(rush: Rush) -> RushAvailability {
         let hasLocalSource = rush.localSourceRelativePath.map {
             FileManager.default.fileExists(atPath: StorageManager.url(forSourceRelativePath: $0).path)
         } ?? false
 
-        let hasProxy = rush.proxyRelativePath.map {
-            FileManager.default.fileExists(atPath: StorageManager.url(forProxyRelativePath: $0).path)
-        } ?? false
-
-        if hasLocalSource && hasProxy {
+        if hasLocalSource {
             return .offlineReady
         }
-        if hasLocalSource {
-            return .localReady
+        // Source libérée : plus de lecture possible, mais les passages restent
+        // exportables si leurs plages sont cachées.
+        let allCached = !rush.passages.isEmpty && rush.passages.allSatisfy { passage in
+            guard let cached = passage.cachedRangeRelativePath else { return false }
+            return FileManager.default.fileExists(
+                atPath: StorageManager.url(forCachedRangeRelativePath: cached).path
+            )
         }
-        if hasProxy {
-            // Source libérée volontairement : navigation via proxy, exports via
-            // les plages cachées des passages existants.
-            return .sourceReleased
-        }
-        return .unavailable
+        return allCached ? .sourceReleased : .unavailable
     }
 
     // MARK: - Libération d'espace

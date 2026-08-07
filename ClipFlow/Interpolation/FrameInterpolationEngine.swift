@@ -62,10 +62,11 @@ enum InterpolationError: Error, LocalizedError {
 
 enum InterpolationEngineFactory {
 
-    /// Meilleur moteur disponible sur cet appareil pour ces dimensions.
-    /// Ordre : VideoToolbox (qualité) → secours (duplication, nommé honnêtement).
+    /// Moteur haute qualité disponible sur cet appareil pour ces dimensions,
+    /// ou nil s'il n'existe pas. AUCUN repli silencieux : l'appelant décide
+    /// explicitement (échec clair plutôt qu'un export dupliqué qui saccade).
     /// Le moteur VideoToolbox n'existe pas dans le SDK simulateur.
-    static func bestEngine(width: Int, height: Int) -> FrameInterpolationEngine {
+    static func bestEngine(width: Int, height: Int) -> FrameInterpolationEngine? {
         #if !targetEnvironment(simulator)
         if #available(iOS 26.0, *) {
             if VideoToolboxFrameInterpolationEngine.isSupported(width: width, height: height) {
@@ -73,7 +74,7 @@ enum InterpolationEngineFactory {
             }
         }
         #endif
-        return PassthroughRetimeEngine()
+        return nil
     }
 
     /// Le moteur haute qualité est-il disponible ? (pour l'afficher dans l'UI)

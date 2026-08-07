@@ -85,11 +85,6 @@ private struct ProjectRow: View {
             HStack(spacing: 12) {
                 Label("\(project.rushes.count) rushes", systemImage: "film")
                 Label("\(project.passages.count) sélections", systemImage: "scissors")
-                let proxied = project.rushes.filter { $0.proxyRelativePath != nil }.count
-                if proxied < project.rushes.count {
-                    Label("proxys \(proxied)/\(project.rushes.count)", systemImage: "gearshape.arrow.triangle.2.circlepath")
-                        .foregroundStyle(.orange)
-                }
                 let exported = project.passages.filter { $0.exportState == .exported }.count
                 if exported > 0 {
                     Label("\(exported) exportés", systemImage: "checkmark.circle")
