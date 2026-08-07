@@ -536,11 +536,23 @@ struct ProjectEditorView: View {
             selectionRushIndex = index
             selectionRange = range
             // La sélection posée se rejoue immédiatement en boucle, jusqu'à
-            // validation, rejet ou déplacement.
+            // validation, rejet ou déplacement — et la timeline se recentre
+            // dessus.
             playSelectionLoop()
+            recenterOnSelection()
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Recentre la timeline sur le milieu de la sélection courante.
+    private func recenterOnSelection() {
+        guard let index = selectionRushIndex, let range = selectionRange else { return }
+        let center = segmentStart(rushIndex: index)
+            + range.start.seconds + range.duration.seconds / 2
+        playhead = center
+        seekCounter += 1
+        seek = ProgrammaticSeek(token: seekCounter, time: center)
     }
 
     private func handleSelectionDrag(_ deltaSeconds: Double) {
@@ -557,9 +569,10 @@ struct ProjectEditorView: View {
 
     private func persistAfterMove() {
         // Relâcher après déplacement : la boucle reprend depuis le nouvel
-        // emplacement de la sélection.
+        // emplacement et la timeline se recentre sur la sélection.
         if selectionRange != nil {
             playSelectionLoop()
+            recenterOnSelection()
         }
     }
 
@@ -571,8 +584,9 @@ struct ProjectEditorView: View {
         selectionRange = SelectionEngine.nudge(
             range, frames: frames, frameDuration: frameDuration, rushDuration: rush.duration
         )
-        // La boucle repart de l'emplacement ajusté.
+        // La boucle repart de l'emplacement ajusté, timeline recentrée.
         playSelectionLoop()
+        recenterOnSelection()
     }
 
     private func playSelectionLoop() {
