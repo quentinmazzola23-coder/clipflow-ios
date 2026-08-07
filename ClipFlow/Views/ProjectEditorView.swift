@@ -324,6 +324,7 @@ struct ProjectEditorView: View {
         Spacer()
 
         Button("Rejeter", role: .destructive) {
+            playback.pause()
             selectionRange = nil
             selectionRushIndex = nil
         }
@@ -449,6 +450,9 @@ struct ProjectEditorView: View {
     /// setPlayhead supprime son propre rappel de scrubbing).
     private func handlePlaybackTick(_ time: CMTime) {
         guard playback.isPlaying, let index = currentRushIndex else { return }
+        // Boucle courte (sélection) : timeline immobile — un défilement en
+        // va-et-vient serait illisible et coûterait du CPU pour rien.
+        if let loopDuration = playback.activeLoopDuration, loopDuration < 3 { return }
         let rushDuration = project.orderedRushes[index].duration.seconds
         // Borné STRICTEMENT dans le rush courant : atteindre la frontière
         // ferait basculer currentRushIndex et rechargerait le média en boucle.
@@ -510,6 +514,9 @@ struct ProjectEditorView: View {
             )
             selectionRushIndex = index
             selectionRange = range
+            // La sélection posée se rejoue immédiatement en boucle, jusqu'à
+            // validation, rejet ou déplacement.
+            playSelectionLoop()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -517,14 +524,22 @@ struct ProjectEditorView: View {
 
     private func handleSelectionDrag(_ deltaSeconds: Double) {
         guard let index = selectionRushIndex, let range = selectionRange else { return }
+        // Pendant le déplacement : lecture suspendue (la boucle repartira du
+        // nouvel emplacement au relâcher).
+        if playback.isPlaying {
+            playback.pause()
+        }
         let rush = project.orderedRushes[index]
         let delta = CMTime(seconds: deltaSeconds, preferredTimescale: 600)
         selectionRange = SelectionEngine.move(range, by: delta, rushDuration: rush.duration)
     }
 
     private func persistAfterMove() {
-        // La sélection courante n'est persistée qu'à la validation ;
-        // rien à sauvegarder ici, mais l'appui long a pu activer le mode fin.
+        // Relâcher après déplacement : la boucle reprend depuis le nouvel
+        // emplacement de la sélection.
+        if selectionRange != nil {
+            playSelectionLoop()
+        }
     }
 
     private func nudgeSelection(frames: Int) {
@@ -535,6 +550,8 @@ struct ProjectEditorView: View {
         selectionRange = SelectionEngine.nudge(
             range, frames: frames, frameDuration: frameDuration, rushDuration: rush.duration
         )
+        // La boucle repart de l'emplacement ajusté.
+        playSelectionLoop()
     }
 
     private func playSelectionLoop() {
@@ -547,6 +564,8 @@ struct ProjectEditorView: View {
 
     private func validateSelection() {
         guard let index = selectionRushIndex, let range = selectionRange else { return }
+        // La validation arrête la boucle de prévisualisation.
+        playback.pause()
         let rush = project.orderedRushes[index]
 
         let passage = Passage()

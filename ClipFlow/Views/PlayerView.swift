@@ -52,14 +52,22 @@ final class ProxyPlaybackEngine {
         }
     }
 
+    /// Durée de la boucle active (nil si lecture libre) — l'interface s'en
+    /// sert pour ne pas faire défiler la timeline pendant les boucles courtes.
+    var activeLoopDuration: Double? { loopRange?.duration.seconds }
+
     /// Charge la meilleure source de lecture d'un rush : proxy si prêt,
     /// sinon repli sur le fichier ORIGINAL (décodage matériel AVPlayer —
     /// permet de visualiser immédiatement pendant la génération des proxys).
     func load(rush: Rush?) {
         var url: URL?
+        var isProxy = false
         if let proxyPath = rush?.proxyRelativePath {
             let candidate = StorageManager.url(forProxyRelativePath: proxyPath)
-            if FileManager.default.fileExists(atPath: candidate.path) { url = candidate }
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                url = candidate
+                isProxy = true
+            }
         }
         if url == nil, let sourcePath = rush?.localSourceRelativePath {
             let candidate = StorageManager.url(forSourceRelativePath: sourcePath)
@@ -74,7 +82,14 @@ final class ProxyPlaybackEngine {
             player.replaceCurrentItem(with: nil)
             return
         }
-        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+        let item = AVPlayerItem(url: url)
+        if !isProxy {
+            // Original 4K : plafonner le décodage à 540p pour une navigation
+            // fluide — la qualité d'aperçu est secondaire, l'export lit
+            // toujours le fichier pleine résolution par ailleurs.
+            item.preferredMaximumResolution = CGSize(width: 960, height: 540)
+        }
+        player.replaceCurrentItem(with: item)
     }
 
     /// Positionne la lecture (scrubbing) — tolérance nulle, proxy tout-intra.
