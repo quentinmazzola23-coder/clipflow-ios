@@ -246,7 +246,7 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
             label.backgroundColor = UIColor.black.withAlphaComponent(0.65).cgColor
             label.cornerRadius = 3
             label.contentsScale = UIScreen.main.scale
-            label.frame = CGRect(x: x(forTime: segment.startOffset) + 3, y: 1, width: 190, height: 14)
+            label.frame = CGRect(x: x(forTime: segment.startOffset) + 3, y: 1, width: 110, height: 14)
             contentView.layer.addSublayer(label)
             labelLayers.append(label)
         }

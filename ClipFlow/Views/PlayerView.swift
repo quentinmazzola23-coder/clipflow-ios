@@ -84,10 +84,9 @@ final class ProxyPlaybackEngine {
         }
         let item = AVPlayerItem(url: url)
         if !isProxy {
-            // Original 4K : plafonner le décodage à 540p pour une navigation
-            // fluide — la qualité d'aperçu est secondaire, l'export lit
-            // toujours le fichier pleine résolution par ailleurs.
-            item.preferredMaximumResolution = CGSize(width: 960, height: 540)
+            // Original 4K : décodage plafonné à 720p — bon équilibre netteté /
+            // fluidité pour l'aperçu. L'export lit toujours la pleine résolution.
+            item.preferredMaximumResolution = CGSize(width: 1280, height: 720)
         }
         player.replaceCurrentItem(with: item)
     }

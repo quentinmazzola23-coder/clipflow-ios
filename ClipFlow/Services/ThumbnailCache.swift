@@ -81,7 +81,7 @@ final class ThumbnailCache: @unchecked Sendable {
         // Proxy tout-intra : tolérance large = image la plus proche, décodée en O(1).
         generator.requestedTimeToleranceBefore = CMTime(value: 1, timescale: 4)
         generator.requestedTimeToleranceAfter = CMTime(value: 1, timescale: 4)
-        generator.maximumSize = CGSize(width: 256, height: 144)
+        generator.maximumSize = CGSize(width: 426, height: 240)
         generators[proxyPath] = generator
         return generator
     }

@@ -50,12 +50,24 @@ struct ProjectEditorView: View {
 
     // MARK: - Modèle de timeline
 
+    /// Nom lisible d'un rush : les copies issues du picker portent un UUID
+    /// (aucune valeur informative) → « Rush n ».
+    private func rushDisplayName(_ rush: Rush, index: Int) -> String {
+        let stem = (rush.originalFilename as NSString).deletingPathExtension
+        if UUID(uuidString: stem) != nil || stem.count >= 30 {
+            return "Rush \(index + 1)"
+        }
+        return stem
+    }
+
     private var segments: [TimelineSegment] {
         var offset: Double = 0
         return project.orderedRushes.enumerated().map { index, rush in
+            let stem = (rush.originalFilename as NSString).deletingPathExtension
+            let isUUIDName = UUID(uuidString: stem) != nil || stem.count >= 30
             let segment = TimelineSegment(
                 rushIndex: index,
-                title: "\(index + 1) · \(rush.originalFilename)",
+                title: isUUIDName ? "\(index + 1)" : "\(index + 1) · \(stem)",
                 proxyPath: rush.proxyRelativePath,
                 startOffset: offset,
                 duration: rush.duration.seconds
@@ -117,7 +129,7 @@ struct ProjectEditorView: View {
             let isLandscape = geometry.size.width > geometry.size.height
             VStack(spacing: 0) {
                 playerArea
-                    .frame(maxHeight: isLandscape ? .infinity : geometry.size.height * 0.45)
+                    .frame(maxHeight: isLandscape ? .infinity : geometry.size.height * 0.54)
                 statusBar
                 TimelineView(
                     segments: segments,
@@ -128,7 +140,7 @@ struct ProjectEditorView: View {
                     onSelectionDrag: handleSelectionDrag,
                     onSelectionDragEnded: persistAfterMove
                 )
-                .frame(height: isLandscape ? 120 : 170)
+                .frame(height: isLandscape ? 100 : 120)
                 controlBar(isLandscape: isLandscape)
             }
         }
@@ -189,12 +201,17 @@ struct ProjectEditorView: View {
                     description: Text("Importez des vidéos avec le bouton +.")
                 )
             }
+            // Bandeau compact EN HAUT : n'occulte pas la visionneuse — le
+            // triage peut commencer pendant l'importation.
             if let progress = importProgress {
-                ImportProgressCard(
-                    progress: progress,
-                    startedAt: importStartedAt,
-                    onCancel: { importTask?.cancel() }
-                )
+                VStack {
+                    ImportProgressBanner(
+                        progress: progress,
+                        startedAt: importStartedAt,
+                        onCancel: { importTask?.cancel() }
+                    )
+                    Spacer()
+                }
             }
         }
         .onChange(of: currentRushIndex) { _, _ in
@@ -207,7 +224,7 @@ struct ProjectEditorView: View {
             if let rush = currentRush, let index = currentRushIndex {
                 Text("Rush \(index + 1)/\(project.rushes.count)")
                     .font(.footnote.bold().monospacedDigit())
-                Text(rush.originalFilename)
+                Text(rushDisplayName(rush, index: index))
                     .font(.footnote)
                     .lineLimit(1)
                     .foregroundStyle(.secondary)
@@ -339,27 +356,30 @@ struct ProjectEditorView: View {
     private func controlBar(isLandscape: Bool) -> some View {
         Group {
             if isLandscape {
-                HStack(spacing: 16) {
+                HStack(spacing: 18) {
                     transportButtons
-                    Divider().frame(height: 20)
+                    Divider().frame(height: 24)
                     actionButtons
                 }
-                .font(.title3)
+                .font(.title2)
             } else {
-                VStack(spacing: 4) {
+                VStack(spacing: 8) {
+                    // Cibles tactiles ≥ 44 pt, réparties sur toute la largeur.
                     HStack(spacing: 0) {
                         Group { transportButtons }
-                            .frame(maxWidth: .infinity)
+                            .frame(maxWidth: .infinity, minHeight: 44)
                     }
-                    .font(.title3)
-                    HStack(spacing: 14) {
+                    .font(.title2)
+                    HStack(spacing: 16) {
                         actionButtons
                     }
+                    .controlSize(.large)
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+        .padding(.bottom, 2)
     }
 
     @ToolbarContentBuilder
@@ -772,11 +792,12 @@ struct ProjectEditorView: View {
     }
 }
 
-// MARK: - Carte de progression d'importation
+// MARK: - Bandeau de progression d'importation
 
-/// Progression détaillée : pourcentage, barre, estimation du temps restant,
-/// annulation. Le signal sonore de fin est joué par startImport.
-private struct ImportProgressCard: View {
+/// Bandeau COMPACT en haut de la visionneuse : n'occulte pas l'image, le
+/// triage peut commencer pendant l'importation. Pourcentage, barre, temps
+/// restant estimé, annulation. Le signal sonore de fin est joué par startImport.
+private struct ImportProgressBanner: View {
     let progress: ImportProgress
     let startedAt: Date?
     let onCancel: () -> Void
@@ -790,45 +811,38 @@ private struct ImportProgressCard: View {
     private var remainingText: String? {
         guard let startedAt, progress.completed >= 1, progress.completed < progress.total else { return nil }
         let elapsed = Date.now.timeIntervalSince(startedAt)
-        let perItem = elapsed / Double(progress.completed)
-        let remaining = perItem * Double(progress.total - progress.completed)
-        if remaining < 60 {
-            return String(format: "≈ %.0f s restantes", remaining)
-        }
-        return String(format: "≈ %d min %02d s restantes", Int(remaining) / 60, Int(remaining) % 60)
+        let remaining = elapsed / Double(progress.completed) * Double(progress.total - progress.completed)
+        if remaining < 60 { return String(format: "≈ %.0f s", remaining) }
+        return String(format: "≈ %d min", Int((remaining / 60).rounded()))
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            Label("Importation en cours", systemImage: "square.and.arrow.down")
-                .font(.headline)
+        HStack(spacing: 10) {
             ProgressView(value: fraction)
                 .progressViewStyle(.linear)
                 .tint(.blue)
-            HStack {
-                Text("\(Int((fraction * 100).rounded())) %")
-                    .font(.title2.bold().monospacedDigit())
-                Spacer()
-                Text("\(progress.completed)/\(progress.total) vidéos")
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
+                .frame(width: 90)
+            Text("\(Int((fraction * 100).rounded())) % · \(progress.completed)/\(progress.total)")
+                .font(.footnote.bold().monospacedDigit())
             if let remainingText {
                 Text(remainingText)
-                    .font(.subheadline)
+                    .font(.footnote.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
             if !progress.errors.isEmpty {
-                Text("\(progress.errors.count) erreur(s) — détails en fin d'importation")
-                    .font(.caption)
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.footnote)
                     .foregroundStyle(.orange)
             }
-            Button("Annuler l'importation", role: .destructive, action: onCancel)
-                .font(.subheadline)
+            Button(action: onCancel) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+            }
         }
-        .padding(18)
-        .frame(maxWidth: 340)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .padding()
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.top, 8)
     }
 }
