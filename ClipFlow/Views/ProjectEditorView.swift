@@ -406,7 +406,7 @@ struct ProjectEditorView: View {
                 durationMenu
                 Toggle("Toucher = centre de la sélection", isOn: $project.touchAnchorIsCenter)
                 Toggle("Export automatique après validation", isOn: $project.autoExportOnValidate)
-                Toggle("Proxys 240p", isOn: $project.proxy240p)
+                Toggle("Proxys légers (240p, économie d'espace)", isOn: $project.proxy240p)
                 Button {
                     showReleaseConfirm = true
                 } label: {

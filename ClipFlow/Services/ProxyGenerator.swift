@@ -115,8 +115,10 @@ actor ProxyGenerator {
             .naturalSize, .preferredTransform, .nominalFrameRate
         )
 
-        // Dimensions cibles : hauteur 144 (ou 240), largeur au ratio, multiples de 2.
-        let targetHeight: CGFloat = use240p ? 240 : 144
+        // Dimensions cibles : 720p par défaut (prévisualisation nette),
+        // 240p en mode « proxys légers ». Tout-intra dans les deux cas →
+        // scrubbing instantané. Largeur au ratio, multiples de 2.
+        let targetHeight: CGFloat = use240p ? 240 : 720
         let displaySize = naturalSize.applying(transform)
         let sourceW = abs(displaySize.width)
         let sourceH = abs(displaySize.height)
@@ -142,7 +144,7 @@ actor ProxyGenerator {
         // Tout-intra : MaxKeyFrameInterval = 1 → n'importe quelle image décodable seule.
         // Débit très bas : la qualité des proxys est secondaire.
         let compression: [String: Any] = [
-            AVVideoAverageBitRateKey: use240p ? 800_000 : 400_000,
+            AVVideoAverageBitRateKey: use240p ? 800_000 : 6_000_000,
             AVVideoMaxKeyFrameIntervalKey: 1,
             AVVideoAllowFrameReorderingKey: false,
         ]

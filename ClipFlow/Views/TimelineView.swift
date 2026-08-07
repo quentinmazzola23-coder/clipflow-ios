@@ -54,7 +54,6 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
     private var pointsPerSecond: CGFloat = 60 {
         didSet { pointsPerSecond = min(max(pointsPerSecond, 2), 600) }
     }
-    private let tileWidth: CGFloat = 60
     private let scrollView = UIScrollView()
     private let contentView = UIView()
 
@@ -150,12 +149,15 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
         if !animated { suppressScrubCallback = false }
     }
 
-    // MARK: Tuiles visibles
+    // MARK: Vignettes — UNE par rush
+
+    /// Largeur de la vignette unique affichée en tête de chaque rush.
+    private let thumbnailWidth: CGFloat = 84
 
     private func updateVisibleTiles() {
         guard bounds.width > 0, !segments.isEmpty else { return }
-        let visibleMinX = scrollView.contentOffset.x - tileWidth
-        let visibleMaxX = scrollView.contentOffset.x + bounds.width + tileWidth
+        let visibleMinX = scrollView.contentOffset.x - thumbnailWidth
+        let visibleMaxX = scrollView.contentOffset.x + bounds.width + thumbnailWidth
 
         var neededKeys = Set<String>()
 
@@ -164,29 +166,26 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
             let segmentMaxX = x(forTime: segment.startOffset + segment.duration)
             guard segmentMaxX > visibleMinX, segmentMinX < visibleMaxX else { continue }
 
-            let firstTile = max(0, Int((visibleMinX - segmentMinX) / tileWidth))
-            let lastTile = Int((min(visibleMaxX, segmentMaxX) - segmentMinX) / tileWidth)
-
-            for tileIndex in firstTile...max(firstTile, lastTile) {
-                let tileX = segmentMinX + CGFloat(tileIndex) * tileWidth
-                guard tileX < segmentMaxX else { continue }
-                let key = "\(segment.rushIndex)#\(tileIndex)"
-                neededKeys.insert(key)
-                if activeTiles[key] == nil {
-                    let tile = dequeueTile()
-                    tile.frame = CGRect(
-                        x: tileX, y: 14,
-                        width: min(tileWidth, segmentMaxX - tileX),
-                        height: bounds.height - 14
-                    )
-                    contentView.layer.addSublayer(tile)
-                    activeTiles[key] = tile
-                    populate(tile: tile, segment: segment, tileIndex: tileIndex)
-                }
+            let key = "\(segment.rushIndex)"
+            neededKeys.insert(key)
+            let frame = CGRect(
+                x: segmentMinX, y: 14,
+                width: min(thumbnailWidth, max(segmentMaxX - segmentMinX, 8)),
+                height: bounds.height - 14
+            )
+            if let tile = activeTiles[key] {
+                // Reposition systématique : le zoom déplace les segments.
+                tile.frame = frame
+            } else {
+                let tile = dequeueTile()
+                tile.frame = frame
+                contentView.layer.addSublayer(tile)
+                activeTiles[key] = tile
+                populate(tile: tile, segment: segment)
             }
         }
 
-        // Recyclage des tuiles sorties de la zone visible.
+        // Recyclage des vignettes sorties de la zone visible.
         for (key, tile) in activeTiles where !neededKeys.contains(key) {
             tile.removeFromSuperlayer()
             tile.contents = nil
@@ -200,23 +199,22 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
         let tile = CALayer()
         tile.contentsGravity = .resizeAspectFill
         tile.masksToBounds = true
+        tile.cornerRadius = 3
         tile.backgroundColor = UIColor(white: 0.18, alpha: 1).cgColor
         return tile
     }
 
-    private func populate(tile: CALayer, segment: TimelineSegment, tileIndex: Int) {
+    /// Image représentative unique : le milieu du rush.
+    private func populate(tile: CALayer, segment: TimelineSegment) {
         guard let proxyPath = segment.proxyPath else { return }
-        // Temps LOCAL au rush représenté par le centre de la tuile.
-        let localSeconds = (Double(tileIndex) * Double(tileWidth) + Double(tileWidth) / 2)
-            / Double(pointsPerSecond)
-        let clamped = min(localSeconds, max(segment.duration - 0.05, 0))
-        let requestTime = CMTime(seconds: clamped, preferredTimescale: 600)
+        let midpoint = max(min(segment.duration / 2, segment.duration - 0.05), 0)
+        let requestTime = CMTime(seconds: midpoint, preferredTimescale: 600)
 
         if let hit = ThumbnailCache.shared.cachedThumbnail(proxyPath: proxyPath, time: requestTime) {
             tile.contents = hit.cgImage
             return
         }
-        let key = "\(segment.rushIndex)#\(tileIndex)"
+        let key = "\(segment.rushIndex)"
         ThumbnailCache.shared.requestThumbnail(proxyPath: proxyPath, time: requestTime) { [weak self] image in
             guard let self, let image,
                   let current = self.activeTiles[key] else { return }

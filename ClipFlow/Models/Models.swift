@@ -68,9 +68,9 @@ final class ClipProject {
     var guaranteedOfflineMode: Bool = false
     /// Lancer automatiquement le rendu d'un passage dès sa validation.
     var autoExportOnValidate: Bool = true
-    /// Proxy 240p (par défaut : vignettes de timeline nettes) ; 144p en option
-    /// « ultra fluide » si besoin.
-    var proxy240p: Bool = true
+    /// true = proxys légers 240p (économie d'espace) ; false (défaut) =
+    /// proxys 720p tout-intra, prévisualisation nette et scrubbing instantané.
+    var proxy240p: Bool = false
     /// Conserver l'audio ralenti (non implémenté dans le MVP, exposé pour le schéma).
     var keepSlowedAudio: Bool = false
     /// Codec d'export : "hevc" (défaut), "h264".
