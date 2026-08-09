@@ -40,6 +40,12 @@ final class ProxyPlaybackEngine {
     /// Aperçu léger : 540p au lieu de 720p (réserve de décodeur).
     var lightPreview = false
 
+    /// Coupe le son de la prévisualisation (persiste à travers les items :
+    /// propriété du player, pas de l'item).
+    var muted: Bool = false {
+        didSet { player.isMuted = muted }
+    }
+
     /// Rappel périodique pendant la lecture (suivi de timeline).
     var onTick: ((CMTime) -> Void)?
 

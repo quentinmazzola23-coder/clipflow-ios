@@ -40,6 +40,8 @@ struct ProjectEditorView: View {
     @State private var errorMessage: String?
     @State private var exportToast: String?
     @State private var showGrid = false
+    /// Son de la prévisualisation coupé (mémorisé entre sessions).
+    @AppStorage("previewMuted") private var previewMuted = false
     @State private var slowPreview = false
     @State private var showReleaseConfirm = false
 
@@ -139,6 +141,20 @@ struct ProjectEditorView: View {
                     onSelectionDragEnded: persistAfterMove
                 )
                 .frame(height: isLandscape ? 100 : 120)
+                .overlay(alignment: .leading) {
+                    // Coupe-son de la prévisualisation, sur le bord gauche.
+                    Button {
+                        previewMuted.toggle()
+                        playback.muted = previewMuted
+                    } label: {
+                        Image(systemName: previewMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.body)
+                            .foregroundStyle(previewMuted ? .red : .white)
+                            .padding(7)
+                            .background(.black.opacity(0.65), in: Circle())
+                    }
+                    .padding(.leading, 6)
+                }
                 controlBar(isLandscape: isLandscape)
             }
         }
@@ -210,6 +226,7 @@ struct ProjectEditorView: View {
         .onAppear {
             RenderQueueController.shared.configure(container: modelContext.container)
             playback.lightPreview = project.previewLight
+            playback.muted = previewMuted
             // La timeline suit la lecture (le scrubbing manuel, lui, met en pause).
             playback.onTick = { time in
                 handlePlaybackTick(time)
