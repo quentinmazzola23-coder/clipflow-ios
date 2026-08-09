@@ -34,6 +34,11 @@ struct ProjectEditorView: View {
     // Sélection courante (temps LOCAL au rush, base source).
     @State private var selectionRushIndex: Int?
     @State private var selectionRange: CMTimeRange?
+    /// Passage validé en cours d'ÉDITION (tap sur un clip vert) : Rejeter
+    /// devient « Suppr. clip », Valider met à jour la position.
+    @State private var editingPassageID: PersistentIdentifier?
+    /// Stats développeur (menu ⋯).
+    @AppStorage("devStatsEnabled") private var devStatsEnabled = false
 
     // UI.
     @State private var playback = ProxyPlaybackEngine()
@@ -247,6 +252,7 @@ struct ProjectEditorView: View {
             RenderQueueController.shared.configure(container: modelContext.container)
             playback.lightPreview = project.previewLight
             playback.muted = previewMuted
+            if devStatsEnabled { DevStatsMonitor.shared.start() }
             // La timeline suit la lecture (le scrubbing manuel, lui, met en pause).
             playback.onTick = { time in
                 handlePlaybackTick(time)
@@ -291,6 +297,18 @@ struct ProjectEditorView: View {
                     )
                     Spacer()
                 }
+            }
+            // Stats développeur (menu ⋯ → Stats développeur).
+            if devStatsEnabled {
+                VStack {
+                    HStack {
+                        Spacer()
+                        DevStatsOverlay(stats: DevStatsMonitor.shared)
+                    }
+                    Spacer()
+                }
+                .padding(.top, 8)
+                .padding(.trailing, 8)
             }
         }
         .onChange(of: currentRushIndex) { _, _ in
@@ -416,25 +434,33 @@ struct ProjectEditorView: View {
     private var actionButtons: some View {
         Spacer()
 
-        Button("Rejeter", role: .destructive) {
-            playback.pause()
-            selectionRange = nil
-            selectionRushIndex = nil
-        }
-        .buttonStyle(.glass)
-        .disabled(selectionRange == nil)
-
-        // Valide le clip PUIS purge le rush de la timeline (le clip s'exporte
-        // via sa plage cachée) — pour les rushes dont un seul passage suffit.
-        Button("Val. + Suppr.") { validateAndDeleteRush() }
+        if editingPassageID != nil {
+            // Mode édition d'un clip validé : suppression directe du clip.
+            Button("Suppr. clip", role: .destructive) { deleteEditingPassage() }
+                .buttonStyle(.glass)
+        } else {
+            Button("Rejeter", role: .destructive) {
+                playback.pause()
+                selectionRange = nil
+                selectionRushIndex = nil
+            }
             .buttonStyle(.glass)
             .disabled(selectionRange == nil)
 
-        Button("Valider") { validateSelection() }
-            .buttonStyle(.glassProminent)
-            .tint(Theme.accent)
-            .disabled(selectionRange == nil)
-            .keyboardShortcut(.return, modifiers: [])
+            // Valide le clip PUIS purge le rush de la timeline (le clip
+            // s'exporte via sa plage cachée).
+            Button("Val. + Suppr.") { validateAndDeleteRush() }
+                .buttonStyle(.glass)
+                .disabled(selectionRange == nil)
+        }
+
+        Button(editingPassageID != nil ? "Mettre à jour" : "Valider") {
+            validateSelection()
+        }
+        .buttonStyle(.glassProminent)
+        .tint(Theme.accent)
+        .disabled(selectionRange == nil)
+        .keyboardShortcut(.return, modifiers: [])
     }
 
     private func controlBar(isLandscape: Bool) -> some View {
@@ -492,6 +518,13 @@ struct ProjectEditorView: View {
             Menu {
                 durationMenu
                 Toggle("Toucher = centre de la sélection", isOn: $project.touchAnchorIsCenter)
+                Toggle("Stats développeur", isOn: Binding(
+                    get: { devStatsEnabled },
+                    set: { enabled in
+                        devStatsEnabled = enabled
+                        enabled ? DevStatsMonitor.shared.start() : DevStatsMonitor.shared.stop()
+                    }
+                ))
                 Toggle("Aperçu léger (540p, + fluide)", isOn: Binding(
                     get: { project.previewLight },
                     set: { newValue in
@@ -621,6 +654,20 @@ struct ProjectEditorView: View {
         guard let index = rushIndex(atGlobalTime: globalTime) else { return }
         let rush = project.orderedRushes[index]
         let local = CMTime(seconds: globalTime - segmentStart(rushIndex: index), preferredTimescale: 600)
+        // Tap sur un clip DÉJÀ VALIDÉ → mode édition : la sélection épouse le
+        // clip, boucle immédiate ; Suppr. clip / Valider (mise à jour) au menu.
+        if let existing = rush.passages.first(where: {
+            CMTimeRangeContainsTime($0.sourceRange, time: local)
+        }) {
+            editingPassageID = existing.persistentModelID
+            selectionRushIndex = index
+            selectionRange = existing.sourceRange
+            playSelectionLoop()
+            recenterOnSelection()
+            return
+        }
+
+        editingPassageID = nil
         do {
             let range = try SelectionEngine.makeSelection(
                 touchTime: local,
@@ -638,6 +685,23 @@ struct ProjectEditorView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Supprime le passage en cours d'édition (fichier de plage inclus).
+    private func deleteEditingPassage() {
+        guard let id = editingPassageID,
+              let passage = modelContext.model(for: id) as? Passage else { return }
+        playback.pause()
+        if let cached = passage.cachedRangeRelativePath {
+            try? FileManager.default.removeItem(
+                at: StorageManager.url(forCachedRangeRelativePath: cached)
+            )
+        }
+        modelContext.delete(passage)
+        touch()
+        editingPassageID = nil
+        selectionRange = nil
+        selectionRushIndex = nil
     }
 
     /// Recentre la timeline sur le milieu de la sélection courante.
@@ -725,6 +789,33 @@ struct ProjectEditorView: View {
     }
 
     private func validateSelection() {
+        // Mode édition : mise à jour de la position du clip existant + nouvelle
+        // plage cachée (l'ancienne ne couvre plus forcément la sélection).
+        if let id = editingPassageID {
+            guard let passage = modelContext.model(for: id) as? Passage,
+                  let rush = passage.rush,
+                  let range = selectionRange else { return }
+            playback.pause()
+            passage.setStart(range.start)
+            if let old = passage.cachedRangeRelativePath {
+                try? FileManager.default.removeItem(
+                    at: StorageManager.url(forCachedRangeRelativePath: old)
+                )
+                passage.cachedRangeRelativePath = nil
+            }
+            touch()
+            validateHaptic.notificationOccurred(.success)
+            editingPassageID = nil
+            selectionRange = nil
+            selectionRushIndex = nil
+            Task {
+                if await !cacheSourceRange(for: passage, rush: rush) {
+                    errorMessage = "Nouvelle plage non mise en cache — conservez le rush pour exporter ce clip."
+                }
+            }
+            return
+        }
+
         guard let (passage, rush) = commitSelection() else { return }
         // Mise en cache de la plage source pleine qualité (export hors-ligne).
         // Échec SIGNALÉ : un passage sans plage cachée dépend de la copie
