@@ -48,6 +48,9 @@ struct RenderResult: Sendable {
     var processingSeconds: Double
     var interpolatedFrames: Int
     var copiedFrames: Int
+    /// Images interpolées écartées par le failsafe anti-flash (remplacées par
+    /// l'image source la plus proche).
+    var correctedFrames: Int
 }
 
 enum RenderError: Error, LocalizedError {
@@ -226,6 +229,7 @@ final class VideoRenderPipeline {
         var currentBuffer: CVPixelBuffer?
         var interpolatedCount = 0
         var copiedCount = 0
+        var correctedCount = 0
         var outputFrameIndex = 0
 
         /// Avance le décodeur jusqu'à l'index demandé (séquentiel strict).
@@ -298,8 +302,25 @@ final class VideoRenderPipeline {
                     nextPTS: sourcePTS[nextIdx],
                     phases: phases
                 )
-                for buffer in produced {
-                    try await appendWhenReady(buffer, pts: TimeMath.outputPTS(frameIndex: outputFrameIndex, fps: job.fps))
+                // FAILSAFE ANTI-FLASH : le flux optique produit parfois une
+                // image aberrante (flash blanc/noir). Chaque image interpolée
+                // est comparée en luminance à ses deux sources ; si elle dévie
+                // anormalement, elle est remplacée par la source la plus proche
+                // (micro-duplication invisible plutôt qu'un éclair).
+                let lumaPrev = Self.averageLuma(of: prev)
+                let lumaNext = Self.averageLuma(of: next)
+                for (phaseIndex, buffer) in produced.enumerated() {
+                    var outputBuffer = buffer
+                    if let lp = lumaPrev, let ln = lumaNext,
+                       let lb = Self.averageLuma(of: buffer) {
+                        let phase = Double(phases[phaseIndex])
+                        let expected = lp * (1 - phase) + ln * phase
+                        if abs(lb - expected) > 40 {
+                            outputBuffer = phase < 0.5 ? prev : next
+                            correctedCount += 1
+                        }
+                    }
+                    try await appendWhenReady(outputBuffer, pts: TimeMath.outputPTS(frameIndex: outputFrameIndex, fps: job.fps))
                     interpolatedCount += 1
                     outputFrameIndex += 1
                 }
@@ -337,8 +358,42 @@ final class VideoRenderPipeline {
             processingSeconds: Double(elapsed.components.seconds)
                 + Double(elapsed.components.attoseconds) / 1e18,
             interpolatedFrames: interpolatedCount,
-            copiedFrames: copiedCount
+            copiedFrames: copiedCount,
+            correctedFrames: correctedCount
         )
+    }
+
+    // MARK: - Failsafe anti-flash
+
+    /// Luminance moyenne (0-255) du plan Y d'un buffer 4:2:0 bi-planaire 8 bits,
+    /// échantillonné grossièrement (1 pixel sur 32). nil si format non géré —
+    /// dans ce cas le failsafe se désactive silencieusement.
+    static func averageLuma(of buffer: CVPixelBuffer) -> Double? {
+        let format = CVPixelBufferGetPixelFormatType(buffer)
+        guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange else { return nil }
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, 0) else { return nil }
+        let width = CVPixelBufferGetWidthOfPlane(buffer, 0)
+        let height = CVPixelBufferGetHeightOfPlane(buffer, 0)
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+        let pointer = base.assumingMemoryBound(to: UInt8.self)
+        var total = 0
+        var count = 0
+        var y = 0
+        while y < height {
+            var x = 0
+            let row = pointer + y * stride
+            while x < width {
+                total += Int(row[x])
+                count += 1
+                x += 32
+            }
+            y += 32
+        }
+        guard count > 0 else { return nil }
+        return Double(total) / Double(count)
     }
 
     // MARK: - Passe 1 : timestamps

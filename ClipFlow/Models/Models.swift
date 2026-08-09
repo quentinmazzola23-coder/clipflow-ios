@@ -151,7 +151,9 @@ final class Rush {
 
     var project: ClipProject?
 
-    @Relationship(deleteRule: .cascade, inverse: \Passage.rush)
+    /// .nullify : supprimer un rush (bouton « Val. + Suppr. ») ne doit PAS
+    /// détruire ses passages validés — ils s'exportent via leur plage cachée.
+    @Relationship(deleteRule: .nullify, inverse: \Passage.rush)
     var passages: [Passage] = []
 
     init() {}

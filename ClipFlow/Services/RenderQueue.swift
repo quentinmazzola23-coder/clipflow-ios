@@ -36,6 +36,8 @@ final class RenderQueueController {
     private var worker: Task<Void, Never>?
     private var pendingPassageIDs: [PersistentIdentifier] = []
     private var userPaused = false
+    /// Relances automatiques par passage (plafonnées à 3).
+    private var retryCounts: [PersistentIdentifier: Int] = [:]
 
     static let shared = RenderQueueController()
     private init() {}
@@ -184,21 +186,34 @@ final class RenderQueueController {
                 passage.lastExportError = nil
                 project.nextExportNumber += 1
                 snapshot.finishedJobs += 1
+                let corrected = result.correctedFrames > 0
+                    ? ", \(result.correctedFrames) image(s) anti-flash" : ""
                 snapshot.lastResultSummary = String(
-                    format: "%@ — %.2f s, %d images, %@, %d×%d, %@, moteur : %@, rendu en %.0f s",
+                    format: "%@ — %.2f s, %d images, %@, %d×%d, %@, moteur : %@%@, rendu en %.0f s",
                     filename, result.durationSeconds, result.frameCount,
                     result.codec.uppercased(), result.width, result.height,
                     StorageManager.formatBytes(result.fileSizeBytes),
-                    result.engineName, result.processingSeconds
+                    result.engineName, corrected, result.processingSeconds
                 )
             } catch is CancellationError {
                 passage.exportState = .queued
                 try? context.save()
                 return
             } catch {
-                passage.exportState = .failed
-                passage.lastExportError = error.localizedDescription
-                snapshot.failedJobs += 1
+                // Relance automatique (option, activée par défaut) : jusqu'à
+                // 3 tentatives par passage avant échec définitif.
+                let autoRetry = (UserDefaults.standard.object(forKey: "autoRetryFailedExports") as? Bool) ?? true
+                let attempts = retryCounts[passageID, default: 0]
+                if autoRetry, attempts < 3 {
+                    retryCounts[passageID] = attempts + 1
+                    passage.exportState = .queued
+                    passage.lastExportError = "Relance \(attempts + 1)/3 — \(error.localizedDescription)"
+                    pendingPassageIDs.append(passageID)
+                } else {
+                    passage.exportState = .failed
+                    passage.lastExportError = error.localizedDescription
+                    snapshot.failedJobs += 1
+                }
             }
             try? context.save() // état persistant APRÈS chaque clip
         }

@@ -13,9 +13,18 @@ struct RenderQueueView: View {
     @Bindable var project: ClipProject
     @Environment(\.dismiss) private var dismiss
     @State private var manifestURL: URL?
+    @AppStorage("autoRetryFailedExports") private var autoRetry = true
 
     private var queue: RenderQueueController { RenderQueueController.shared }
     private var thermal: ThermalMonitor { ThermalMonitor.shared }
+
+    private var pendingPassages: [Passage] {
+        project.orderedPassages.filter { $0.exportState != .exported }
+    }
+
+    private var exportedPassages: [Passage] {
+        project.orderedPassages.filter { $0.exportState == .exported }
+    }
 
     var body: some View {
         List {
@@ -55,48 +64,22 @@ struct RenderQueueView: View {
                 } else {
                     Text("Aucun rendu en cours.").foregroundStyle(.secondary)
                 }
+                Toggle("Relance automatique des échecs (3 essais)", isOn: $autoRetry)
+                    .font(.subheadline)
             }
 
-            Section("Passages") {
-                ForEach(project.orderedPassages) { passage in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(passage.exportedFilename
-                                 ?? "Passage \(passage.validationIndex + 1) — \(passage.rush?.originalFilename ?? "")")
-                                .font(.subheadline)
-                            if let error = passage.lastExportError {
-                                Text(error).font(.caption2).foregroundStyle(.red)
-                            }
-                        }
-                        Spacer()
-                        switch passage.exportState {
-                        case .exported:
-                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                        case .rendering:
-                            ProgressView()
-                        case .failed:
-                            Button("Relancer") {
-                                queue.enqueue(passageIDs: [passage.persistentModelID])
-                            }
-                            .font(.caption)
-                        case .queued:
-                            Image(systemName: "clock").foregroundStyle(.secondary)
-                        case .notExported:
-                            EmptyView()
-                        }
-                    }
-                }
-            }
-
+            // Actions EN HAUT (demande utilisateur).
             Section {
                 Button {
-                    let notExported = project.orderedPassages
-                        .filter { $0.exportState != .exported && $0.status != .rejete }
+                    let notExported = pendingPassages
+                        .filter { $0.status != .rejete }
                         .map(\.persistentModelID)
                     queue.enqueue(passageIDs: notExported)
                 } label: {
-                    Label("Exporter tous les passages restants", systemImage: "square.and.arrow.up.on.square")
+                    Label("Exporter tous les passages restants (\(pendingPassages.count))",
+                          systemImage: "square.and.arrow.up.on.square")
                 }
+                .disabled(pendingPassages.isEmpty)
                 Button {
                     manifestURL = try? ManifestExporter.writeManifest(for: project)
                 } label: {
@@ -108,11 +91,65 @@ struct RenderQueueView: View {
                     }
                 }
             }
+
+            // Seuls les passages restants sont listés ; les réussites sont
+            // rangées dans le sous-menu « Exportés » au fur et à mesure.
+            if !pendingPassages.isEmpty {
+                Section("À exporter (\(pendingPassages.count))") {
+                    ForEach(pendingPassages) { passage in
+                        passageRow(passage)
+                    }
+                }
+            }
+
+            if !exportedPassages.isEmpty {
+                Section {
+                    DisclosureGroup("Exportés (\(exportedPassages.count)) ✓") {
+                        ForEach(exportedPassages) { passage in
+                            HStack {
+                                Text(passage.exportedFilename ?? "clip")
+                                    .font(.subheadline)
+                                Spacer()
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                            }
+                        }
+                    }
+                }
+            }
         }
         .navigationTitle("Exports")
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Fermer") { dismiss() }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func passageRow(_ passage: Passage) -> some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(passage.exportedFilename
+                     ?? "Passage \(passage.validationIndex + 1)")
+                    .font(.subheadline)
+                if let error = passage.lastExportError {
+                    Text(error).font(.caption2).foregroundStyle(.red)
+                }
+            }
+            Spacer()
+            switch passage.exportState {
+            case .rendering:
+                ProgressView()
+            case .failed:
+                Button("Relancer") {
+                    queue.enqueue(passageIDs: [passage.persistentModelID])
+                }
+                .font(.caption)
+            case .queued:
+                Image(systemName: "clock").foregroundStyle(.secondary)
+            default:
+                EmptyView()
             }
         }
     }

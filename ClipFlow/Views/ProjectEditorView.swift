@@ -227,11 +227,21 @@ struct ProjectEditorView: View {
         ZStack {
             PlayerLayerView(player: playback.player)
             if project.rushes.isEmpty && importProgress == nil {
-                ContentUnavailableView(
-                    "Aucun rush",
-                    systemImage: "photo.badge.plus",
-                    description: Text("Importez des vidéos avec le bouton +.")
-                )
+                // L'illustration centrale EST un bouton d'import (même picker
+                // que le + de la barre).
+                PhotosPicker(
+                    selection: $pickerItems,
+                    selectionBehavior: .default,
+                    matching: .videos,
+                    preferredItemEncoding: .current
+                ) {
+                    ContentUnavailableView(
+                        "Aucun rush",
+                        systemImage: "photo.badge.plus",
+                        description: Text("Touchez ici (ou le bouton +) pour importer des vidéos.")
+                    )
+                }
+                .buttonStyle(.plain)
             }
             // Bandeau compact EN HAUT : n'occulte pas la visionneuse — le
             // triage peut commencer pendant l'importation.
@@ -364,6 +374,12 @@ struct ProjectEditorView: View {
             selectionRushIndex = nil
         }
         .disabled(selectionRange == nil)
+
+        // Valide le clip PUIS purge le rush de la timeline (le clip s'exporte
+        // via sa plage cachée) — pour les rushes dont un seul passage suffit.
+        Button("Val. + Suppr.") { validateAndDeleteRush() }
+            .buttonStyle(.bordered)
+            .disabled(selectionRange == nil)
 
         Button("Valider") { validateSelection() }
             .buttonStyle(.borderedProminent)
@@ -628,8 +644,11 @@ struct ProjectEditorView: View {
 
     // MARK: - Validation
 
-    private func validateSelection() {
-        guard let index = selectionRushIndex, let range = selectionRange else { return }
+    /// Cœur commun de la validation : crée le passage, nettoie l'état de
+    /// sélection. PAS d'export automatique (phase séparée), PAS de saut au
+    /// rush suivant (navigation au choix de l'utilisateur).
+    private func commitSelection() -> (Passage, Rush)? {
+        guard let index = selectionRushIndex, let range = selectionRange else { return nil }
         // La validation arrête la boucle de prévisualisation.
         playback.pause()
         let rush = project.orderedRushes[index]
@@ -650,24 +669,49 @@ struct ProjectEditorView: View {
         validateHaptic.notificationOccurred(.success)
         selectionRange = nil
         selectionRushIndex = nil
+        return (passage, rush)
+    }
 
+    private func validateSelection() {
+        guard let (passage, rush) = commitSelection() else { return }
         // Mise en cache de la plage source pleine qualité (export hors-ligne).
-        cacheSourceRange(for: passage, rush: rush)
+        Task { await cacheSourceRange(for: passage, rush: rush) }
+    }
 
-        // PAS d'export automatique : le rendu (décodage 4K + flux optique +
-        // encodage) en parallèle de l'édition affame le décodeur de l'aperçu.
-        // L'export est une phase séparée, lancée depuis l'écran Exports.
+    /// « Val. + Suppr. » : valide le passage PUIS purge le rush de la timeline
+    /// (entité + fichier source). La suppression n'a lieu qu'APRÈS la mise en
+    /// cache réussie de la plage — l'export du clip reste garanti.
+    private func validateAndDeleteRush() {
+        guard let (passage, rush) = commitSelection() else { return }
+        Task {
+            let cached = await cacheSourceRange(for: passage, rush: rush)
+            if cached {
+                deleteRush(rush)
+            } else {
+                errorMessage = "Plage non mise en cache — rush conservé pour garantir l'export du clip."
+            }
+        }
+    }
 
-        // AUCUN passage automatique au rush suivant : l'interface reste
-        // exactement sur le rush et la position courants ; navigation manuelle
-        // via les boutons rush précédent/suivant.
-        _ = index
+    /// Purge un rush de la timeline : fichier source supprimé, entité effacée.
+    /// Ses passages validés survivent (relation .nullify) et s'exportent via
+    /// leurs plages cachées.
+    private func deleteRush(_ rush: Rush) {
+        playback.pause()
+        if let path = rush.localSourceRelativePath {
+            try? FileManager.default.removeItem(at: StorageManager.url(forSourceRelativePath: path))
+        }
+        modelContext.delete(rush)
+        touch()
+        playback.load(rush: currentRush)
     }
 
     /// Copie passthrough (sans réencodage) de la plage sélectionnée + marge,
-    /// pour garantir l'export même si la source complète est libérée ensuite.
-    private func cacheSourceRange(for passage: Passage, rush: Rush) {
-        guard let sourcePath = rush.localSourceRelativePath else { return }
+    /// pour garantir l'export même si la source disparaît ensuite.
+    /// Retourne true si la plage est bien sur disque.
+    @discardableResult
+    private func cacheSourceRange(for passage: Passage, rush: Rush) async -> Bool {
+        guard let sourcePath = rush.localSourceRelativePath else { return false }
         let sourceURL = StorageManager.url(forSourceRelativePath: sourcePath)
         let margin = MediaAvailabilityService.cacheMargin(for: rush)
         let start = CMTimeMaximum(.zero, CMTimeSubtract(passage.start, margin))
@@ -675,29 +719,25 @@ struct ProjectEditorView: View {
         let cacheRange = CMTimeRange(start: start, end: end)
         let filename = "range-\(UUID().uuidString).mov"
         let destination = StorageManager.url(forCachedRangeRelativePath: filename)
-        let passageID = passage.persistentModelID
 
-        Task.detached(priority: .utility) {
-            let asset = AVURLAsset(url: sourceURL)
-            guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else { return }
-            export.timeRange = cacheRange
-            do {
-                try await export.export(to: destination, as: .mov)
-                StorageManager.excludeFromBackup(destination)
-                await MainActor.run {
-                    // Le start du passage reste en temps RUSH ; seul le décalage
-                    // du fichier caché est mémorisé (rebasage fait à l'export).
-                    if let saved = self.modelContext.model(for: passageID) as? Passage {
-                        saved.cachedRangeRelativePath = filename
-                        saved.cachedRangeOffsetValue = start.value
-                        saved.cachedRangeOffsetTimescale = start.timescale
-                        try? self.modelContext.save()
-                    }
-                }
-            } catch {
-                // Échec non bloquant : l'export utilisera la copie source complète.
-            }
+        let asset = AVURLAsset(url: sourceURL)
+        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
+            return false
         }
+        export.timeRange = cacheRange
+        do {
+            try await export.export(to: destination, as: .mov)
+        } catch {
+            return false
+        }
+        StorageManager.excludeFromBackup(destination)
+        // Le start du passage reste en temps RUSH ; seul le décalage du
+        // fichier caché est mémorisé (rebasage fait à l'export).
+        passage.cachedRangeRelativePath = filename
+        passage.cachedRangeOffsetValue = start.value
+        passage.cachedRangeOffsetTimescale = start.timescale
+        try? modelContext.save()
+        return true
     }
 
     // MARK: - Importation

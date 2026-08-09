@@ -15,12 +15,6 @@ struct StorageView: View {
     @State private var sourcesSize: Int64 = 0
     @State private var exportsSize: Int64 = 0
     @State private var freeSpace: Int64 = 0
-    @State private var confirmAction: StorageAction?
-
-    enum StorageAction: String, Identifiable {
-        case proxies, ranges, exports
-        var id: String { rawValue }
-    }
 
     var body: some View {
         List {
@@ -29,14 +23,19 @@ struct StorageView: View {
                     .font(.title3.monospacedDigit())
             }
             Section("Occupation ClipFlow") {
-                row("Proxys (régénérables)", size: proxiesSize) {
-                    confirmAction = .proxies
+                // Suppression directe, sans confirmation (demande utilisateur).
+                row("Proxys (anciens, inutilisés)", size: proxiesSize) {
+                    StorageManager.clearProxies()
+                    ThumbnailCache.shared.clearMemory()
+                    refresh()
                 }
                 row("Plages sources en cache", size: rangesSize) {
-                    confirmAction = .ranges
+                    StorageManager.clearCachedRanges()
+                    refresh()
                 }
                 row("Rendus temporaires", size: exportsSize) {
-                    confirmAction = .exports
+                    StorageManager.clearExports()
+                    refresh()
                 }
                 HStack {
                     Text("Copies sources (mode hors-ligne)")
@@ -58,22 +57,6 @@ struct StorageView: View {
             }
         }
         .onAppear(perform: refresh)
-        .confirmationDialog(
-            "Supprimer ces fichiers ?",
-            isPresented: Binding(get: { confirmAction != nil }, set: { if !$0 { confirmAction = nil } })
-        ) {
-            Button("Supprimer", role: .destructive) {
-                switch confirmAction {
-                case .proxies: StorageManager.clearProxies()
-                case .ranges: StorageManager.clearCachedRanges()
-                case .exports: StorageManager.clearExports()
-                case nil: break
-                }
-                ThumbnailCache.shared.clearMemory()
-                refresh()
-            }
-            Button("Annuler", role: .cancel) {}
-        }
     }
 
     private func row(_ title: String, size: Int64, onDelete: @escaping () -> Void) -> some View {
