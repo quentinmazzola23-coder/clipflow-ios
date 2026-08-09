@@ -58,7 +58,11 @@ private struct RushGridCell: View {
                 }
             }
             .frame(height: 110)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+            )
 
             // Numéro + durée.
             HStack(spacing: 4) {
@@ -67,11 +71,10 @@ private struct RushGridCell: View {
                 Text(String(format: "%.1fs", rush.duration.seconds))
                     .font(.caption2)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(.black.opacity(0.65), in: Capsule())
-            .foregroundStyle(.white)
-            .padding(5)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(.thinMaterial, in: Capsule())
+            .padding(6)
         }
         .overlay(alignment: .topTrailing) {
             // Badge : vert = traité (≥ 1 passage validé).

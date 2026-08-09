@@ -44,11 +44,13 @@ struct ClipFlowApp: App {
     }
 }
 
-/// Racine de navigation.
+/// Racine de navigation. Sombre par défaut (outil vidéo), accent unique.
 struct RootView: View {
     var body: some View {
         NavigationStack {
             ProjectListView()
         }
+        .tint(Theme.accent)
+        .preferredColorScheme(.dark)
     }
 }

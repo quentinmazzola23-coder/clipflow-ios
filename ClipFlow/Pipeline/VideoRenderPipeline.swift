@@ -127,8 +127,20 @@ final class VideoRenderPipeline {
         let decodeEnd = CMTimeAdd(job.sourceRange.end, margin)
         let decodeRange = CMTimeRange(start: decodeStart, end: decodeEnd)
 
-        // --- Passe 1 : timestamps réels, sans décodage (passthrough). ---
-        let sourcePTS = try collectPresentationTimestamps(asset: asset, track: track, range: decodeRange)
+        // Format de décodage — déterminé AVANT la passe 1 : les deux passes
+        // doivent utiliser exactement la même configuration de lecteur.
+        let readerPixelFormat: OSType = isHDRContent
+            ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+
+        // --- Passe 1 : timestamps des frames RÉELLEMENT DÉCODÉES. ---
+        // (Le passthrough listait des échantillons conteneur que le décodeur
+        // ne livre pas toujours — frame de frontière notamment — et tout
+        // désalignement de liste faussait le rythme du clip. En décodant les
+        // deux passes à l'identique, les ensembles coïncident par construction.)
+        let sourcePTS = try collectDecodedTimestamps(
+            asset: asset, track: track, range: decodeRange, pixelFormat: readerPixelFormat
+        )
         guard sourcePTS.count >= 2 else {
             throw RenderError.readerFailed("plage source trop courte (\(sourcePTS.count) image(s))")
         }
@@ -173,9 +185,6 @@ final class VideoRenderPipeline {
         // 10 bits bi-planaire pour le HLG — formats standard acceptés par VT.
         let reader = try AVAssetReader(asset: asset)
         reader.timeRange = decodeRange
-        let readerPixelFormat: OSType = isHDRContent
-            ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-            : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         let readerSettings: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: readerPixelFormat,
             kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any],
@@ -480,14 +489,20 @@ final class VideoRenderPipeline {
 
     // MARK: - Passe 1 : timestamps
 
-    /// Lit les PTS de la plage sans décoder (passthrough). Les échantillons
-    /// arrivent en ordre de DÉCODAGE — tri croissant appliqué.
-    private static func collectPresentationTimestamps(asset: AVAsset,
-                                                      track: AVAssetTrack,
-                                                      range: CMTimeRange) throws -> [CMTime] {
+    /// PTS des frames RÉELLEMENT DÉCODÉES sur la plage, avec la même
+    /// configuration de lecteur que la passe 2 : les deux ensembles
+    /// coïncident par construction (le passthrough listait des échantillons
+    /// que le décodeur ne livre pas toujours — source de désynchronisation).
+    private static func collectDecodedTimestamps(asset: AVAsset,
+                                                 track: AVAssetTrack,
+                                                 range: CMTimeRange,
+                                                 pixelFormat: OSType) throws -> [CMTime] {
         let reader = try AVAssetReader(asset: asset)
         reader.timeRange = range
-        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil) // passthrough
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any],
+        ])
         output.alwaysCopiesSampleData = false
         reader.add(output)
         guard reader.startReading() else {
@@ -495,16 +510,12 @@ final class VideoRenderPipeline {
         }
         var timestamps: [CMTime] = []
         while let sample = output.copyNextSampleBuffer() {
+            guard CMSampleBufferGetImageBuffer(sample) != nil else { continue }
             let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-            // FILTRAGE STRICT à la plage : en passthrough, le reader livre
-            // aussi les échantillons de pré-roll depuis l'image clé précédant
-            // la plage. Sans ce filtre, la liste de timestamps est décalée par
-            // rapport à la passe décodée → les premières images de sortie
-            // pointaient sur de mauvaises images sources (début « lent » puis
-            // accélération brutale).
-            if pts.isValid, CMTimeRangeContainsTime(range, time: pts) {
-                timestamps.append(pts)
-            }
+            if pts.isValid { timestamps.append(pts) }
+        }
+        if reader.status == .failed {
+            throw RenderError.readerFailed(reader.error?.localizedDescription ?? "lecture PTS")
         }
         timestamps.sort { CMTimeCompare($0, $1) < 0 }
         return timestamps

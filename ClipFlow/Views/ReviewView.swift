@@ -42,7 +42,8 @@ struct ReviewView: View {
                     Label(playAllTask == nil ? "Tout lire" : "Arrêter",
                           systemImage: playAllTask == nil ? "play.fill" : "stop.fill")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.glassProminent)
+                .tint(Theme.accent)
                 Spacer()
                 Text("\(reviewOrder.count) passage(s)")
                     .font(.caption)

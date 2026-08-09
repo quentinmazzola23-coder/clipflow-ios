@@ -150,12 +150,10 @@ struct ProjectEditorView: View {
                         playback.muted = previewMuted
                     } label: {
                         Image(systemName: previewMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                            .font(.body)
-                            .foregroundStyle(previewMuted ? .red : .white)
-                            .padding(7)
-                            .background(.black.opacity(0.65), in: Circle())
                     }
-                    .padding(.leading, 6)
+                    .buttonStyle(GlassIconButtonStyle(tint: previewMuted ? .red : .primary, diameter: 36))
+                    .accessibilityLabel(previewMuted ? "Rétablir le son" : "Couper le son")
+                    .padding(.leading, 8)
                 }
                 controlBar(isLandscape: isLandscape)
             }
@@ -170,10 +168,9 @@ struct ProjectEditorView: View {
                 Text(exportToast)
                     .font(.subheadline.bold())
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 9)
-                    .background(.green.opacity(0.9), in: Capsule())
-                    .foregroundStyle(.white)
-                    .padding(.bottom, 110)
+                    .padding(.vertical, 10)
+                    .glassEffect(.regular.tint(.green.opacity(0.55)), in: Capsule())
+                    .padding(.bottom, 116)
                     .transition(.opacity)
             }
         }
@@ -323,7 +320,7 @@ struct ProjectEditorView: View {
             if let range = selectionRange {
                 Text(String(format: "✂︎ %.2f → %.2f s", range.start.seconds, range.end.seconds))
                     .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.yellow)
+                    .foregroundStyle(Theme.accent)
             }
             Spacer()
             // Progression globale du triage.
@@ -334,8 +331,7 @@ struct ProjectEditorView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(.black.opacity(0.9))
-        .foregroundStyle(.white)
+        .background(.ultraThinMaterial)
     }
 
     private func availabilityBadge(_ availability: RushAvailability) -> some View {
@@ -355,31 +351,32 @@ struct ProjectEditorView: View {
             .background(color.opacity(0.25), in: Capsule())
     }
 
-    // MARK: Barre de commandes — adaptative.
-    // Portrait : deux rangées (une seule débordait, 13 contrôles).
-    // Paysage : une rangée compacte pour maximiser la visionneuse (§9).
+    // MARK: Barre de commandes — verre liquide, adaptative.
+    // Portrait : deux rangées ; paysage : une rangée compacte (visionneuse max).
 
     @ViewBuilder
     private var transportButtons: some View {
         // Navigation manuelle entre rushes (aucun passage automatique).
         Button { goToRush(offset: -1) } label: { Image(systemName: "chevron.backward.2") }
+            .buttonStyle(GlassIconButtonStyle(diameter: 40))
             .accessibilityLabel("Rush précédent")
             .disabled((currentRushIndex ?? 0) <= 0)
             .keyboardShortcut(.leftArrow, modifiers: [.command])
         Button { goToRush(offset: 1) } label: { Image(systemName: "chevron.forward.2") }
+            .buttonStyle(GlassIconButtonStyle(diameter: 40))
             .accessibilityLabel("Rush suivant")
             .disabled(currentRushIndex.map { $0 >= project.rushes.count - 1 } ?? true)
             .keyboardShortcut(.rightArrow, modifiers: [.command])
         // Saut direct au prochain rush sans passage validé.
         Button { goToNextUntreatedRush() } label: { Image(systemName: "arrow.right.to.line") }
+            .buttonStyle(GlassIconButtonStyle(diameter: 40))
             .accessibilityLabel("Prochain rush non traité")
             .disabled(project.rushes.isEmpty)
             .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
 
-        Divider().frame(height: 20)
-
         // Image par image sur la sélection.
         Button { nudgeSelection(frames: -1) } label: { Image(systemName: "backward.frame") }
+            .buttonStyle(GlassIconButtonStyle(diameter: 40))
             .accessibilityLabel("Image précédente")
             .keyboardShortcut(.leftArrow, modifiers: [])
             .disabled(selectionRange == nil)
@@ -388,14 +385,18 @@ struct ProjectEditorView: View {
         } label: {
             Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
         }
+        .buttonStyle(GlassIconButtonStyle(tint: Theme.accent, diameter: 44))
+        .accessibilityLabel(playback.isPlaying ? "Pause" : "Lecture")
         .keyboardShortcut(.space, modifiers: [])
         Button { nudgeSelection(frames: 1) } label: { Image(systemName: "forward.frame") }
+            .buttonStyle(GlassIconButtonStyle(diameter: 40))
             .accessibilityLabel("Image suivante")
             .keyboardShortcut(.rightArrow, modifiers: [])
             .disabled(selectionRange == nil)
 
         // Boucle de la sélection courante.
         Button { playSelectionLoop() } label: { Image(systemName: "repeat") }
+            .buttonStyle(GlassIconButtonStyle(diameter: 40))
             .accessibilityLabel("Lire la sélection en boucle")
             .disabled(selectionRange == nil)
 
@@ -407,7 +408,8 @@ struct ProjectEditorView: View {
         } label: {
             Image(systemName: slowPreview ? "tortoise.fill" : "tortoise")
         }
-        .foregroundStyle(slowPreview ? .blue : .primary)
+        .buttonStyle(GlassIconButtonStyle(tint: slowPreview ? Theme.accent : .primary, diameter: 40))
+        .accessibilityLabel("Prévisualisation au ralenti")
     }
 
     @ViewBuilder
@@ -419,16 +421,18 @@ struct ProjectEditorView: View {
             selectionRange = nil
             selectionRushIndex = nil
         }
+        .buttonStyle(.glass)
         .disabled(selectionRange == nil)
 
         // Valide le clip PUIS purge le rush de la timeline (le clip s'exporte
         // via sa plage cachée) — pour les rushes dont un seul passage suffit.
         Button("Val. + Suppr.") { validateAndDeleteRush() }
-            .buttonStyle(.bordered)
+            .buttonStyle(.glass)
             .disabled(selectionRange == nil)
 
         Button("Valider") { validateSelection() }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.glassProminent)
+            .tint(Theme.accent)
             .disabled(selectionRange == nil)
             .keyboardShortcut(.return, modifiers: [])
     }
@@ -436,30 +440,26 @@ struct ProjectEditorView: View {
     private func controlBar(isLandscape: Bool) -> some View {
         Group {
             if isLandscape {
-                HStack(spacing: 18) {
+                HStack(spacing: 10) {
                     transportButtons
-                    Divider().frame(height: 24)
                     actionButtons
                 }
-                .font(.title2)
             } else {
-                VStack(spacing: 8) {
-                    // Cibles tactiles ≥ 44 pt, réparties sur toute la largeur.
+                VStack(spacing: 10) {
+                    // Cibles réparties sur toute la largeur.
                     HStack(spacing: 0) {
                         Group { transportButtons }
-                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .frame(maxWidth: .infinity)
                     }
-                    .font(.title2)
-                    HStack(spacing: 16) {
+                    HStack(spacing: 12) {
                         actionButtons
                     }
-                    .controlSize(.large)
                 }
             }
         }
         .padding(.horizontal, 14)
-        .padding(.top, 6)
-        .padding(.bottom, 2)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
     }
 
     @ToolbarContentBuilder
@@ -966,7 +966,7 @@ private struct ImportProgressBanner: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
-        .background(.ultraThinMaterial, in: Capsule())
+        .glassEffect(in: Capsule())
         .padding(.top, 8)
     }
 }

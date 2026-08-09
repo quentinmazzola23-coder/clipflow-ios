@@ -80,7 +80,7 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        backgroundColor = UIColor(white: 0.08, alpha: 1)
+        backgroundColor = UIColor(red: 0.04, green: 0.05, blue: 0.08, alpha: 1)
 
         scrollView.delegate = self
         scrollView.showsHorizontalScrollIndicator = false
@@ -269,8 +269,8 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
 
         for segment in segments {
             let separator = CALayer()
-            separator.backgroundColor = UIColor.white.withAlphaComponent(0.8).cgColor
-            separator.frame = CGRect(x: x(forTime: segment.startOffset), y: 0, width: 1.5, height: bounds.height)
+            separator.backgroundColor = UIColor.white.withAlphaComponent(0.45).cgColor
+            separator.frame = CGRect(x: x(forTime: segment.startOffset), y: 0, width: 1, height: bounds.height)
             contentView.layer.addSublayer(separator)
             separatorLayers.append(separator)
 
@@ -278,8 +278,8 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
             label.string = " \(segment.title) "
             label.fontSize = 11
             label.foregroundColor = UIColor.white.cgColor
-            label.backgroundColor = UIColor.black.withAlphaComponent(0.65).cgColor
-            label.cornerRadius = 3
+            label.backgroundColor = UIColor.black.withAlphaComponent(0.55).cgColor
+            label.cornerRadius = 5
             label.contentsScale = UIScreen.main.scale
             label.frame = CGRect(x: x(forTime: segment.startOffset) + 3, y: 1, width: 110, height: 14)
             contentView.layer.addSublayer(label)
