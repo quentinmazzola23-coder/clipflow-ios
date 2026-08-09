@@ -136,6 +136,8 @@ final class Rush {
     var height: Int = 0
     var nominalFrameRate: Double = 0
     var codec: String = ""
+    /// Taille du fichier source (déduplication de repli sans identifiant PhotoKit).
+    var fileSizeBytes: Int64 = 0
     /// Rotation en degrés (0/90/180/270), issue de la preferredTransform.
     var rotationDegrees: Int = 0
     /// Colorimétrie : "sdr", "hlg", "pq", "appleLog", "dolbyVision", "inconnue".
@@ -191,6 +193,12 @@ final class Passage {
     /// Catégories attribuées, format "groupe:option".
     var categories: [String] = []
     var statusRaw: Int = PassageStatus.principal.rawValue
+
+    /// Caractéristiques SOURCE figées à la validation — le rush peut être
+    /// supprimé ensuite (Val. + Suppr.), l'export doit rester correct.
+    var colorimetry: String = "sdr"
+    var is10Bit: Bool = false
+    var sourceNominalFrameRate: Double = 0
 
     /// Plage source pleine qualité mise en cache pour export hors-ligne (chemin relatif).
     var cachedRangeRelativePath: String?

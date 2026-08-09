@@ -1,4 +1,4 @@
-//
+﻿//
 //  ProjectEditorView.swift
 //  ClipFlow
 //
@@ -17,11 +17,13 @@ struct ProjectEditorView: View {
     @Bindable var project: ClipProject
     @Environment(\.modelContext) private var modelContext
 
-    // Importation.
+    // Importation — service partagé (survit à la navigation).
     @State private var pickerItems: [PhotosPickerItem] = []
-    @State private var importProgress: ImportProgress?
-    @State private var importTask: Task<Void, Never>?
-    @State private var importStartedAt: Date?
+    private var importer: ImportController { ImportController.shared }
+
+    /// Segments MÉMOÏSÉS : reconstruits uniquement quand les rushes changent
+    /// (import, suppression) — plus de tri + projection à chaque tick de lecture.
+    @State private var segments: [TimelineSegment] = []
 
     // Navigation temporelle. Le positionnement externe passe par un jeton
     // one-shot (voir ProgrammaticSeek).
@@ -59,9 +61,9 @@ struct ProjectEditorView: View {
         return stem
     }
 
-    private var segments: [TimelineSegment] {
+    private func rebuildSegments() {
         var offset: Double = 0
-        return project.orderedRushes.enumerated().map { index, rush in
+        segments = project.orderedRushes.enumerated().map { index, rush in
             let stem = (rush.originalFilename as NSString).deletingPathExtension
             let isUUIDName = UUID(uuidString: stem) != nil || stem.count >= 30
             let segment = TimelineSegment(
@@ -215,15 +217,36 @@ struct ProjectEditorView: View {
             titleVisibility: .visible
         ) {
             Button("Libérer l'espace", role: .destructive) {
+                guard !RenderQueueController.shared.isBusy() else {
+                    errorMessage = "Export en cours — libération possible une fois la file terminée (un fichier en cours de lecture ne doit pas être supprimé)."
+                    return
+                }
                 let freed = MediaAvailabilityService.releaseSources(in: project)
                 try? modelContext.save()
+                rebuildSegments()
                 errorMessage = "Espace libéré : \(StorageManager.formatBytes(freed)). Les originaux restent intacts dans Photos."
             }
             Button("Annuler", role: .cancel) {}
         } message: {
             Text("Supprime les copies locales des rushes dont tous les passages sont déjà mis en cache pour l'export. Les originaux dans Photos ne sont jamais touchés. Une nouvelle sélection dans un rush libéré ne pourra plus être exportée sans réimporter la vidéo.")
         }
+        .task { await retryMissingCaches() }
+        .onChange(of: importer.progress?.completed) { _, _ in
+            // Les rushes apparaissent au fil de l'importation.
+            rebuildSegments()
+        }
+        .onChange(of: importer.completionToken) { _, _ in
+            rebuildSegments()
+            seekCounter += 1
+            seek = ProgrammaticSeek(token: seekCounter, time: playhead)
+            playback.load(rush: currentRush)
+            if !importer.lastErrors.isEmpty {
+                errorMessage = "Importation terminée avec \(importer.lastErrors.count) erreur(s) :\n"
+                    + importer.lastErrors.prefix(5).joined(separator: "\n")
+            }
+        }
         .onAppear {
+            rebuildSegments()
             RenderQueueController.shared.configure(container: modelContext.container)
             playback.lightPreview = project.previewLight
             playback.muted = previewMuted
@@ -243,7 +266,7 @@ struct ProjectEditorView: View {
     private var playerArea: some View {
         ZStack {
             PlayerLayerView(player: playback.player)
-            if project.rushes.isEmpty && importProgress == nil {
+            if project.rushes.isEmpty && importer.progress == nil {
                 // L'illustration centrale EST un bouton d'import (même picker
                 // que le + de la barre).
                 PhotosPicker(
@@ -262,12 +285,12 @@ struct ProjectEditorView: View {
             }
             // Bandeau compact EN HAUT : n'occulte pas la visionneuse — le
             // triage peut commencer pendant l'importation.
-            if let progress = importProgress {
+            if let progress = importer.progress {
                 VStack {
                     ImportProgressBanner(
                         progress: progress,
-                        startedAt: importStartedAt,
-                        onCancel: { importTask?.cancel() }
+                        startedAt: importer.startedAt,
+                        onCancel: { importer.cancel() }
                     )
                     Spacer()
                 }
@@ -340,13 +363,16 @@ struct ProjectEditorView: View {
     private var transportButtons: some View {
         // Navigation manuelle entre rushes (aucun passage automatique).
         Button { goToRush(offset: -1) } label: { Image(systemName: "chevron.backward.2") }
+            .accessibilityLabel("Rush précédent")
             .disabled((currentRushIndex ?? 0) <= 0)
             .keyboardShortcut(.leftArrow, modifiers: [.command])
         Button { goToRush(offset: 1) } label: { Image(systemName: "chevron.forward.2") }
+            .accessibilityLabel("Rush suivant")
             .disabled(currentRushIndex.map { $0 >= project.rushes.count - 1 } ?? true)
             .keyboardShortcut(.rightArrow, modifiers: [.command])
         // Saut direct au prochain rush sans passage validé.
         Button { goToNextUntreatedRush() } label: { Image(systemName: "arrow.right.to.line") }
+            .accessibilityLabel("Prochain rush non traité")
             .disabled(project.rushes.isEmpty)
             .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
 
@@ -354,6 +380,7 @@ struct ProjectEditorView: View {
 
         // Image par image sur la sélection.
         Button { nudgeSelection(frames: -1) } label: { Image(systemName: "backward.frame") }
+            .accessibilityLabel("Image précédente")
             .keyboardShortcut(.leftArrow, modifiers: [])
             .disabled(selectionRange == nil)
         Button {
@@ -363,11 +390,13 @@ struct ProjectEditorView: View {
         }
         .keyboardShortcut(.space, modifiers: [])
         Button { nudgeSelection(frames: 1) } label: { Image(systemName: "forward.frame") }
+            .accessibilityLabel("Image suivante")
             .keyboardShortcut(.rightArrow, modifiers: [])
             .disabled(selectionRange == nil)
 
         // Boucle de la sélection courante.
         Button { playSelectionLoop() } label: { Image(systemName: "repeat") }
+            .accessibilityLabel("Lire la sélection en boucle")
             .disabled(selectionRange == nil)
 
         // Bascule prévisualisation ralentie 0,5× (n'affecte pas l'export).
@@ -528,7 +557,8 @@ struct ProjectEditorView: View {
         guard let index = rushIndex(atGlobalTime: globalTime) else { return }
         let local = globalTime - segmentStart(rushIndex: index)
         playback.load(rush: project.orderedRushes[index])
-        playback.seek(to: CMTime(seconds: local, preferredTimescale: 600))
+        // Seek adaptatif : grossier pendant le geste, exact à l'arrêt.
+        playback.scrub(to: CMTime(seconds: local, preferredTimescale: 600))
     }
 
     /// Suivi de lecture : la timeline défile pour rester alignée sur l'image
@@ -678,6 +708,11 @@ struct ProjectEditorView: View {
         passage.finalDurationCentiseconds = project.finalDurationCentiseconds
         passage.speedNumerator = project.speedNumerator
         passage.speedDenominator = project.speedDenominator
+        // Caractéristiques source FIGÉES : le rush peut être supprimé ensuite,
+        // l'export garde la bonne colorimétrie (HDR jamais rendu en SDR muet).
+        passage.colorimetry = rush.colorimetry
+        passage.is10Bit = rush.is10Bit
+        passage.sourceNominalFrameRate = rush.nominalFrameRate
         passage.rush = rush
         passage.project = project
         modelContext.insert(passage)
@@ -692,21 +727,42 @@ struct ProjectEditorView: View {
     private func validateSelection() {
         guard let (passage, rush) = commitSelection() else { return }
         // Mise en cache de la plage source pleine qualité (export hors-ligne).
-        Task { await cacheSourceRange(for: passage, rush: rush) }
+        // Échec SIGNALÉ : un passage sans plage cachée dépend de la copie
+        // source — l'utilisateur doit le savoir avant toute libération.
+        Task {
+            if await !cacheSourceRange(for: passage, rush: rush) {
+                errorMessage = "Mise en cache de la plage impossible pour ce passage — conservez le rush (l'export utilisera la copie source complète)."
+            }
+        }
     }
 
     /// « Val. + Suppr. » : valide le passage PUIS purge le rush de la timeline
-    /// (entité + fichier source). La suppression n'a lieu qu'APRÈS la mise en
-    /// cache réussie de la plage — l'export du clip reste garanti.
+    /// (entité + fichier source). Suppression UNIQUEMENT si : la plage du
+    /// nouveau passage est cachée, TOUS les autres passages du rush le sont
+    /// aussi, et aucun rendu n'est en cours (anti-course fichier).
     private func validateAndDeleteRush() {
         guard let (passage, rush) = commitSelection() else { return }
         Task {
             let cached = await cacheSourceRange(for: passage, rush: rush)
-            if cached {
-                deleteRush(rush)
-            } else {
+            guard cached else {
                 errorMessage = "Plage non mise en cache — rush conservé pour garantir l'export du clip."
+                return
             }
+            let allCached = rush.passages.allSatisfy { p in
+                guard let path = p.cachedRangeRelativePath else { return false }
+                return FileManager.default.fileExists(
+                    atPath: StorageManager.url(forCachedRangeRelativePath: path).path
+                )
+            }
+            guard allCached else {
+                errorMessage = "Un autre passage de ce rush n'a pas encore sa plage cachée — rush conservé."
+                return
+            }
+            guard !RenderQueueController.shared.isBusy() else {
+                errorMessage = "Export en cours — le rush sera supprimable une fois la file terminée."
+                return
+            }
+            deleteRush(rush)
         }
     }
 
@@ -720,12 +776,17 @@ struct ProjectEditorView: View {
         }
         modelContext.delete(rush)
         touch()
+        rebuildSegments()
         playback.load(rush: currentRush)
     }
 
-    /// Copie passthrough (sans réencodage) de la plage sélectionnée + marge,
-    /// pour garantir l'export même si la source disparaît ensuite.
-    /// Retourne true si la plage est bien sur disque.
+    /// Copie passthrough (sans réencodage) de la plage sélectionnée + marge.
+    /// L'offset stocké est le PTS RÉEL du premier échantillon écrit — exact
+    /// par construction (un passthrough HEVC ne peut pas couper mi-GOP :
+    /// l'ancien AVAssetExportSession recalait la coupe sur l'image clé
+    /// précédente et l'offset supposé devenait faux, décalant le contenu de
+    /// chaque export différemment). Le fichier produit est vérifié avant
+    /// d'être déclaré utilisable.
     @discardableResult
     private func cacheSourceRange(for passage: Passage, rush: Rush) async -> Bool {
         guard let sourcePath = rush.localSourceRelativePath else { return false }
@@ -733,113 +794,119 @@ struct ProjectEditorView: View {
         let margin = MediaAvailabilityService.cacheMargin(for: rush)
         let start = CMTimeMaximum(.zero, CMTimeSubtract(passage.start, margin))
         let end = CMTimeMinimum(rush.duration, CMTimeAdd(passage.sourceRange.end, margin))
-        let cacheRange = CMTimeRange(start: start, end: end)
         let filename = "range-\(UUID().uuidString).mov"
         let destination = StorageManager.url(forCachedRangeRelativePath: filename)
 
-        let asset = AVURLAsset(url: sourceURL)
-        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
+        guard let actualStart = await Self.remuxRange(
+            source: sourceURL, destination: destination,
+            start: start, end: end
+        ) else {
+            try? FileManager.default.removeItem(at: destination)
             return false
         }
-        export.timeRange = cacheRange
-        do {
-            try await export.export(to: destination, as: .mov)
-        } catch {
+        // Sanité : le premier échantillon écrit doit précéder (ou égaler) le
+        // début de la sélection — sinon la plage ne couvre pas le passage.
+        guard CMTimeCompare(actualStart, passage.start) <= 0 else {
+            try? FileManager.default.removeItem(at: destination)
             return false
         }
         StorageManager.excludeFromBackup(destination)
-        // Le start du passage reste en temps RUSH ; seul le décalage du
-        // fichier caché est mémorisé (rebasage fait à l'export).
+        // Le start du passage reste en temps RUSH ; le décalage mémorisé est
+        // le zéro RÉEL du fichier caché (rebasage exact à l'export).
         passage.cachedRangeRelativePath = filename
-        passage.cachedRangeOffsetValue = start.value
-        passage.cachedRangeOffsetTimescale = start.timescale
+        passage.cachedRangeOffsetValue = actualStart.value
+        passage.cachedRangeOffsetTimescale = actualStart.timescale
         try? modelContext.save()
         return true
     }
 
-    // MARK: - Importation
+    /// Découpe passthrough manuelle : AVAssetReader (échantillons compressés)
+    /// → AVAssetWriter (sourceFormatHint). Retourne le PTS source du premier
+    /// échantillon écrit (= zéro du fichier produit), ou nil en cas d'échec.
+    nonisolated private static func remuxRange(source: URL,
+                                              destination: URL,
+                                              start: CMTime,
+                                              end: CMTime) async -> CMTime? {
+        do {
+            let asset = AVURLAsset(url: source)
+            guard let track = try await asset.loadTracks(withMediaType: .video).first else { return nil }
+            let formatDescriptions = try await track.load(.formatDescriptions)
+            guard let formatHint = formatDescriptions.first else { return nil }
 
-    /// Importation RUSH PAR RUSH : chaque élément est intégré et sauvegardé dès
-    /// son arrivée. Une interruption ne perd que l'élément en cours ; en
-    /// re-sélectionnant, les doublons (même identifiant PhotoKit) sont ignorés.
-    private func startImport(_ items: [PhotosPickerItem]) {
-        pickerItems = []
-        importStartedAt = .now
-        importTask = Task {
-            var errors: [String] = []
-            for (index, item) in items.enumerated() {
-                if Task.isCancelled { break }
-                importProgress = ImportProgress(
-                    completed: index, total: items.count,
-                    currentName: "vidéo \(index + 1)", errors: errors
-                )
-                do {
-                    let info = try await PhotoImporter.importSingle(item, pickOrder: index)
-                    await integrateOne(info)
-                } catch is CancellationError {
-                    break
-                } catch {
-                    errors.append("Vidéo \(index + 1) : \(error.localizedDescription)")
+            let reader = try AVAssetReader(asset: asset)
+            reader.timeRange = CMTimeRange(start: start, end: end)
+            let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil) // passthrough
+            output.alwaysCopiesSampleData = false
+            reader.add(output)
+            guard reader.startReading() else { return nil }
+
+            // Le lecteur passthrough livre depuis l'image de synchronisation
+            // nécessaire au décodage : on écrit TOUT et on mémorise le PTS
+            // minimal réellement écrit.
+            var samples: [CMSampleBuffer] = []
+            var minPTS = CMTime.positiveInfinity
+            while let sample = output.copyNextSampleBuffer() {
+                let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                if pts.isValid, CMTimeCompare(pts, minPTS) < 0 { minPTS = pts }
+                samples.append(sample)
+            }
+            guard !samples.isEmpty, minPTS != .positiveInfinity else { return nil }
+
+            let writer = try AVAssetWriter(outputURL: destination, fileType: .mov)
+            let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil,
+                                           sourceFormatHint: formatHint)
+            input.expectsMediaDataInRealTime = false
+            writer.add(input)
+            guard writer.startWriting() else { return nil }
+            writer.startSession(atSourceTime: minPTS)
+
+            for sample in samples {
+                while !input.isReadyForMoreMediaData {
+                    try await Task.sleep(for: .milliseconds(4))
+                }
+                guard input.append(sample) else {
+                    writer.cancelWriting()
+                    return nil
                 }
             }
-            importProgress = ImportProgress(
-                completed: items.count, total: items.count,
-                currentName: "", errors: errors
-            )
-            // Ordre = ORDRE DE SÉLECTION dans le picker (aucun tri
-            // chronologique : l'utilisateur maîtrise l'ordre en sélectionnant).
-            touch()
-            // Recale la timeline après le redimensionnement du contenu.
-            seekCounter += 1
-            seek = ProgrammaticSeek(token: seekCounter, time: playhead)
-            playback.load(rush: currentRush)
-            // Signal de fin : son système + haptique de succès.
-            AudioServicesPlaySystemSound(1001)
-            validateHaptic.notificationOccurred(.success)
-            if !errors.isEmpty {
-                errorMessage = "Importation terminée avec \(errors.count) erreur(s) :\n"
-                    + errors.prefix(5).joined(separator: "\n")
-            }
-            importProgress = nil
-            importStartedAt = nil
-            importTask = nil
+            input.markAsFinished()
+            await writer.finishWriting()
+            guard writer.status == .completed else { return nil }
+
+            // Vérification du fichier produit : lisible et durée plausible.
+            let produced = AVURLAsset(url: destination)
+            let producedDuration = try await produced.load(.duration)
+            let requestedDuration = CMTimeSubtract(end, minPTS).seconds
+            guard producedDuration.seconds > requestedDuration - 0.5 else { return nil }
+
+            return minPTS
+        } catch {
+            return nil
         }
     }
 
-    /// Intègre un rush importé (dédupliqué) et lance son proxy en arrière-plan.
-    @MainActor
-    private func integrateOne(_ info: ImportedRushInfo) async {
-        // Doublon (réimportation après interruption) : suppression de la copie
-        // fraîchement transférée, rien d'autre à faire.
-        if let id = info.assetIdentifier,
-           project.rushes.contains(where: { $0.assetIdentifier == id }) {
-            try? FileManager.default.removeItem(
-                at: StorageManager.url(forSourceRelativePath: info.localRelativePath)
-            )
-            return
-        }
+    // MARK: - Importation
 
-        let rush = Rush()
-        rush.orderIndex = (project.rushes.map(\.orderIndex).max() ?? -1) + 1
-        rush.assetIdentifier = info.assetIdentifier
-        rush.originalFilename = info.originalFilename
-        rush.captureDate = info.captureDate
-        rush.fileCreationDate = info.fileCreationDate
-        rush.pickOrder = info.pickOrder
-        rush.durationValue = info.duration.value
-        rush.durationTimescale = info.duration.timescale
-        rush.width = info.width
-        rush.height = info.height
-        rush.nominalFrameRate = info.nominalFrameRate
-        rush.codec = info.codec
-        rush.rotationDegrees = info.rotationDegrees
-        rush.colorimetry = info.colorimetry
-        rush.is10Bit = info.is10Bit
-        rush.localSourceRelativePath = info.localRelativePath
-        rush.availability = .offlineReady
-        rush.project = project
-        modelContext.insert(rush)
-        try? modelContext.save() // persistance immédiate — reprise possible
+    /// Délégué au service partagé ImportController — la tâche survit à la
+    /// navigation, la bannière réapparaît au retour dans l'éditeur.
+    private func startImport(_ items: [PhotosPickerItem]) {
+        pickerItems = []
+        importer.start(items: items, project: project, context: modelContext)
+    }
+
+    /// Passages dont la plage cachée manque (app tuée pendant la mise en
+    /// cache) : nouvelle tentative à l'ouverture du projet.
+    private func retryMissingCaches() async {
+        try? await Task.sleep(for: .seconds(2)) // laisse l'ouverture respirer
+        for passage in project.orderedPassages {
+            let missing = passage.cachedRangeRelativePath.map {
+                !FileManager.default.fileExists(atPath: StorageManager.url(forCachedRangeRelativePath: $0).path)
+            } ?? true
+            guard missing,
+                  let rush = passage.rush,
+                  rush.localSourceRelativePath != nil else { continue }
+            await cacheSourceRange(for: passage, rush: rush)
+        }
     }
 
     /// Sauvegarde automatique après chaque modification importante.

@@ -121,9 +121,24 @@ final class ProxyPlaybackEngine {
 
     // MARK: - Transport
 
-    /// Positionne la lecture (scrubbing) — tolérance nulle.
+    /// Positionne la lecture — tolérance nulle (image exacte).
     func seek(to time: CMTime) {
         player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// Scrubbing ADAPTATIF : pendant le défilement, seeks tolérants et
+    /// coalescés (l'image clé proche suffit, décodage léger sur du long-GOP) ;
+    /// 160 ms après le dernier mouvement, seek exact sur la position finale.
+    private var scrubFinalizeTask: Task<Void, Never>?
+
+    func scrub(to time: CMTime) {
+        requestSeek(to: time)
+        scrubFinalizeTask?.cancel()
+        scrubFinalizeTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(160))
+            guard !Task.isCancelled else { return }
+            self?.seek(to: time)
+        }
     }
 
     /// Lecture libre (sans boucle).

@@ -253,7 +253,15 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
 
     // MARK: Séparations et étiquettes de rush
 
+    /// Clé de la dernière construction : évite de détruire/recréer tous les
+    /// layers à chaque passage de layout quand rien n'a changé.
+    private var separatorsBuildKey = ""
+
     private func layoutSeparators() {
+        let key = "\(segments.count)|\(pointsPerSecond)|\(totalDuration)|\(bounds.height)"
+        guard key != separatorsBuildKey else { return }
+        separatorsBuildKey = key
+
         separatorLayers.forEach { $0.removeFromSuperlayer() }
         labelLayers.forEach { $0.removeFromSuperlayer() }
         separatorLayers.removeAll()

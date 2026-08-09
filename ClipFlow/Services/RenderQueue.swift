@@ -43,7 +43,31 @@ final class RenderQueueController {
     private init() {}
 
     func configure(container: ModelContainer) {
+        let firstConfiguration = (self.container == nil)
         self.container = container
+        // Reprise après crash : des passages peuvent rester figés en
+        // .rendering/.queued (états fantômes, spinner éternel). Au premier
+        // configure, hors file active, ils repassent en .notExported.
+        if firstConfiguration, !snapshot.isRunning, pendingPassageIDs.isEmpty {
+            let context = container.mainContext
+            let renderingRaw = ExportState.rendering.rawValue
+            let queuedRaw = ExportState.queued.rawValue
+            let descriptor = FetchDescriptor<Passage>(
+                predicate: #Predicate { $0.exportStateRaw == renderingRaw || $0.exportStateRaw == queuedRaw }
+            )
+            if let phantoms = try? context.fetch(descriptor), !phantoms.isEmpty {
+                for passage in phantoms {
+                    passage.exportState = .notExported
+                }
+                try? context.save()
+            }
+        }
+    }
+
+    /// Des passages du rush donné sont-ils en cours ou en attente de rendu ?
+    /// (garde anti-course : suppression de fichier pendant une lecture).
+    func isBusy() -> Bool {
+        snapshot.isRunning || !pendingPassageIDs.isEmpty
     }
 
     /// Ajoute les passages à la file (doublons ignorés : déjà en file ou déjà
@@ -150,7 +174,9 @@ final class RenderQueueController {
                 fps: project.exportFPS,
                 codec: project.exportCodec,
                 outputFilename: filename,
-                colorimetry: passage.rush?.colorimetry ?? "sdr"
+                // Colorimétrie figée sur le passage à la validation — jamais
+                // "sdr" par défaut quand le rush a été supprimé.
+                colorimetry: passage.colorimetry
             )
 
             passage.exportState = .rendering
@@ -186,8 +212,17 @@ final class RenderQueueController {
                 passage.lastExportError = nil
                 project.nextExportNumber += 1
                 snapshot.finishedJobs += 1
-                let corrected = result.correctedFrames > 0
+                var corrected = result.correctedFrames > 0
                     ? ", \(result.correctedFrames) image(s) anti-flash" : ""
+                if result.maxLumaDeviation > 0 {
+                    corrected += String(format: " (dev max %.0f)", result.maxLumaDeviation)
+                }
+                if result.uncheckedInterpolatedFrames > 0 {
+                    corrected += ", \(result.uncheckedInterpolatedFrames) non contrôlée(s)"
+                }
+                if result.discardedDecodedFrames > 0 {
+                    corrected += ", \(result.discardedDecodedFrames) écartée(s) au décodage"
+                }
                 snapshot.lastResultSummary = String(
                     format: "%@ — %.2f s, %d images, %@, %d×%d, %@, moteur : %@%@, rendu en %.0f s",
                     filename, result.durationSeconds, result.frameCount,

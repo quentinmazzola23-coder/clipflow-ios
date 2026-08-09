@@ -31,6 +31,9 @@ struct ClipFlowApp: App {
         } catch {
             fatalError("Impossible d'initialiser la base SwiftData : \(error)")
         }
+        // Rendus orphelins (crash entre rendu et enregistrement Photos) :
+        // purge au lancement — aucune file ne tourne encore à cet instant.
+        StorageManager.clearExports()
     }
 
     var body: some Scene {

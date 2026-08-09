@@ -157,6 +157,14 @@ enum FramePlanner {
         var entries: [FramePlanEntry] = []
         entries.reserveCapacity(outputFrameCount)
 
+        // Intervalle source médian : borne la tolérance de fin de rush.
+        var intervals: [Double] = []
+        intervals.reserveCapacity(sourcePTS.count - 1)
+        for i in 1..<sourcePTS.count {
+            intervals.append(CMTimeSubtract(sourcePTS[i], sourcePTS[i - 1]).seconds)
+        }
+        let medianInterval = intervals.sorted()[intervals.count / 2]
+
         // Parcours séquentiel : les cibles sont croissantes, on avance un curseur.
         var cursor = 0
 
@@ -194,9 +202,15 @@ enum FramePlanner {
                 }
                 entries.append(.interpolate(previousIndex: cursor, nextIndex: cursor + 1, phase: phase))
             } else {
-                // Cible après la dernière image source : dernière image dupliquée
-                // uniquement si l'écart reste inférieur à un intervalle source.
-                throw FramePlanError.targetOutsideSourceRange(frameIndex: frameIndex)
+                // Cible après la dernière image source (sélection collée à la
+                // fin du rush) : dernière image DUPLIQUÉE si l'écart reste
+                // inférieur à 1,5 intervalle source — sinon vraie erreur.
+                let overshoot = CMTimeSubtract(target, current).seconds
+                if overshoot <= medianInterval * 1.5 {
+                    entries.append(.copy(sourceIndex: cursor))
+                } else {
+                    throw FramePlanError.targetOutsideSourceRange(frameIndex: frameIndex)
+                }
             }
         }
         return entries

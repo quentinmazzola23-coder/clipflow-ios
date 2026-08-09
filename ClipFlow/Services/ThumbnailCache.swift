@@ -26,6 +26,22 @@ final class ThumbnailCache: @unchecked Sendable {
     /// Demandes en cours pour éviter les doublons.
     private var inFlight = Set<String>()
 
+    /// Cache DISQUE (Caches/Thumbnails) : les vignettes survivent au
+    /// relancement — plus de rafale de décodages 4K à l'ouverture d'un projet.
+    private static let diskDirectory: URL = {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let dir = caches.appendingPathComponent("Thumbnails", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    private func diskURL(for cacheKey: NSString) -> URL {
+        let safe = (cacheKey as String)
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "\\", with: "_")
+        return Self.diskDirectory.appendingPathComponent(safe + ".jpg")
+    }
+
     private init() {
         cache.countLimit = 120
         // ~48 Mo maximum d'images décodées (coût = octets réels).
@@ -65,13 +81,27 @@ final class ThumbnailCache: @unchecked Sendable {
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             var image: UIImage?
-            do {
-                let (cgImage, _) = try await generator.image(at: time)
-                image = UIImage(cgImage: cgImage)
-                let cost = cgImage.bytesPerRow * cgImage.height
-                self.cache.setObject(image!, forKey: ck, cost: cost)
-            } catch {
-                // Fichier indisponible ou temps hors bornes : ignorer.
+            // 1. Cache disque (survit au relancement de l'app).
+            let diskURL = self.diskURL(for: ck)
+            if let data = try? Data(contentsOf: diskURL),
+               let disk = UIImage(data: data) {
+                image = disk
+                self.cache.setObject(disk, forKey: ck, cost: data.count * 4)
+            }
+            // 2. Génération depuis l'original, puis écriture disque.
+            if image == nil {
+                do {
+                    let (cgImage, _) = try await generator.image(at: time)
+                    let generated = UIImage(cgImage: cgImage)
+                    image = generated
+                    let cost = cgImage.bytesPerRow * cgImage.height
+                    self.cache.setObject(generated, forKey: ck, cost: cost)
+                    if let jpeg = generated.jpegData(compressionQuality: 0.7) {
+                        try? jpeg.write(to: diskURL, options: .atomic)
+                    }
+                } catch {
+                    // Fichier indisponible ou temps hors bornes : ignorer.
+                }
             }
             self.lock.lock()
             self.inFlight.remove(ck as String)

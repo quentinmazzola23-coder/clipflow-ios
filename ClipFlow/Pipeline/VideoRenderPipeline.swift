@@ -51,6 +51,14 @@ struct RenderResult: Sendable {
     /// Images interpolées écartées par le failsafe anti-flash (remplacées par
     /// l'image source la plus proche).
     var correctedFrames: Int
+    /// Déviation de luminance maximale observée sur les images interpolées
+    /// (instrumentation : calibrage du seuil anti-flash sur contenu réel).
+    var maxLumaDeviation: Double
+    /// Frames décodées écartées lors de l'appariement par timestamps
+    /// (pré-roll, échantillons surnuméraires) — visibilité, pas silence.
+    var discardedDecodedFrames: Int
+    /// Images interpolées non contrôlables par le failsafe (format non géré).
+    var uncheckedInterpolatedFrames: Int
 }
 
 enum RenderError: Error, LocalizedError {
@@ -100,6 +108,7 @@ final class VideoRenderPipeline {
         default:
             break
         }
+        let isHDRContent = (job.colorimetry == "hlg")
 
         let asset = AVURLAsset(url: job.sourceURL)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
@@ -158,12 +167,19 @@ final class VideoRenderPipeline {
         defer { engine.endSession() }
 
         // --- Passe 2 : décodage séquentiel. ---
+        // Format de lecture choisi EXPLICITEMENT (jamais le dictionnaire
+        // d'attributs VT verbatim : vocabulaire CoreVideo ≠ outputSettings,
+        // risque d'exception à la construction). 8 bits pour le SDR,
+        // 10 bits bi-planaire pour le HLG — formats standard acceptés par VT.
         let reader = try AVAssetReader(asset: asset)
         reader.timeRange = decodeRange
-        var readerSettings: [String: Any] = engine.sourcePixelBufferAttributes ?? [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        let readerPixelFormat: OSType = isHDRContent
+            ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        let readerSettings: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: readerPixelFormat,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any],
         ]
-        readerSettings[kCVPixelBufferIOSurfacePropertiesKey as String] = [:] as [String: Any]
         let readerOutput = AVAssetReaderTrackOutput(track: track, outputSettings: readerSettings)
         readerOutput.alwaysCopiesSampleData = false
         reader.add(readerOutput)
@@ -176,7 +192,7 @@ final class VideoRenderPipeline {
         try? FileManager.default.removeItem(at: outputURL)
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
 
-        let isHDR = (job.colorimetry == "hlg")
+        let isHDR = isHDRContent
         var compression: [String: Any] = [
             AVVideoExpectedSourceFrameRateKey: job.fps,
             AVVideoAllowFrameReorderingKey: true,
@@ -230,22 +246,40 @@ final class VideoRenderPipeline {
         var interpolatedCount = 0
         var copiedCount = 0
         var correctedCount = 0
+        var maxLumaDeviation: Double = 0
+        var discardedDecodedFrames = 0
+        var uncheckedInterpolatedFrames = 0
         var outputFrameIndex = 0
 
-        /// Avance le décodeur jusqu'à l'index demandé (séquentiel strict).
-        /// Les images décodées avant le premier timestamp attendu (pré-roll
-        /// éventuel du décodeur) sont ignorées pour rester aligné avec la
-        /// liste de timestamps de la passe 1.
-        let firstExpectedPTS = sourcePTS[0]
+        /// Avance le décodeur jusqu'à l'index demandé en APPARIANT PAR
+        /// TIMESTAMP — jamais par comptage aveugle. Toute frame décodée dont
+        /// le PTS n'est pas le prochain attendu est écartée (comptée) ; une
+        /// frame attendue jamais livrée = erreur EXPLICITE, pas de glissement
+        /// silencieux (cause racine du « ralenti puis accélération »).
         func advanceTo(index: Int) throws {
             while sourceIndex < index {
                 guard let sample = readerOutput.copyNextSampleBuffer() else {
-                    throw RenderError.readerFailed("fin de flux prématurée (image \(index))")
+                    throw RenderError.readerFailed(
+                        "fin de flux prématurée (attendu PTS \(sourcePTS[sourceIndex + 1].seconds) s)"
+                    )
                 }
                 guard let imageBuffer = CMSampleBufferGetImageBuffer(sample) else { continue }
                 let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-                if CMTimeCompare(pts, CMTimeSubtract(firstExpectedPTS, FramePlanner.matchTolerance)) < 0 {
-                    continue // pré-roll : avant la plage attendue
+                let expected = sourcePTS[sourceIndex + 1]
+                if CMTimeCompare(pts, CMTimeSubtract(expected, FramePlanner.matchTolerance)) < 0 {
+                    // Frame non listée (pré-roll, échantillon surnuméraire) :
+                    // écartée, jamais comptée comme une avancée d'index.
+                    discardedDecodedFrames += 1
+                    continue
+                }
+                if CMTimeCompare(pts, CMTimeAdd(expected, FramePlanner.matchTolerance)) > 0 {
+                    // La frame attendue n'a jamais été livrée par le décodeur :
+                    // désynchronisation détectée — échec net plutôt qu'un clip
+                    // au rythme faux.
+                    throw RenderError.readerFailed(String(
+                        format: "désynchronisation décodeur : attendu %.4f s, reçu %.4f s",
+                        expected.seconds, pts.seconds
+                    ))
                 }
                 previousBuffer = currentBuffer
                 currentBuffer = imageBuffer
@@ -302,23 +336,41 @@ final class VideoRenderPipeline {
                     nextPTS: sourcePTS[nextIdx],
                     phases: phases
                 )
-                // FAILSAFE ANTI-FLASH : le flux optique produit parfois une
-                // image aberrante (flash blanc/noir). Chaque image interpolée
-                // est comparée en luminance à ses deux sources ; si elle dévie
-                // anormalement, elle est remplacée par la source la plus proche
-                // (micro-duplication invisible plutôt qu'un éclair).
-                let lumaPrev = Self.averageLuma(of: prev)
-                let lumaNext = Self.averageLuma(of: next)
+                // FAILSAFE ANTI-ARTEFACT v2 : le flux optique produit parfois
+                // des images aberrantes (flash global OU zone noire partielle).
+                // Chaque image interpolée est comparée à ses deux sources sur
+                // une GRILLE de tuiles 4×4 (détecte les artefacts localisés)
+                // + moyenne globale, en 8 comme en 10 bits. Déviation anormale
+                // → remplacement par la source la plus proche (micro-duplication
+                // invisible plutôt qu'un défaut visible).
+                let tilesPrev = Self.tileLuma(of: prev)
+                let tilesNext = Self.tileLuma(of: next)
                 for (phaseIndex, buffer) in produced.enumerated() {
                     var outputBuffer = buffer
-                    if let lp = lumaPrev, let ln = lumaNext,
-                       let lb = Self.averageLuma(of: buffer) {
+                    if let tp = tilesPrev, let tn = tilesNext,
+                       let tb = Self.tileLuma(of: buffer),
+                       tp.count == tb.count, tn.count == tb.count {
                         let phase = Double(phases[phaseIndex])
-                        let expected = lp * (1 - phase) + ln * phase
-                        if abs(lb - expected) > 40 {
+                        var worstTileDeviation: Double = 0
+                        var globalExpected: Double = 0
+                        var globalActual: Double = 0
+                        for tileIndex in 0..<tb.count {
+                            let expected = tp[tileIndex] * (1 - phase) + tn[tileIndex] * phase
+                            worstTileDeviation = max(worstTileDeviation, abs(tb[tileIndex] - expected))
+                            globalExpected += expected
+                            globalActual += tb[tileIndex]
+                        }
+                        let globalDeviation = abs(globalActual - globalExpected) / Double(tb.count)
+                        maxLumaDeviation = max(maxLumaDeviation, worstTileDeviation)
+                        // Tuile isolée très déviante (artefact local) OU dérive
+                        // globale (flash) → image écartée.
+                        if worstTileDeviation > 55 || globalDeviation > 40 {
                             outputBuffer = phase < 0.5 ? prev : next
                             correctedCount += 1
                         }
+                    } else {
+                        // Format non mesurable : signalé, jamais silencieux.
+                        uncheckedInterpolatedFrames += 1
                     }
                     try await appendWhenReady(outputBuffer, pts: TimeMath.outputPTS(frameIndex: outputFrameIndex, fps: job.fps))
                     interpolatedCount += 1
@@ -359,41 +411,71 @@ final class VideoRenderPipeline {
                 + Double(elapsed.components.attoseconds) / 1e18,
             interpolatedFrames: interpolatedCount,
             copiedFrames: copiedCount,
-            correctedFrames: correctedCount
+            correctedFrames: correctedCount,
+            maxLumaDeviation: maxLumaDeviation,
+            discardedDecodedFrames: discardedDecodedFrames,
+            uncheckedInterpolatedFrames: uncheckedInterpolatedFrames
         )
     }
 
-    // MARK: - Failsafe anti-flash
+    // MARK: - Failsafe anti-artefact
 
-    /// Luminance moyenne (0-255) du plan Y d'un buffer 4:2:0 bi-planaire 8 bits,
-    /// échantillonné grossièrement (1 pixel sur 32). nil si format non géré —
-    /// dans ce cas le failsafe se désactive silencieusement.
-    static func averageLuma(of buffer: CVPixelBuffer) -> Double? {
+    /// Luminance moyenne (échelle 0-255) par tuile d'une grille 4×4 du plan Y.
+    /// Gère les formats bi-planaires 8 bits ET 10 bits (HDR HLG : mots 16 bits
+    /// alignés à gauche → 8 bits de poids fort). nil si format non géré.
+    static func tileLuma(of buffer: CVPixelBuffer) -> [Double]? {
         let format = CVPixelBufferGetPixelFormatType(buffer)
-        guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange else { return nil }
+        let is8Bit = format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        let is10Bit = format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            || format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+        guard is8Bit || is10Bit else { return nil }
+
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, 0) else { return nil }
         let width = CVPixelBufferGetWidthOfPlane(buffer, 0)
         let height = CVPixelBufferGetHeightOfPlane(buffer, 0)
         let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
-        let pointer = base.assumingMemoryBound(to: UInt8.self)
-        var total = 0
-        var count = 0
+        guard width >= 4, height >= 4 else { return nil }
+
+        let grid = 4
+        var totals = [Double](repeating: 0, count: grid * grid)
+        var counts = [Int](repeating: 0, count: grid * grid)
+        let stepX = max(width / 64, 1)
+        let stepY = max(height / 64, 1)
+
         var y = 0
         while y < height {
+            let tileY = min(y * grid / height, grid - 1)
             var x = 0
-            let row = pointer + y * stride
-            while x < width {
-                total += Int(row[x])
-                count += 1
-                x += 32
+            if is8Bit {
+                let row = base.assumingMemoryBound(to: UInt8.self) + y * stride
+                while x < width {
+                    let tileIndex = tileY * grid + min(x * grid / width, grid - 1)
+                    totals[tileIndex] += Double(row[x])
+                    counts[tileIndex] += 1
+                    x += stepX
+                }
+            } else {
+                let row = (base + y * stride).assumingMemoryBound(to: UInt16.self)
+                while x < width {
+                    let tileIndex = tileY * grid + min(x * grid / width, grid - 1)
+                    totals[tileIndex] += Double(row[x] >> 8) // 10 bits alignés à gauche
+                    counts[tileIndex] += 1
+                    x += stepX
+                }
             }
-            y += 32
+            y += stepY
         }
-        guard count > 0 else { return nil }
-        return Double(total) / Double(count)
+        guard counts.allSatisfy({ $0 > 0 }) else { return nil }
+        return zip(totals, counts).map { $0 / Double($1) }
+    }
+
+    /// Luminance moyenne globale — conservée pour les tests et le diagnostic.
+    static func averageLuma(of buffer: CVPixelBuffer) -> Double? {
+        guard let tiles = tileLuma(of: buffer) else { return nil }
+        return tiles.reduce(0, +) / Double(tiles.count)
     }
 
     // MARK: - Passe 1 : timestamps

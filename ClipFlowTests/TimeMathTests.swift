@@ -109,6 +109,23 @@ struct TimeMathTests {
         #expect(plan.allSatisfy { if case .copy = $0 { return true } ; return false })
     }
 
+    /// Sélection collée à la FIN du rush : le dernier timestamp final dépasse
+    /// la dernière image source d'une fraction d'intervalle — la dernière
+    /// image est DUPLIQUÉE (tolérance 1,5 intervalle), pas d'échec.
+    @Test func planDuplicatesLastFrameAtRushEnd() throws {
+        // Rush 1 s à 60 fps : PTS 0..59/60. Sélection 0,65 s finissant à 1,0 s
+        // (start 0,35 s). Dernier target = 0,35 + 77/120 ≈ 0,9917 s, au-delà
+        // du dernier PTS (59/60 ≈ 0,9833) de 1/120 s.
+        let sourcePTS = (0..<60).map { CMTime(value: CMTimeValue($0), timescale: 60) }
+        let start = CMTime(value: 7, timescale: 20) // 0,35 s
+        let plan = try FramePlanner.plan(
+            sourcePTS: sourcePTS, selectionStart: start,
+            outputFrameCount: 78, fps: 60, speed: .half
+        )
+        #expect(plan.count == 78)
+        #expect(plan.last == .copy(sourceIndex: 59))
+    }
+
     /// Sélection sortant de la plage décodée → erreur claire, pas de silence.
     @Test func planThrowsWhenSourceTooShort() {
         let sourcePTS = (0...10).map { CMTime(value: CMTimeValue($0), timescale: 60) }
