@@ -129,9 +129,12 @@ final class VideoRenderPipeline {
 
         // Format de décodage — déterminé AVANT la passe 1 : les deux passes
         // doivent utiliser exactement la même configuration de lecteur.
-        let readerPixelFormat: OSType = isHDRContent
-            ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-            : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        // CHAÎNE 8 BITS UNIFORME, y compris HLG : la tentative 10 bits mêlait
+        // des copies x420 et des images interpolées au format propre du moteur
+        // VT → une image sur deux avec une matrice couleur différente = flash
+        // bleu à 60 fps. Tags couleur HLG conservés ; profondeur 10 bits
+        // remise à une version validée sur appareil de bout en bout.
+        let readerPixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
 
         // --- Passe 1 : timestamps des frames RÉELLEMENT DÉCODÉES. ---
         // (Le passthrough listait des échantillons conteneur que le décodeur
@@ -216,9 +219,8 @@ final class VideoRenderPipeline {
         } else {
             writerSettings[AVVideoCodecKey] = AVVideoCodecType.hevc
             compression[AVVideoQualityKey] = 0.85
-            if isHDR {
-                compression[AVVideoProfileLevelKey] = kVTProfileLevel_HEVC_Main10_AutoLevel as String
-            }
+            // Pas de Main10 tant que la chaîne 10 bits n'est pas validée de
+            // bout en bout sur appareil (source du flash bleu).
         }
         writerSettings[AVVideoCompressionPropertiesKey] = compression
         // Colorimétrie préservée : primaires, transfert, matrice.

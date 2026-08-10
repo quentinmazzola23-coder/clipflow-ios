@@ -921,7 +921,9 @@ struct ProjectEditorView: View {
         do {
             let asset = AVURLAsset(url: source)
             guard let track = try await asset.loadTracks(withMediaType: .video).first else { return nil }
-            let formatDescriptions = try await track.load(.formatDescriptions)
+            let (formatDescriptions, preferredTransform) = try await track.load(
+                .formatDescriptions, .preferredTransform
+            )
             guard let formatHint = formatDescriptions.first else { return nil }
 
             let reader = try AVAssetReader(asset: asset)
@@ -947,6 +949,9 @@ struct ProjectEditorView: View {
             let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil,
                                            sourceFormatHint: formatHint)
             input.expectsMediaDataInRealTime = false
+            // ROTATION PRÉSERVÉE : sans cette ligne, la plage cachée perd la
+            // preferredTransform du rush → exports couchés à 90°.
+            input.transform = preferredTransform
             writer.add(input)
             guard writer.startWriting() else { return nil }
             writer.startSession(atSourceTime: minPTS)
@@ -990,6 +995,24 @@ struct ProjectEditorView: View {
     private func retryMissingCaches() async {
         try? await Task.sleep(for: .seconds(2)) // laisse l'ouverture respirer
         for passage in project.orderedPassages {
+            // Invalidation des caches DÉFECTUEUX d'une version antérieure :
+            // plage créée sans rotation alors que le rush en a une → exports
+            // à 90°. Supprimée ici, recréée correctement juste après.
+            if let path = passage.cachedRangeRelativePath,
+               let rush = passage.rush, rush.rotationDegrees != 0 {
+                let url = StorageManager.url(forCachedRangeRelativePath: path)
+                if FileManager.default.fileExists(atPath: url.path) {
+                    let asset = AVURLAsset(url: url)
+                    if let track = try? await asset.loadTracks(withMediaType: .video).first,
+                       let transform = try? await track.load(.preferredTransform),
+                       transform.isIdentity {
+                        try? FileManager.default.removeItem(at: url)
+                        passage.cachedRangeRelativePath = nil
+                        try? modelContext.save()
+                    }
+                }
+            }
+
             let missing = passage.cachedRangeRelativePath.map {
                 !FileManager.default.fileExists(atPath: StorageManager.url(forCachedRangeRelativePath: $0).path)
             } ?? true
