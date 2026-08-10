@@ -79,7 +79,7 @@ jobs:
           TAG="build-${{ github.run_number }}-r${{ github.run_attempt }}"
           gh release create "$TAG" ClipFlow-unsigned.ipa \
             --title "IPA $TAG (${GITHUB_SHA:0:7})" \
-            --notes "IPA non signée — à signer avec Sideloadly." \
+            --notes "IPA non signée — à signer avec Sideloadly. IMPORTANT : laisser « Remove app extensions » DÉCOCHÉ (PlugIns/ClipFlowWidgets.appex rend la Live Activity/Dynamic Island ; sans lui, l'app fonctionne mais l'île reste muette, sans erreur). Compte gratuit : app + extension = 2 App IDs sur 10/7 jours à la PREMIÈRE signature ; re-signer les mêmes bundle IDs (mode Automatic) ne reconsomme rien. En cas d'erreur « maximum App IDs », attendre la fenêtre de 7 jours plutôt que de retirer l'extension." \
             -R "${{ github.repository }}"
 
   tests:

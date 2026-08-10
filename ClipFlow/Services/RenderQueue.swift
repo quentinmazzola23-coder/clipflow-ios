@@ -38,6 +38,9 @@ final class RenderQueueController {
     private var container: ModelContainer?
     private var worker: Task<Void, Never>?
     private var pendingPassageIDs: [PersistentIdentifier] = []
+    /// Passage retiré de la file mais ni fini ni échoué (rendu en cours) —
+    /// sans lui, totalJobs sous-compte de 1 pendant chaque rendu.
+    private var inFlightCount = 0
     private var userPaused = false
     /// Relances automatiques par passage (plafonnées à 3).
     private var retryCounts: [PersistentIdentifier: Int] = [:]
@@ -82,10 +85,20 @@ final class RenderQueueController {
     /// en cours). Un passage déjà exporté peut être relancé explicitement.
     func enqueue(passageIDs: [PersistentIdentifier]) {
         guard container != nil else { return }
+        // Nouvelle session d'export (rien en cours, file vide) : les compteurs
+        // de la session précédente ne s'additionnent pas à la nouvelle
+        // (sinon « clip 6/8 » au premier clip du lot suivant).
+        if !snapshot.isRunning, pendingPassageIDs.isEmpty, inFlightCount == 0 {
+            snapshot.finishedJobs = 0
+            snapshot.failedJobs = 0
+            snapshot.lastResultSummary = nil
+            retryCounts.removeAll()
+        }
         for id in passageIDs where !pendingPassageIDs.contains(id) {
             pendingPassageIDs.append(id)
         }
-        snapshot.totalJobs = snapshot.finishedJobs + snapshot.failedJobs + pendingPassageIDs.count
+        snapshot.totalJobs = snapshot.finishedJobs + snapshot.failedJobs
+            + inFlightCount + pendingPassageIDs.count
         startIfNeeded()
     }
 
@@ -103,9 +116,26 @@ final class RenderQueueController {
     }
 
     func cancelAll() {
+        // Les passages encore en file redeviennent .notExported — sinon ils
+        // restent des fantômes .queued (horloge éternelle) que le nettoyage
+        // de configure() ne rattrape qu'au prochain démarrage de l'app.
+        if let container {
+            let context = container.mainContext
+            for id in pendingPassageIDs {
+                if let passage = context.model(for: id) as? Passage,
+                   passage.exportState == .queued || passage.exportState == .rendering {
+                    passage.exportState = .notExported
+                }
+            }
+            try? context.save()
+        }
         pendingPassageIDs.removeAll()
         worker?.cancel()
-        worker = nil
+        // PAS de worker = nil ici : seul le defer de runLoop() le fait, quand
+        // le rendu en vol est réellement terminé — sinon un enqueue pendant le
+        // drainage démarrerait un DEUXIÈME runLoop concurrent (deux rendus
+        // entrelacés, course sur le cache moteur, même fichier de sortie).
+        inFlightCount = 0
         snapshot = RenderQueueSnapshot()
         ThermalMonitor.shared.setRenderingActive(false)
         endActivity()
@@ -171,8 +201,15 @@ final class RenderQueueController {
             ThermalMonitor.shared.setRenderingActive(false)
             worker = nil
             endActivity()
-            // File vide : libère la session moteur conservée entre les clips.
-            VideoRenderPipeline.drainCachedEngine()
+            if pendingPassageIDs.isEmpty {
+                // File vide : libère la session moteur conservée entre les clips.
+                VideoRenderPipeline.drainCachedEngine()
+            } else {
+                // Des passages ont été (ré)ajoutés pendant le drainage d'une
+                // annulation : relance immédiate (worker était encore non-nil,
+                // startIfNeeded ne pouvait pas démarrer).
+                startIfNeeded()
+            }
         }
 
         while !pendingPassageIDs.isEmpty {
@@ -194,6 +231,10 @@ final class RenderQueueController {
             }
 
             let passageID = pendingPassageIDs.removeFirst()
+            // Compté « en vol » jusqu'à la fin de l'itération (succès, échec,
+            // relance ou annulation) — sinon totalJobs sous-compte de 1.
+            inFlightCount = 1
+            defer { inFlightCount = 0 }
             let context = container.mainContext
 
             guard let passage = context.model(for: passageID) as? Passage,
@@ -298,7 +339,10 @@ final class RenderQueueController {
                     result.engineName, corrected, result.processingSeconds
                 )
             } catch is CancellationError {
-                passage.exportState = .queued
+                // Annulation via « Tout annuler » : la file est vidée, personne
+                // ne re-référencera ce passage — .queued serait un fantôme
+                // (horloge éternelle). Cohérent avec le nettoyage de configure().
+                passage.exportState = .notExported
                 try? context.save()
                 return
             } catch {

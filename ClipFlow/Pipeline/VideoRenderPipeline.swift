@@ -17,6 +17,7 @@ import Foundation
 import AVFoundation
 import CoreVideo
 import VideoToolbox
+import os
 import os.signpost
 
 struct RenderJob: Sendable {
@@ -519,6 +520,10 @@ final class VideoRenderPipeline {
                     phases.append(phase)
                     lookahead += 1
                 }
+                // Figée en `let` : l'initialiseur d'un async let s'exécute
+                // dans une tâche fille et ne peut capturer aucune `var`
+                // locale (erreur de compilation SE-0317).
+                let groupPhases = phases
                 // Soumission GPU immédiate ; le groupe PRÉCÉDENT est contrôlé
                 // et encodé pendant que celui-ci se calcule. En cas d'erreur
                 // du flush, la tâche fille est annulée par la concurrence
@@ -528,11 +533,11 @@ final class VideoRenderPipeline {
                     previousPTS: sourcePTS[prevIdx],
                     next: next,
                     nextPTS: sourcePTS[nextIdx],
-                    phases: phases
+                    phases: groupPhases
                 )
                 try await flushPending()
                 pendingGroup = PendingInterpolation(
-                    prev: prev, next: next, phases: phases, produced: try await producedNow
+                    prev: prev, next: next, phases: groupPhases, produced: try await producedNow
                 )
                 entryIndex = lookahead
             }
@@ -585,13 +590,20 @@ final class VideoRenderPipeline {
 
     /// Session moteur (VT) conservée entre deux clips consécutifs de mêmes
     /// dimensions — le démarrage coûte plusieurs centaines de millisecondes.
-    /// La file de rendu est STRICTEMENT séquentielle (un clip à la fois) :
-    /// aucun accès concurrent possible.
-    nonisolated(unsafe) private static var cachedEngineSlot: (engine: FrameInterpolationEngine, width: Int, height: Int)?
+    /// La file de rendu est séquentielle, mais le slot est VERROUILLÉ quand
+    /// même : une annulation qui draine pendant qu'un nouvel export démarre
+    /// ne doit jamais pouvoir provoquer une course mémoire.
+    /// (withLockUnchecked : le moteur n'est pas Sendable ; endSession
+    /// TOUJOURS hors verrou.)
+    private static let cachedEngineLock =
+        OSAllocatedUnfairLock<(engine: FrameInterpolationEngine, width: Int, height: Int)?>(uncheckedState: nil)
 
     private static func takeCachedEngine(width: Int, height: Int) -> FrameInterpolationEngine? {
-        guard let slot = cachedEngineSlot else { return nil }
-        cachedEngineSlot = nil
+        let slot = cachedEngineLock.withLockUnchecked { state -> (engine: FrameInterpolationEngine, width: Int, height: Int)? in
+            defer { state = nil }
+            return state
+        }
+        guard let slot else { return nil }
         guard slot.width == width, slot.height == height else {
             slot.engine.endSession()
             return nil
@@ -600,15 +612,22 @@ final class VideoRenderPipeline {
     }
 
     private static func storeCachedEngine(_ engine: FrameInterpolationEngine, width: Int, height: Int) {
-        cachedEngineSlot?.engine.endSession()
-        cachedEngineSlot = (engine, width, height)
+        let evicted = cachedEngineLock.withLockUnchecked { state -> FrameInterpolationEngine? in
+            let old = state?.engine
+            state = (engine, width, height)
+            return old
+        }
+        evicted?.endSession()
     }
 
     /// À appeler quand la file de rendu se vide : libère la session GPU
     /// conservée (mémoire, thermique).
     static func drainCachedEngine() {
-        cachedEngineSlot?.engine.endSession()
-        cachedEngineSlot = nil
+        let drained = cachedEngineLock.withLockUnchecked { state -> FrameInterpolationEngine? in
+            defer { state = nil }
+            return state?.engine
+        }
+        drained?.endSession()
     }
 
     // MARK: - Colorimétrie des buffers

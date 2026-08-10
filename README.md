@@ -135,6 +135,13 @@ passe par le protocole `FrameInterpolationEngine`.
 ## Limites connues du MVP
 
 1. **Re-signature tous les 7 jours** (compte Apple gratuit) via Sideloadly.
+   Laisser « Remove app extensions » **décoché** : l'IPA embarque
+   `PlugIns/ClipFlowWidgets.appex` qui rend la Live Activity/Dynamic Island
+   d'export — sans lui, `Activity.request()` réussit côté app mais l'île reste
+   muette (échec silencieux). L'extension consomme un 2ᵉ App ID
+   (`…clipflow.widgets`) sur les 10 autorisés par 7 jours ; re-signer les mêmes
+   bundle IDs ne reconsomme rien — en cas d'erreur « maximum App IDs »,
+   attendre la fenêtre plutôt que de retirer l'extension.
 2. **Espace** : l'import copie le fichier complet dans l'app ; libération via
    « Libérer l'espace » (rushes entièrement traités), « Val. + Suppr. »
    (purge du rush après validation) et la suppression de projet (avec fichiers).
