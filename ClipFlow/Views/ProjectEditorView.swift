@@ -19,6 +19,11 @@ struct ProjectEditorView: View {
 
     // Importation — service partagé (survit à la navigation).
     @State private var pickerItems: [PhotosPickerItem] = []
+    /// Présentation programmatique du sélecteur Photos (bouton +, illustration
+    /// centrale, et ouverture AUTOMATIQUE à l'arrivée dans un projet vide).
+    @State private var showPicker = false
+    /// L'ouverture automatique ne se produit qu'une fois par apparition.
+    @State private var autoPickerLaunched = false
     private var importer: ImportController { ImportController.shared }
 
     /// Segments MÉMOÏSÉS : reconstruits uniquement quand les rushes changent
@@ -205,6 +210,15 @@ struct ProjectEditorView: View {
         .sheet(isPresented: $showExports) {
             NavigationStack { RenderQueueView(project: project) }
         }
+        // Sélecteur Photos unique, présentable depuis le bouton +,
+        // l'illustration centrale, ou automatiquement (projet vide).
+        .photosPicker(
+            isPresented: $showPicker,
+            selection: $pickerItems,
+            selectionBehavior: .default,     // sélection rapide par glissement
+            matching: .videos,
+            preferredItemEncoding: .current
+        )
         .alert("ClipFlow", isPresented: Binding(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
@@ -259,6 +273,14 @@ struct ProjectEditorView: View {
             playback.onTick = { time in
                 handlePlaybackTick(time)
             }
+            // Projet vide (fraîchement créé ou non) : le sélecteur Photos
+            // s'ouvre de lui-même — zéro tap entre « Nouveau projet » et le
+            // choix des rushes. Une seule fois par apparition, jamais pendant
+            // une importation en cours.
+            if !autoPickerLaunched && project.rushes.isEmpty && importer.progress == nil {
+                autoPickerLaunched = true
+                showPicker = true
+            }
         }
         .onDisappear {
             // Retour à la liste des projets : la lecture s'arrête toujours.
@@ -274,12 +296,9 @@ struct ProjectEditorView: View {
             if project.rushes.isEmpty && importer.progress == nil {
                 // L'illustration centrale EST un bouton d'import (même picker
                 // que le + de la barre).
-                PhotosPicker(
-                    selection: $pickerItems,
-                    selectionBehavior: .default,
-                    matching: .videos,
-                    preferredItemEncoding: .current
-                ) {
+                Button {
+                    showPicker = true
+                } label: {
                     ContentUnavailableView(
                         "Aucun rush",
                         systemImage: "photo.badge.plus",
@@ -521,14 +540,9 @@ struct ProjectEditorView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
-            PhotosPicker(
-                selection: $pickerItems,
-                selectionBehavior: .default,     // .default = sélection rapide par
-                                                 // glissement du doigt (le mode
-                                                 // .ordered la désactivait)
-                matching: .videos,               // vidéos uniquement
-                preferredItemEncoding: .current  // encodage original privilégié
-            ) {
+            Button {
+                showPicker = true
+            } label: {
                 Image(systemName: "plus")
             }
             .onChange(of: pickerItems) { _, items in

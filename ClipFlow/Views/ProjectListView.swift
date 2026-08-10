@@ -12,8 +12,17 @@ struct ProjectListView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \ClipProject.updatedAt, order: .reverse) private var projects: [ClipProject]
     @State private var showStorage = false
+    /// Chemin de navigation possédé ici : « Nouveau projet » pousse
+    /// directement l'éditeur du projet créé (zéro tap intermédiaire).
+    @State private var navigationPath: [PersistentIdentifier] = []
 
     var body: some View {
+        NavigationStack(path: $navigationPath) {
+            listContent
+        }
+    }
+
+    private var listContent: some View {
         List {
             ForEach(projects) { project in
                 NavigationLink(value: project.persistentModelID) {
@@ -153,6 +162,9 @@ struct ProjectListView: View {
         AppSettings.apply(to: project)
         modelContext.insert(project)
         try? modelContext.save()
+        // Ouverture immédiate de l'éditeur — qui, projet vide, ouvre de
+        // lui-même le sélecteur Photos : création → choix des rushes direct.
+        navigationPath.append(project.persistentModelID)
     }
 
 }
