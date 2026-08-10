@@ -127,14 +127,14 @@ final class VideoRenderPipeline {
         let decodeEnd = CMTimeAdd(job.sourceRange.end, margin)
         let decodeRange = CMTimeRange(start: decodeStart, end: decodeEnd)
 
-        // Format de décodage — déterminé AVANT la passe 1 : les deux passes
-        // doivent utiliser exactement la même configuration de lecteur.
-        // CHAÎNE 8 BITS UNIFORME, y compris HLG : la tentative 10 bits mêlait
-        // des copies x420 et des images interpolées au format propre du moteur
-        // VT → une image sur deux avec une matrice couleur différente = flash
-        // bleu à 60 fps. Tags couleur HLG conservés ; profondeur 10 bits
-        // remise à une version validée sur appareil de bout en bout.
-        let readerPixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        // CHAÎNE TOUT-RGB (BGRA) — décision structurelle après diagnostic sur
+        // images réelles : les images interpolées sortaient du moteur VT avec
+        // la CHROMINANCE INVERSÉE (ciel rose, verts turquoise) — les pixels
+        // eux-mêmes, pas les étiquettes. En RGB, il n'existe ni matrice YCbCr
+        // ni ordre de plans à confondre : la classe entière du bug disparaît.
+        // Le décodeur convertit (et tone-mappe le HDR) vers du RGB écran ;
+        // VT interpole des textures RGB ; l'encodeur reconvertit uniformément.
+        let readerPixelFormat: OSType = kCVPixelFormatType_32BGRA
 
         // --- Passe 1 : timestamps des frames RÉELLEMENT DÉCODÉES. ---
         // (Le passthrough listait des échantillons conteneur que le décodeur
@@ -204,7 +204,8 @@ final class VideoRenderPipeline {
         try? FileManager.default.removeItem(at: outputURL)
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
 
-        let isHDR = isHDRContent
+        _ = isHDRContent // politique d'acceptation seulement — la chaîne BGRA
+                         // livre du display-referred, tagué 709 ci-dessous.
         var compression: [String: Any] = [
             AVVideoExpectedSourceFrameRateKey: job.fps,
             AVVideoAllowFrameReorderingKey: true,
@@ -223,18 +224,14 @@ final class VideoRenderPipeline {
             // bout en bout sur appareil (source du flash bleu).
         }
         writerSettings[AVVideoCompressionPropertiesKey] = compression
-        // Colorimétrie préservée : primaires, transfert, matrice.
-        writerSettings[AVVideoColorPropertiesKey] = isHDR
-            ? [
-                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_2020,
-                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_2100_HLG,
-                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_2020,
-            ]
-            : [
-                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
-            ]
+        // Chaîne BGRA : le décodeur a produit du RGB display-referred (HDR
+        // tone-mappé) — l'encodeur reconvertit en YUV avec des tags BT.709
+        // UNIFORMES pour toutes les images, copies comme interpolées.
+        writerSettings[AVVideoColorPropertiesKey] = [
+            AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+            AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+            AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+        ]
 
         let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: writerSettings)
         writerInput.expectsMediaDataInRealTime = false
@@ -450,11 +447,14 @@ final class VideoRenderPipeline {
 
     // MARK: - Failsafe anti-artefact
 
-    /// Luminance moyenne (échelle 0-255) par tuile d'une grille 4×4 du plan Y.
-    /// Gère les formats bi-planaires 8 bits ET 10 bits (HDR HLG : mots 16 bits
-    /// alignés à gauche → 8 bits de poids fort). nil si format non géré.
+    /// Luminance moyenne (échelle 0-255) par tuile d'une grille 4×4.
+    /// Gère BGRA (chaîne principale : luma ≈ 0,299R + 0,587G + 0,114B) et les
+    /// formats bi-planaires 8/10 bits (tests, diagnostics). nil si non géré.
     static func tileLuma(of buffer: CVPixelBuffer) -> [Double]? {
         let format = CVPixelBufferGetPixelFormatType(buffer)
+        if format == kCVPixelFormatType_32BGRA {
+            return tileLumaBGRA(of: buffer)
+        }
         let is8Bit = format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         let is10Bit = format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
@@ -495,6 +495,42 @@ final class VideoRenderPipeline {
                     counts[tileIndex] += 1
                     x += stepX
                 }
+            }
+            y += stepY
+        }
+        guard counts.allSatisfy({ $0 > 0 }) else { return nil }
+        return zip(totals, counts).map { $0 / Double($1) }
+    }
+
+    /// Grille 4×4 de luminance pour un buffer BGRA (octets B,G,R,A).
+    private static func tileLumaBGRA(of buffer: CVPixelBuffer) -> [Double]? {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let width = CVPixelBufferGetWidth(buffer)
+        let height = CVPixelBufferGetHeight(buffer)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        guard width >= 4, height >= 4 else { return nil }
+
+        let grid = 4
+        var totals = [Double](repeating: 0, count: grid * grid)
+        var counts = [Int](repeating: 0, count: grid * grid)
+        let stepX = max(width / 64, 1)
+        let stepY = max(height / 64, 1)
+        let pointer = base.assumingMemoryBound(to: UInt8.self)
+
+        var y = 0
+        while y < height {
+            let tileY = min(y * grid / height, grid - 1)
+            let row = pointer + y * stride
+            var x = 0
+            while x < width {
+                let tileIndex = tileY * grid + min(x * grid / width, grid - 1)
+                let pixel = row + x * 4
+                let luma = 0.114 * Double(pixel[0]) + 0.587 * Double(pixel[1]) + 0.299 * Double(pixel[2])
+                totals[tileIndex] += luma
+                counts[tileIndex] += 1
+                x += stepX
             }
             y += stepY
         }

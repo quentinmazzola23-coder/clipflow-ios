@@ -72,11 +72,15 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
         let processor = VTFrameProcessor()
         try processor.startSession(configuration: configuration)
 
-        // Pool de destination construit d'après les attributs EXIGÉS par la
-        // configuration — jamais supposés.
+        // Pool de destination : attributs de la configuration, mais format
+        // FORCÉ à BGRA — même famille que l'entrée (chaîne tout-RGB : aucune
+        // interprétation chroma possible entre l'interpolation et l'encodage).
         var poolAttributes = configuration.destinationPixelBufferAttributes as? [String: Any] ?? [:]
         poolAttributes[kCVPixelBufferWidthKey as String] = width
         poolAttributes[kCVPixelBufferHeightKey as String] = height
+        poolAttributes[kCVPixelBufferPixelFormatTypeKey as String] = kCVPixelFormatType_32BGRA
+        poolAttributes[kCVPixelBufferIOSurfacePropertiesKey as String] = [:] as [String: Any]
+        poolAttributes[kCVPixelBufferMetalCompatibilityKey as String] = true
 
         var pool: CVPixelBufferPool?
         let poolOptions: [String: Any] = [

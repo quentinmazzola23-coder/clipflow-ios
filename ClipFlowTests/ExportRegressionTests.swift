@@ -51,10 +51,32 @@ struct AverageLumaTests {
 
     @Test func unsupportedFormatReturnsNil() throws {
         var buffer: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_422YpCbCr8, nil, &buffer)
+        let exotic = try #require(buffer)
+        // Format non géré → failsafe désactivé proprement (nil), pas de faux calcul.
+        #expect(VideoRenderPipeline.averageLuma(of: exotic) == nil)
+    }
+
+    /// Chaîne principale BGRA : luma mesurée sur pixels RGB connus.
+    @Test func measuresBGRALuma() throws {
+        var buffer: CVPixelBuffer?
         CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32BGRA, nil, &buffer)
         let bgra = try #require(buffer)
-        // Format non géré → failsafe désactivé proprement (nil), pas de faux calcul.
-        #expect(VideoRenderPipeline.averageLuma(of: bgra) == nil)
+        CVPixelBufferLockBaseAddress(bgra, [])
+        if let base = CVPixelBufferGetBaseAddress(bgra) {
+            // Gris uniforme R=G=B=180 → luma ≈ 180.
+            let stride = CVPixelBufferGetBytesPerRow(bgra)
+            let pointer = base.assumingMemoryBound(to: UInt8.self)
+            for y in 0..<64 {
+                for x in 0..<64 {
+                    let p = pointer + y * stride + x * 4
+                    p[0] = 180; p[1] = 180; p[2] = 180; p[3] = 255
+                }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(bgra, [])
+        let luma = try #require(VideoRenderPipeline.averageLuma(of: bgra))
+        #expect(abs(luma - 180) < 2)
     }
 }
 
