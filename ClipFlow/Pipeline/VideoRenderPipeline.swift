@@ -383,6 +383,13 @@ final class VideoRenderPipeline {
                         // Format non mesurable : signalé, jamais silencieux.
                         uncheckedInterpolatedFrames += 1
                     }
+                    // CAUSE RACINE DU FLASH BLEU : les buffers de destination
+                    // du moteur VT sortent du pool SANS attachements
+                    // colorimétriques — l'encodeur les interprète en BT.709
+                    // entre des copies étiquetées BT.2020/HLG → teinte bleue
+                    // une image sur deux. Propagation systématique des
+                    // attachements de la source vers chaque image interpolée.
+                    Self.propagateColorAttachments(from: prev, to: outputBuffer)
                     try await appendWhenReady(outputBuffer, pts: TimeMath.outputPTS(frameIndex: outputFrameIndex, fps: job.fps))
                     interpolatedCount += 1
                     outputFrameIndex += 1
@@ -427,6 +434,18 @@ final class VideoRenderPipeline {
             discardedDecodedFrames: discardedDecodedFrames,
             uncheckedInterpolatedFrames: uncheckedInterpolatedFrames
         )
+    }
+
+    // MARK: - Colorimétrie des buffers
+
+    /// Copie les attachements propageables (matrice YCbCr, primaires, fonction
+    /// de transfert…) d'un buffer source vers un buffer produit par un pool —
+    /// sans eux, l'encodeur retombe sur BT.709 et teinte les images.
+    static func propagateColorAttachments(from source: CVPixelBuffer, to destination: CVPixelBuffer) {
+        guard source !== destination else { return }
+        if let attachments = CVBufferCopyAttachments(source, .shouldPropagate) {
+            CVBufferSetAttachments(destination, attachments, .shouldPropagate)
+        }
     }
 
     // MARK: - Failsafe anti-artefact

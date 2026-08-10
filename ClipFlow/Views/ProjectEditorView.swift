@@ -858,10 +858,9 @@ struct ProjectEditorView: View {
                 errorMessage = "Un autre passage de ce rush n'a pas encore sa plage cachée — rush conservé."
                 return
             }
-            guard !RenderQueueController.shared.isBusy() else {
-                errorMessage = "Export en cours — le rush sera supprimable une fois la file terminée."
-                return
-            }
+            // Purge à mesure : toutes les plages du rush étant cachées, les
+            // exports (en cours comme futurs) passent par les caches — la
+            // suppression du fichier source est sûre, aucun blocage.
             deleteRush(rush)
             if project.autoExportOnValidate {
                 RenderQueueController.shared.enqueue(passageIDs: [passage.persistentModelID])

@@ -58,6 +58,38 @@ struct AverageLumaTests {
     }
 }
 
+struct ColorAttachmentPropagationTests {
+
+    private func makeBuffer() throws -> CVPixelBuffer {
+        var buffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault, 64, 64,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nil, &buffer
+        )
+        guard status == kCVReturnSuccess, let buffer else {
+            throw NSError(domain: "test", code: Int(status))
+        }
+        return buffer
+    }
+
+    /// NON-RÉGRESSION « flash bleu » : les attachements colorimétriques de la
+    /// source (matrice BT.2020…) doivent se propager aux images interpolées —
+    /// sans eux, l'encodeur retombe sur BT.709 et teinte une image sur deux.
+    @Test func colorAttachmentsPropagateToInterpolatedBuffers() throws {
+        let source = try makeBuffer()
+        let destination = try makeBuffer()
+        CVBufferSetAttachment(
+            source,
+            kCVImageBufferYCbCrMatrixKey,
+            kCVImageBufferYCbCrMatrix_ITU_R_2020,
+            .shouldPropagate
+        )
+        VideoRenderPipeline.propagateColorAttachments(from: source, to: destination)
+        let value = CVBufferCopyAttachment(destination, kCVImageBufferYCbCrMatrixKey, nil)
+        #expect((value as? String) == (kCVImageBufferYCbCrMatrix_ITU_R_2020 as String))
+    }
+}
+
 struct ExportContentRegressionTests {
 
     /// Position (x) de la barre blanche dans la première image d'une vidéo :

@@ -17,7 +17,11 @@ struct ProjectListView: View {
         List {
             ForEach(projects) { project in
                 NavigationLink(value: project.persistentModelID) {
-                    ProjectRow(project: project)
+                    HStack {
+                        ProjectRow(project: project)
+                        Spacer(minLength: 8)
+                        projectMenu(project)
+                    }
                 }
                 // Balayage gauche COMPLET = suppression directe (fichiers
                 // disque inclus), sans étape intermédiaire.
@@ -66,6 +70,42 @@ struct ProjectListView: View {
         .sheet(isPresented: $showStorage) {
             NavigationStack { StorageView() }
         }
+    }
+
+    /// Menu ⋯ par projet — mêmes options que dans l'éditeur, accessibles
+    /// sans ouvrir le projet.
+    private func projectMenu(_ project: ClipProject) -> some View {
+        Menu {
+            Menu("Durée finale : \(project.finalDuration.label)") {
+                ForEach(ExactDuration.presets, id: \.centiseconds) { preset in
+                    Button(preset.label) {
+                        project.finalDurationCentiseconds = preset.centiseconds
+                        try? modelContext.save()
+                    }
+                }
+            }
+            Toggle("Toucher = centre de la sélection", isOn: Bindable(project).touchAnchorIsCenter)
+            Toggle("Export automatique à la validation", isOn: Bindable(project).autoExportOnValidate)
+            Toggle("Aperçu léger (540p, + fluide)", isOn: Bindable(project).previewLight)
+            Button {
+                guard !RenderQueueController.shared.isBusy() else { return }
+                _ = MediaAvailabilityService.releaseSources(in: project)
+                try? modelContext.save()
+            } label: {
+                let releasable = MediaAvailabilityService.releasableSources(in: project)
+                    .reduce(Int64(0)) { $0 + $1.bytes }
+                Label("Libérer l'espace (\(StorageManager.formatBytes(releasable)))",
+                      systemImage: "internaldrive")
+            }
+            Section {
+                Text("v\(BuildInfo.version) (\(BuildInfo.build)) · \(BuildInfo.stamp)")
+                    .font(.caption2)
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.borderless)
     }
 
     /// La cascade SwiftData efface les entités, PAS les fichiers : suppression
