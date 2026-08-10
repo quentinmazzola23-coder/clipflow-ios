@@ -344,13 +344,13 @@ final class VideoRenderPipeline {
                     nextPTS: sourcePTS[nextIdx],
                     phases: phases
                 )
-                // FAILSAFE ANTI-ARTEFACT v2 : le flux optique produit parfois
+                // FAILSAFE ANTI-ARTEFACT v3 : le flux optique produit parfois
                 // des images aberrantes (flash global OU zone noire partielle).
-                // Chaque image interpolée est comparée à ses deux sources sur
-                // une GRILLE de tuiles 4×4 (détecte les artefacts localisés)
-                // + moyenne globale, en 8 comme en 10 bits. Déviation anormale
-                // → remplacement par la source la plus proche (micro-duplication
-                // invisible plutôt qu'un défaut visible).
+                // Chaque image interpolée est testée contre l'ENVELOPPE
+                // [min, max] de ses deux sources, tuile par tuile (grille 4×4)
+                // — voir envelopeOvershoot(). Dépassement franc → remplacement
+                // par la source la plus proche (micro-duplication invisible
+                // plutôt qu'un défaut visible).
                 let tilesPrev = Self.tileLuma(of: prev)
                 let tilesNext = Self.tileLuma(of: next)
                 for (phaseIndex, buffer) in produced.enumerated() {
@@ -358,27 +358,9 @@ final class VideoRenderPipeline {
                     if let tp = tilesPrev, let tn = tilesNext,
                        let tb = Self.tileLuma(of: buffer),
                        tp.count == tb.count, tn.count == tb.count {
-                        // Test d'ENVELOPPE, pas d'écart à la moyenne : sur un
-                        // panoramique rapide, une interpolation PARFAITE
-                        // diffère fortement des DEUX sources (le contenu s'est
-                        // déplacé) — l'ancien test la jetait en rafale →
-                        // doublons → clip quasi figé puis saut de rattrapage
-                        // (constaté sur export réel). Un vrai artefact (flash
-                        // blanc, trou noir), lui, SORT de la plage [min, max]
-                        // des deux sources ; un mouvement, jamais.
-                        let margin = 26.0
-                        var worstOvershoot: Double = 0
-                        for tileIndex in 0..<tb.count {
-                            let low = min(tp[tileIndex], tn[tileIndex]) - margin
-                            let high = max(tp[tileIndex], tn[tileIndex]) + margin
-                            if tb[tileIndex] < low {
-                                worstOvershoot = max(worstOvershoot, low - tb[tileIndex])
-                            } else if tb[tileIndex] > high {
-                                worstOvershoot = max(worstOvershoot, tb[tileIndex] - high)
-                            }
-                        }
+                        let worstOvershoot = Self.envelopeOvershoot(previous: tp, next: tn, candidate: tb)
                         maxLumaDeviation = max(maxLumaDeviation, worstOvershoot)
-                        if worstOvershoot > 12 {
+                        if worstOvershoot > Self.envelopeRejectThreshold {
                             outputBuffer = phases[phaseIndex] < 0.5 ? prev : next
                             correctedCount += 1
                         }
@@ -452,6 +434,35 @@ final class VideoRenderPipeline {
     }
 
     // MARK: - Failsafe anti-artefact
+
+    /// Marge tolérée hors de l'enveloppe [min, max] des deux sources (échelle
+    /// luma 0-255) — absorbe le bruit du flux optique sans laisser passer un
+    /// flash ou un trou noir.
+    static let envelopeMargin: Double = 26
+    /// Dépassement d'enveloppe (au pire des tuiles) au-delà duquel l'image
+    /// interpolée est écartée au profit de la source la plus proche.
+    static let envelopeRejectThreshold: Double = 12
+
+    /// Test d'ENVELOPPE, pas d'écart à la moyenne : sur un panoramique rapide,
+    /// une interpolation PARFAITE diffère fortement de ses DEUX sources (le
+    /// contenu s'est déplacé) — un test « écart à la moyenne » la jette en
+    /// rafale → doublons → clip quasi figé puis saut de rattrapage (constaté
+    /// sur export réel). Un vrai artefact (flash blanc, trou noir), lui, SORT
+    /// de la plage [min, max] des deux sources ; un mouvement, jamais.
+    /// Retourne le pire dépassement d'enveloppe parmi les tuiles (0 = sain).
+    static func envelopeOvershoot(previous: [Double], next: [Double], candidate: [Double]) -> Double {
+        var worst: Double = 0
+        for tileIndex in 0..<candidate.count {
+            let low = min(previous[tileIndex], next[tileIndex]) - envelopeMargin
+            let high = max(previous[tileIndex], next[tileIndex]) + envelopeMargin
+            if candidate[tileIndex] < low {
+                worst = max(worst, low - candidate[tileIndex])
+            } else if candidate[tileIndex] > high {
+                worst = max(worst, candidate[tileIndex] - high)
+            }
+        }
+        return worst
+    }
 
     /// Luminance moyenne (échelle 0-255) par tuile d'une grille 4×4.
     /// Gère BGRA (chaîne principale : luma ≈ 0,299R + 0,587G + 0,114B) et les

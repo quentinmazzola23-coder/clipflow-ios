@@ -80,6 +80,51 @@ struct AverageLumaTests {
     }
 }
 
+/// Non-régression du failsafe v3 (test d'ENVELOPPE) : le v2 comparait chaque
+/// tuile à la MOYENNE des deux sources et rejetait en rafale les interpolations
+/// légitimes des panoramiques rapides → doublons → clip quasi figé puis saut
+/// de rattrapage (constaté sur export réel du 2026-08-10).
+struct EnvelopeFailsafeTests {
+
+    /// Panoramique rapide : l'interpolée colle à la source suivante (le contenu
+    /// s'est déplacé), très loin de la moyenne — elle doit être ACCEPTÉE.
+    /// (L'ancien test « écart à la moyenne » : |230 − 140| = 90 > 55 → rejet.)
+    @Test func fastPanInterpolationIsAccepted() {
+        let previous = Array(repeating: 40.0, count: 16)
+        let next = Array(repeating: 240.0, count: 16)
+        let candidate = Array(repeating: 230.0, count: 16)
+        #expect(VideoRenderPipeline.envelopeOvershoot(previous: previous, next: next, candidate: candidate) == 0)
+    }
+
+    /// Bruit d'interpolation léger hors plage : couvert par la marge, accepté.
+    @Test func noiseWithinMarginIsAccepted() {
+        let previous = Array(repeating: 100.0, count: 16)
+        let next = Array(repeating: 120.0, count: 16)
+        let candidate = Array(repeating: 138.0, count: 16)   // max + 18 < marge 26
+        let overshoot = VideoRenderPipeline.envelopeOvershoot(previous: previous, next: next, candidate: candidate)
+        #expect(overshoot <= VideoRenderPipeline.envelopeRejectThreshold)
+    }
+
+    /// Flash blanc global : très au-dessus du max des deux sources → rejet.
+    @Test func whiteFlashIsRejected() {
+        let previous = Array(repeating: 100.0, count: 16)
+        let next = Array(repeating: 120.0, count: 16)
+        let candidate = Array(repeating: 220.0, count: 16)
+        let overshoot = VideoRenderPipeline.envelopeOvershoot(previous: previous, next: next, candidate: candidate)
+        #expect(overshoot > VideoRenderPipeline.envelopeRejectThreshold)
+    }
+
+    /// Trou noir LOCALISÉ : une seule tuile aberrante suffit à écarter l'image.
+    @Test func localizedBlackHoleIsRejected() {
+        let previous = Array(repeating: 100.0, count: 16)
+        let next = Array(repeating: 90.0, count: 16)
+        var candidate = Array(repeating: 95.0, count: 16)
+        candidate[5] = 8   // zone noire sur une tuile
+        let overshoot = VideoRenderPipeline.envelopeOvershoot(previous: previous, next: next, candidate: candidate)
+        #expect(overshoot > VideoRenderPipeline.envelopeRejectThreshold)
+    }
+}
+
 struct ColorAttachmentPropagationTests {
 
     private func makeBuffer() throws -> CVPixelBuffer {
