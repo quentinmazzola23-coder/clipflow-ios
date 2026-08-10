@@ -19,15 +19,19 @@ struct ProjectListView: View {
                 NavigationLink(value: project.persistentModelID) {
                     ProjectRow(project: project)
                 }
-            }
-            // Suppression INSTANTANÉE au balayage (demande utilisateur) —
-            // fichiers disque inclus.
-            .onDelete { offsets in
-                for index in offsets {
-                    deleteProjectAndFiles(projects[index])
+                // Balayage gauche COMPLET = suppression directe (fichiers
+                // disque inclus), sans étape intermédiaire.
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button(role: .destructive) {
+                        deleteProjectAndFiles(project)
+                    } label: {
+                        Label("Supprimer", systemImage: "trash")
+                    }
                 }
             }
         }
+        // Pas de rebond de défilement quand la liste tient à l'écran.
+        .scrollBounceBehavior(.basedOnSize)
         .overlay {
             if projects.isEmpty {
                 ContentUnavailableView(

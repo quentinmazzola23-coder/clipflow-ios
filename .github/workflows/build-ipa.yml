@@ -36,6 +36,18 @@ jobs:
           fi
           xcodebuild -version
 
+      - name: Générer BuildInfo (n° de build + horodatage)
+        working-directory: src
+        run: |
+          cat > ClipFlow/BuildInfo.swift <<EOF
+          enum BuildInfo {
+              static let version = "1.0"
+              static let build = "${{ github.run_number }}"
+              static let stamp = "$(TZ=Europe/Paris date '+%d/%m/%Y %H:%M')"
+          }
+          EOF
+          cat ClipFlow/BuildInfo.swift
+
       - name: Compiler (sans signature)
         working-directory: src
         run: |

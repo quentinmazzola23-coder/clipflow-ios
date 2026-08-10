@@ -66,6 +66,11 @@ struct RenderQueueView: View {
                 }
                 Toggle("Relance automatique des échecs (3 essais)", isOn: $autoRetry)
                     .font(.subheadline)
+                // Export au fil de la validation (comme avant). Compromis :
+                // le rendu partage le décodeur avec l'aperçu — préférer OFF
+                // sur les très longs triages.
+                Toggle("Export automatique à la validation", isOn: $project.autoExportOnValidate)
+                    .font(.subheadline)
             }
 
             // Actions EN HAUT (demande utilisateur).

@@ -552,6 +552,11 @@ struct ProjectEditorView: View {
                 } label: {
                     Label("Exports", systemImage: "square.and.arrow.up")
                 }
+                // Suivi de version — entrée informative, peu contrastée.
+                Section {
+                    Text("v\(BuildInfo.version) (\(BuildInfo.build)) · \(BuildInfo.stamp)")
+                        .font(.caption2)
+                }
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -817,6 +822,10 @@ struct ProjectEditorView: View {
         }
 
         guard let (passage, rush) = commitSelection() else { return }
+        // Export automatique optionnel (toggle dans l'écran Exports).
+        if project.autoExportOnValidate {
+            RenderQueueController.shared.enqueue(passageIDs: [passage.persistentModelID])
+        }
         // Mise en cache de la plage source pleine qualité (export hors-ligne).
         // Échec SIGNALÉ : un passage sans plage cachée dépend de la copie
         // source — l'utilisateur doit le savoir avant toute libération.
@@ -854,6 +863,9 @@ struct ProjectEditorView: View {
                 return
             }
             deleteRush(rush)
+            if project.autoExportOnValidate {
+                RenderQueueController.shared.enqueue(passageIDs: [passage.persistentModelID])
+            }
         }
     }
 
