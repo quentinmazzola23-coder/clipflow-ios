@@ -3,14 +3,15 @@
 //  ClipFlow
 //
 //  Moteur principal : VTFrameProcessor + VTFrameRateConversionConfiguration
-//  (iOS 26+). Flux optique calculé à la volée par VideoToolbox,
-//  qualityPrioritization = .quality, soumission séquentielle.
+//  (iOS 26+). Flux optique à la volée, qualityPrioritization = .quality.
 //
-//  ⚠️ IMPORTANT — à vérifier sur Mac : ce fichier suit la documentation Apple
-//  (VTFrameRateConversionConfiguration, VTFrameProcessorFrame,
-//  VTFrameRateConversionParameters). Ce projet a été généré hors macOS ;
-//  confronter chaque signature aux interfaces réelles du SDK iOS 26 dans Xcode
-//  avant la première compilation (voir README, section « Vérification API »).
+//  CONTRAT : l'extérieur du moteur est TOUJOURS en 32BGRA (chaîne tout-RGB du
+//  pipeline). Le format de travail INTERNE est NÉGOCIÉ avec la configuration
+//  au démarrage — jamais supposé : fournir à VT un format qu'il n'exige pas
+//  réinterprète la mémoire des plans et inverse la chrominance (ciel rose,
+//  verts turquoise — constaté sur exports réels). Si la configuration
+//  n'accepte pas BGRA, les frontières sont converties par
+//  VTPixelTransferSession (conversions couleur gérées par VideoToolbox).
 //
 
 import Foundation
@@ -29,7 +30,14 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
 
     private var processor: VTFrameProcessor?
     private var configuration: VTFrameRateConversionConfiguration?
-    private var destinationPool: CVPixelBufferPool?
+    /// Format de travail interne négocié (BGRA si accepté, sinon le premier
+    /// format exigé par la configuration).
+    private var vtFormat: OSType = kCVPixelFormatType_32BGRA
+    private var usesDirectBGRA = true
+    private var transferSession: VTPixelTransferSession?
+    private var vtInputPool: CVPixelBufferPool?
+    private var vtDestinationPool: CVPixelBufferPool?
+    private var bgraOutputPool: CVPixelBufferPool?
     private var width = 0
     private var height = 0
 
@@ -39,7 +47,6 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
     /// constructible pour ces dimensions. Aucune supposition.
     static func isSupported(width: Int, height: Int) -> Bool {
         guard VTFrameRateConversionConfiguration.isSupported else { return false }
-        // La construction échoue (nil) si les dimensions sont hors bornes.
         let probe = VTFrameRateConversionConfiguration(
             frameWidth: width,
             frameHeight: height,
@@ -53,9 +60,19 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
     // MARK: - FrameInterpolationEngine
 
     var sourcePixelBufferAttributes: [String: Any]? {
-        // Exiger le format que la configuration accepte. Renseigné au démarrage
-        // de session ; avant cela, nil.
         configuration?.sourcePixelBufferAttributes as? [String: Any]
+    }
+
+    /// Formats de pixel acceptés en SOURCE par la configuration (la clé peut
+    /// porter un nombre unique ou une liste).
+    private static func supportedSourceFormats(
+        of configuration: VTFrameRateConversionConfiguration
+    ) -> [OSType] {
+        guard let attributes = configuration.sourcePixelBufferAttributes as? [String: Any],
+              let value = attributes[kCVPixelBufferPixelFormatTypeKey as String] else { return [] }
+        if let number = value as? NSNumber { return [number.uint32Value] }
+        if let list = value as? [NSNumber] { return list.map { $0.uint32Value } }
+        return []
     }
 
     func startSession(width: Int, height: Int) async throws {
@@ -72,33 +89,39 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
         let processor = VTFrameProcessor()
         try processor.startSession(configuration: configuration)
 
-        // Pool de destination : attributs de la configuration, mais format
-        // FORCÉ à BGRA — même famille que l'entrée (chaîne tout-RGB : aucune
-        // interprétation chroma possible entre l'interpolation et l'encodage).
-        var poolAttributes = configuration.destinationPixelBufferAttributes as? [String: Any] ?? [:]
-        poolAttributes[kCVPixelBufferWidthKey as String] = width
-        poolAttributes[kCVPixelBufferHeightKey as String] = height
-        poolAttributes[kCVPixelBufferPixelFormatTypeKey as String] = kCVPixelFormatType_32BGRA
-        poolAttributes[kCVPixelBufferIOSurfacePropertiesKey as String] = [:] as [String: Any]
-        poolAttributes[kCVPixelBufferMetalCompatibilityKey as String] = true
-
-        var pool: CVPixelBufferPool?
-        let poolOptions: [String: Any] = [
-            kCVPixelBufferPoolMinimumBufferCountKey as String: 4,
-        ]
-        let status = CVPixelBufferPoolCreate(
-            kCFAllocatorDefault,
-            poolOptions as CFDictionary,
-            poolAttributes as CFDictionary,
-            &pool
-        )
-        guard status == kCVReturnSuccess, let pool else {
-            throw InterpolationError.bufferAllocationFailed
+        // NÉGOCIATION du format de travail.
+        let supported = Self.supportedSourceFormats(of: configuration)
+        if supported.isEmpty || supported.contains(kCVPixelFormatType_32BGRA) {
+            usesDirectBGRA = true
+            vtFormat = kCVPixelFormatType_32BGRA
+        } else {
+            // La configuration impose son format : conversions aux frontières.
+            usesDirectBGRA = false
+            vtFormat = supported[0]
+            var session: VTPixelTransferSession?
+            let status = VTPixelTransferSessionCreate(
+                allocator: kCFAllocatorDefault, pixelTransferSessionOut: &session
+            )
+            guard status == noErr, let session else {
+                throw InterpolationError.processingFailed("VTPixelTransferSession indisponible (\(status)).")
+            }
+            transferSession = session
+            vtInputPool = try Self.makePool(
+                width: width, height: height, format: vtFormat,
+                base: configuration.sourcePixelBufferAttributes as? [String: Any]
+            )
+            bgraOutputPool = try Self.makePool(
+                width: width, height: height,
+                format: kCVPixelFormatType_32BGRA, base: nil
+            )
         }
+        vtDestinationPool = try Self.makePool(
+            width: width, height: height, format: vtFormat,
+            base: configuration.destinationPixelBufferAttributes as? [String: Any]
+        )
 
         self.configuration = configuration
         self.processor = processor
-        self.destinationPool = pool
         self.width = width
         self.height = height
     }
@@ -108,23 +131,25 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
                      next: CVPixelBuffer,
                      nextPTS: CMTime,
                      phases: [Float]) async throws -> [CVPixelBuffer] {
-        guard let processor, destinationPool != nil else {
+        guard let processor, vtDestinationPool != nil else {
             throw InterpolationError.sessionNotStarted
         }
         guard !phases.isEmpty else { return [] }
 
-        guard let sourceFrame = VTFrameProcessorFrame(buffer: previous, presentationTimeStamp: previousPTS),
-              let nextFrame = VTFrameProcessorFrame(buffer: next, presentationTimeStamp: nextPTS) else {
+        // Frontière d'ENTRÉE : conversion vers le format négocié si nécessaire.
+        let vtPrevious = usesDirectBGRA ? previous : try convert(previous, using: vtInputPool)
+        let vtNext = usesDirectBGRA ? next : try convert(next, using: vtInputPool)
+
+        guard let sourceFrame = VTFrameProcessorFrame(buffer: vtPrevious, presentationTimeStamp: previousPTS),
+              let nextFrame = VTFrameProcessorFrame(buffer: vtNext, presentationTimeStamp: nextPTS) else {
             throw InterpolationError.processingFailed("Création des VTFrameProcessorFrame impossible.")
         }
 
-        // Une image de destination par phase, PTS interpolé linéairement
-        // (le PTS exact de sortie est réécrit par le pipeline d'encodage).
         var destinationFrames: [VTFrameProcessorFrame] = []
         destinationFrames.reserveCapacity(phases.count)
         let interval = CMTimeSubtract(nextPTS, previousPTS)
         for phase in phases {
-            guard let buffer = makeDestinationBuffer() else {
+            guard let buffer = buffer(from: vtDestinationPool) else {
                 throw InterpolationError.bufferAllocationFailed
             }
             let offsetSeconds = interval.seconds * Double(phase)
@@ -138,9 +163,9 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
         guard let parameters = VTFrameRateConversionParameters(
             sourceFrame: sourceFrame,
             nextFrame: nextFrame,
-            opticalFlow: nil,                   // calculé à la volée par la configuration
+            opticalFlow: nil,
             interpolationPhase: phases,
-            submissionMode: .sequential,        // traitement séquentiel — mémoire maîtrisée
+            submissionMode: .sequential,
             destinationFrames: destinationFrames
         ) else {
             throw InterpolationError.processingFailed("Paramètres de conversion invalides (phases : \(phases)).")
@@ -152,24 +177,73 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
             throw InterpolationError.processingFailed(String(describing: error))
         }
 
-        return destinationFrames.map { $0.buffer }
+        // Frontière de SORTIE : retour en BGRA uniforme si nécessaire.
+        if usesDirectBGRA {
+            return destinationFrames.map { $0.buffer }
+        }
+        return try destinationFrames.map { try convert($0.buffer, using: bgraOutputPool) }
     }
 
     func endSession() {
         processor?.endSession()
         processor = nil
         configuration = nil
-        destinationPool = nil
+        transferSession = nil
+        vtInputPool = nil
+        vtDestinationPool = nil
+        bgraOutputPool = nil
     }
 
-    // MARK: - Buffers
+    // MARK: - Buffers et conversions
 
-    private func makeDestinationBuffer() -> CVPixelBuffer? {
-        guard let destinationPool else { return nil }
+    private static func makePool(width: Int, height: Int,
+                                 format: OSType,
+                                 base: [String: Any]?) throws -> CVPixelBufferPool {
+        var attributes = base ?? [:]
+        attributes[kCVPixelBufferWidthKey as String] = width
+        attributes[kCVPixelBufferHeightKey as String] = height
+        attributes[kCVPixelBufferPixelFormatTypeKey as String] = format
+        attributes[kCVPixelBufferIOSurfacePropertiesKey as String] = [:] as [String: Any]
+        attributes[kCVPixelBufferMetalCompatibilityKey as String] = true
+
+        var pool: CVPixelBufferPool?
+        let poolOptions: [String: Any] = [
+            kCVPixelBufferPoolMinimumBufferCountKey as String: 4,
+        ]
+        let status = CVPixelBufferPoolCreate(
+            kCFAllocatorDefault,
+            poolOptions as CFDictionary,
+            attributes as CFDictionary,
+            &pool
+        )
+        guard status == kCVReturnSuccess, let pool else {
+            throw InterpolationError.bufferAllocationFailed
+        }
+        return pool
+    }
+
+    private func buffer(from pool: CVPixelBufferPool?) -> CVPixelBuffer? {
+        guard let pool else { return nil }
         var buffer: CVPixelBuffer?
-        let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, destinationPool, &buffer)
+        let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer)
         guard status == kCVReturnSuccess else { return nil }
         return buffer
+    }
+
+    /// Conversion de format couleur-sûre (VideoToolbox gère matrices et plages
+    /// d'après les attachements des buffers).
+    private func convert(_ source: CVPixelBuffer, using pool: CVPixelBufferPool?) throws -> CVPixelBuffer {
+        guard let transferSession else {
+            throw InterpolationError.processingFailed("Session de transfert absente.")
+        }
+        guard let destination = buffer(from: pool) else {
+            throw InterpolationError.bufferAllocationFailed
+        }
+        let status = VTPixelTransferSessionTransferImage(transferSession, from: source, to: destination)
+        guard status == noErr else {
+            throw InterpolationError.processingFailed("Conversion de format échouée (\(status)).")
+        }
+        return destination
     }
 }
 
