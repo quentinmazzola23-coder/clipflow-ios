@@ -13,12 +13,15 @@ import SwiftData
 import CoreMedia
 import Observation
 import UIKit
+import ActivityKit
 
 /// Progression publiée vers l'interface.
 struct RenderQueueSnapshot: Sendable {
     var totalJobs: Int = 0
     var finishedJobs: Int = 0
     var failedJobs: Int = 0
+    /// Numéro (1-indexé) du clip en cours dans la file.
+    var currentClipNumber: Int = 0
     var currentPassageName: String?
     var currentProgress: Double = 0
     var isPaused: Bool = false
@@ -38,6 +41,11 @@ final class RenderQueueController {
     private var userPaused = false
     /// Relances automatiques par passage (plafonnées à 3).
     private var retryCounts: [PersistentIdentifier: Int] = [:]
+    /// Live Activity d'export (Dynamic Island + écran verrouillé).
+    private var exportActivity: Activity<ExportActivityAttributes>?
+    /// Dernière progression poussée vers la Live Activity (throttling).
+    private var lastActivityProgress: Double = -1
+    private var lastActivityClipNumber = 0
 
     static let shared = RenderQueueController()
     private init() {}
@@ -100,6 +108,50 @@ final class RenderQueueController {
         worker = nil
         snapshot = RenderQueueSnapshot()
         ThermalMonitor.shared.setRenderingActive(false)
+        endActivity()
+    }
+
+    // MARK: - Live Activity (Dynamic Island / écran verrouillé)
+
+    private var activityState: ExportActivityAttributes.ContentState {
+        ExportActivityAttributes.ContentState(
+            clipIndex: max(1, snapshot.currentClipNumber),
+            totalClips: max(1, snapshot.totalJobs),
+            progress: min(1, max(0, snapshot.currentProgress)),
+            clipName: snapshot.currentPassageName ?? "Export…",
+            failedClips: snapshot.failedJobs
+        )
+    }
+
+    private func startActivityIfNeeded() {
+        guard exportActivity == nil,
+              ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+        exportActivity = try? Activity.request(
+            attributes: ExportActivityAttributes(),
+            content: .init(state: activityState, staleDate: nil)
+        )
+        lastActivityProgress = -1
+        lastActivityClipNumber = 0
+    }
+
+    /// Pousse l'état si le clip a changé ou si la progression a avancé d'au
+    /// moins 2 % — jamais de rafale d'updates.
+    private func updateActivityThrottled(force: Bool = false) {
+        guard let activity = exportActivity else { return }
+        let clipChanged = snapshot.currentClipNumber != lastActivityClipNumber
+        let progressed = abs(snapshot.currentProgress - lastActivityProgress) >= 0.02
+        guard force || clipChanged || progressed else { return }
+        lastActivityClipNumber = snapshot.currentClipNumber
+        lastActivityProgress = snapshot.currentProgress
+        let content = ActivityContent(state: activityState, staleDate: nil)
+        Task { await activity.update(content) }
+    }
+
+    private func endActivity() {
+        guard let activity = exportActivity else { return }
+        exportActivity = nil
+        let content = ActivityContent(state: activityState, staleDate: nil)
+        Task { await activity.end(content, dismissalPolicy: .immediate) }
     }
 
     private func startIfNeeded() {
@@ -111,11 +163,16 @@ final class RenderQueueController {
         guard let container else { return }
         snapshot.isRunning = true
         ThermalMonitor.shared.setRenderingActive(true)
+        startActivityIfNeeded()
         defer {
             snapshot.isRunning = false
             snapshot.currentPassageName = nil
+            snapshot.currentClipNumber = 0
             ThermalMonitor.shared.setRenderingActive(false)
             worker = nil
+            endActivity()
+            // File vide : libère la session moteur conservée entre les clips.
+            VideoRenderPipeline.drainCachedEngine()
         }
 
         while !pendingPassageIDs.isEmpty {
@@ -182,6 +239,8 @@ final class RenderQueueController {
             passage.exportState = .rendering
             snapshot.currentPassageName = filename
             snapshot.currentProgress = 0
+            snapshot.currentClipNumber = snapshot.finishedJobs + snapshot.failedJobs + 1
+            updateActivityThrottled(force: true)
             try? context.save() // état persistant AVANT le rendu
 
             // Tâche de fond système : si l'écran se verrouille pendant le
@@ -202,6 +261,7 @@ final class RenderQueueController {
                 let result = try await VideoRenderPipeline.render(job: job) { progress in
                     Task { @MainActor in
                         RenderQueueController.shared.snapshot.currentProgress = progress
+                        RenderQueueController.shared.updateActivityThrottled()
                     }
                 }
                 let assetID = try await PhotoExportService.saveToPhotos(fileURL: result.outputURL)

@@ -136,28 +136,78 @@ final class VideoRenderPipeline {
         // VT interpole des textures RGB ; l'encodeur reconvertit uniformément.
         let readerPixelFormat: OSType = kCVPixelFormatType_32BGRA
 
+        // --- Moteur : préchauffé PENDANT la passe 1. ---
+        // Le démarrage d'une session VideoToolbox (processeur + pools) coûte
+        // plusieurs centaines de millisecondes : il est lancé en parallèle de
+        // la lecture des timestamps, et la session est RÉUTILISÉE d'un clip au
+        // suivant quand les dimensions n'ont pas changé (file séquentielle).
+        // Démarrage optimiste : si le plan ne demande finalement aucune
+        // interpolation, la session repart simplement dans le cache.
+        let warmupTask: Task<Result<FrameInterpolationEngine, Error>, Never>? = {
+            guard !job.forceFastEngine else { return nil }
+            if let reused = takeCachedEngine(width: encodeWidth, height: encodeHeight) {
+                return Task { .success(reused) }
+            }
+            guard let fresh = InterpolationEngineFactory.bestEngine(width: encodeWidth, height: encodeHeight) else {
+                return nil
+            }
+            return Task {
+                do {
+                    try await fresh.startSession(width: encodeWidth, height: encodeHeight)
+                    return .success(fresh)
+                } catch {
+                    return .failure(error)
+                }
+            }
+        }()
+
+        // Une session préchauffée mais finalement inutilisable ne doit jamais
+        // rester orpheline (fuite GPU) : libération asynchrone.
+        func abandonWarmup() {
+            guard let warmupTask else { return }
+            Task {
+                if case .success(let unused) = await warmupTask.value { unused.endSession() }
+            }
+        }
+
         // --- Passe 1 : timestamps des frames RÉELLEMENT DÉCODÉES. ---
         // (Le passthrough listait des échantillons conteneur que le décodeur
         // ne livre pas toujours — frame de frontière notamment — et tout
         // désalignement de liste faussait le rythme du clip. En décodant les
         // deux passes à l'identique, les ensembles coïncident par construction.)
-        let sourcePTS = try collectDecodedTimestamps(
-            asset: asset, track: track, range: decodeRange, pixelFormat: readerPixelFormat
-        )
+        // Hors pool coopératif : boucle de décodage bloquante.
+        let sourcePTS: [CMTime]
+        do {
+            sourcePTS = try await Task.detached(priority: .userInitiated) {
+                try collectDecodedTimestamps(
+                    asset: asset, track: track, range: decodeRange, pixelFormat: readerPixelFormat
+                )
+            }.value
+        } catch {
+            abandonWarmup()
+            throw error
+        }
         guard sourcePTS.count >= 2 else {
+            abandonWarmup()
             throw RenderError.readerFailed("plage source trop courte (\(sourcePTS.count) image(s))")
         }
 
         // --- Plan d'images exact. ---
         let (expectedFrames, exact) = TimeMath.outputFrameCount(final: job.finalDuration, fps: job.fps)
         _ = exact // une durée non divisible a déjà été signalée à l'utilisateur en amont
-        let plan = try FramePlanner.plan(
-            sourcePTS: sourcePTS,
-            selectionStart: job.sourceRange.start,
-            outputFrameCount: expectedFrames,
-            fps: job.fps,
-            speed: job.speed
-        )
+        let plan: [FramePlanEntry]
+        do {
+            plan = try FramePlanner.plan(
+                sourcePTS: sourcePTS,
+                selectionStart: job.sourceRange.start,
+                outputFrameCount: expectedFrames,
+                fps: job.fps,
+                speed: job.speed
+            )
+        } catch {
+            abandonWarmup()
+            throw error
+        }
 
         // --- Moteur d'interpolation. ---
         // Qualité maximale exigée : si le flux optique VideoToolbox n'est pas
@@ -165,10 +215,18 @@ final class VideoRenderPipeline {
         // ÉCHOUE explicitement — jamais de duplication d'images silencieuse.
         let needsInterpolation = plan.contains { if case .interpolate = $0 { return true } ; return false }
         let engine: FrameInterpolationEngine
-        if job.forceFastEngine {
+        var engineIsReusable = false
+        if let warmupTask {
+            switch await warmupTask.value {
+            case .success(let warmed):
+                engine = warmed
+                engineIsReusable = true
+            case .failure(let error):
+                guard !needsInterpolation else { throw error }
+                engine = PassthroughRetimeEngine()
+            }
+        } else if job.forceFastEngine {
             engine = PassthroughRetimeEngine()
-        } else if let highQuality = InterpolationEngineFactory.bestEngine(width: encodeWidth, height: encodeHeight) {
-            engine = highQuality
         } else if needsInterpolation {
             throw RenderError.interpolationUnavailable
         } else {
@@ -176,10 +234,16 @@ final class VideoRenderPipeline {
             // toutes les images finales sont des copies exactes.
             engine = PassthroughRetimeEngine()
         }
-        if needsInterpolation {
-            try await engine.startSession(width: encodeWidth, height: encodeHeight)
+        // La session repart dans le cache après un rendu SAIN ; toute erreur
+        // (état moteur incertain) la détruit.
+        var renderCompleted = false
+        defer {
+            if engineIsReusable && renderCompleted {
+                storeCachedEngine(engine, width: encodeWidth, height: encodeHeight)
+            } else {
+                engine.endSession()
+            }
         }
-        defer { engine.endSession() }
 
         // --- Passe 2 : décodage séquentiel. ---
         // Format de lecture choisi EXPLICITEMENT (jamais le dictionnaire
@@ -306,8 +370,74 @@ final class VideoRenderPipeline {
             }
         }
 
-        // Regroupe les interpolations consécutives partageant la même paire
-        // source pour soumettre toutes les phases en un seul appel moteur.
+        /// Append + progression (l'ordre des appends suit STRICTEMENT le plan).
+        func appendOutput(_ buffer: CVPixelBuffer) async throws {
+            try await appendWhenReady(buffer, pts: TimeMath.outputPTS(frameIndex: outputFrameIndex, fps: job.fps))
+            outputFrameIndex += 1
+            onProgress(Double(outputFrameIndex) / Double(expectedFrames))
+        }
+
+        // RECOUVREMENT GPU/CPU : pendant que VideoToolbox interpole le groupe
+        // suivant, le failsafe et l'encodage du groupe précédent tournent sur
+        // le CPU. Les appels moteur ne sont JAMAIS concurrents (le résultat du
+        // groupe k est attendu avant de soumettre le groupe k+1) et l'ordre
+        // des appends reste exactement celui du plan : le groupe en attente
+        // est encodé avant les copies retenues derrière lui.
+        struct PendingInterpolation {
+            let prev: CVPixelBuffer
+            let next: CVPixelBuffer
+            let phases: [Float]
+            let produced: [CVPixelBuffer]
+        }
+        var pendingGroup: PendingInterpolation?
+        // Copies décodées arrivées derrière un groupe non encore encodé.
+        var copyBacklog: [CVPixelBuffer] = []
+
+        /// FAILSAFE ANTI-ARTEFACT v3 : le flux optique produit parfois des
+        /// images aberrantes (flash global OU zone noire partielle). Chaque
+        /// image interpolée est testée contre l'ENVELOPPE [min, max] de ses
+        /// deux sources, tuile par tuile (grille 4×4) — voir
+        /// envelopeOvershoot(). Dépassement franc → remplacement par la source
+        /// la plus proche (micro-duplication invisible plutôt qu'un défaut
+        /// visible). Puis encodage du groupe et des copies retenues.
+        func flushPending() async throws {
+            if let group = pendingGroup {
+                pendingGroup = nil
+                let tilesPrev = Self.tileLuma(of: group.prev)
+                let tilesNext = Self.tileLuma(of: group.next)
+                for (phaseIndex, buffer) in group.produced.enumerated() {
+                    var outputBuffer = buffer
+                    if let tp = tilesPrev, let tn = tilesNext,
+                       let tb = Self.tileLuma(of: buffer),
+                       tp.count == tb.count, tn.count == tb.count {
+                        let worstOvershoot = Self.envelopeOvershoot(previous: tp, next: tn, candidate: tb)
+                        maxLumaDeviation = max(maxLumaDeviation, worstOvershoot)
+                        if worstOvershoot > Self.envelopeRejectThreshold {
+                            outputBuffer = group.phases[phaseIndex] < 0.5 ? group.prev : group.next
+                            correctedCount += 1
+                        }
+                    } else {
+                        // Format non mesurable : signalé, jamais silencieux.
+                        uncheckedInterpolatedFrames += 1
+                    }
+                    // CAUSE RACINE DU FLASH BLEU : les buffers de destination
+                    // du moteur VT sortent du pool SANS attachements
+                    // colorimétriques — l'encodeur les interprète en BT.709
+                    // entre des copies étiquetées BT.2020/HLG → teinte bleue
+                    // une image sur deux. Propagation systématique des
+                    // attachements de la source vers chaque image interpolée.
+                    Self.propagateColorAttachments(from: group.prev, to: outputBuffer)
+                    try await appendOutput(outputBuffer)
+                    interpolatedCount += 1
+                }
+            }
+            for buffer in copyBacklog {
+                try await appendOutput(buffer)
+                copiedCount += 1
+            }
+            copyBacklog.removeAll(keepingCapacity: true)
+        }
+
         var entryIndex = 0
         while entryIndex < plan.count {
             try Task.checkCancellation()
@@ -318,9 +448,19 @@ final class VideoRenderPipeline {
                 guard let buffer = currentBuffer else {
                     throw RenderError.readerFailed("buffer manquant à l'image \(index)")
                 }
-                try await appendWhenReady(buffer, pts: TimeMath.outputPTS(frameIndex: outputFrameIndex, fps: job.fps))
-                copiedCount += 1
-                outputFrameIndex += 1
+                if pendingGroup == nil {
+                    try await appendOutput(buffer)
+                    copiedCount += 1
+                } else {
+                    // Ordre du plan : cette copie suit le groupe en attente.
+                    // Borne de rétention (pression sur le pool du décodeur) :
+                    // au-delà de 4 copies retenues, encodage immédiat du
+                    // groupe (pur CPU, son résultat est déjà matérialisé).
+                    copyBacklog.append(buffer)
+                    if copyBacklog.count >= 4 {
+                        try await flushPending()
+                    }
+                }
                 entryIndex += 1
 
             case .interpolate(let prevIdx, let nextIdx, _):
@@ -337,52 +477,26 @@ final class VideoRenderPipeline {
                     phases.append(phase)
                     lookahead += 1
                 }
-                let produced = try await engine.interpolate(
+                // Soumission GPU immédiate ; le groupe PRÉCÉDENT est contrôlé
+                // et encodé pendant que celui-ci se calcule. En cas d'erreur
+                // du flush, la tâche fille est annulée par la concurrence
+                // structurée.
+                async let producedNow = try await engine.interpolate(
                     previous: prev,
                     previousPTS: sourcePTS[prevIdx],
                     next: next,
                     nextPTS: sourcePTS[nextIdx],
                     phases: phases
                 )
-                // FAILSAFE ANTI-ARTEFACT v3 : le flux optique produit parfois
-                // des images aberrantes (flash global OU zone noire partielle).
-                // Chaque image interpolée est testée contre l'ENVELOPPE
-                // [min, max] de ses deux sources, tuile par tuile (grille 4×4)
-                // — voir envelopeOvershoot(). Dépassement franc → remplacement
-                // par la source la plus proche (micro-duplication invisible
-                // plutôt qu'un défaut visible).
-                let tilesPrev = Self.tileLuma(of: prev)
-                let tilesNext = Self.tileLuma(of: next)
-                for (phaseIndex, buffer) in produced.enumerated() {
-                    var outputBuffer = buffer
-                    if let tp = tilesPrev, let tn = tilesNext,
-                       let tb = Self.tileLuma(of: buffer),
-                       tp.count == tb.count, tn.count == tb.count {
-                        let worstOvershoot = Self.envelopeOvershoot(previous: tp, next: tn, candidate: tb)
-                        maxLumaDeviation = max(maxLumaDeviation, worstOvershoot)
-                        if worstOvershoot > Self.envelopeRejectThreshold {
-                            outputBuffer = phases[phaseIndex] < 0.5 ? prev : next
-                            correctedCount += 1
-                        }
-                    } else {
-                        // Format non mesurable : signalé, jamais silencieux.
-                        uncheckedInterpolatedFrames += 1
-                    }
-                    // CAUSE RACINE DU FLASH BLEU : les buffers de destination
-                    // du moteur VT sortent du pool SANS attachements
-                    // colorimétriques — l'encodeur les interprète en BT.709
-                    // entre des copies étiquetées BT.2020/HLG → teinte bleue
-                    // une image sur deux. Propagation systématique des
-                    // attachements de la source vers chaque image interpolée.
-                    Self.propagateColorAttachments(from: prev, to: outputBuffer)
-                    try await appendWhenReady(outputBuffer, pts: TimeMath.outputPTS(frameIndex: outputFrameIndex, fps: job.fps))
-                    interpolatedCount += 1
-                    outputFrameIndex += 1
-                }
+                try await flushPending()
+                pendingGroup = PendingInterpolation(
+                    prev: prev, next: next, phases: phases, produced: try await producedNow
+                )
                 entryIndex = lookahead
             }
-            onProgress(Double(outputFrameIndex) / Double(expectedFrames))
         }
+        // Dernier groupe + copies restantes.
+        try await flushPending()
 
         reader.cancelReading()
         writerInput.markAsFinished()
@@ -400,6 +514,7 @@ final class VideoRenderPipeline {
         let fileSize = Int64((try? outputURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
         let elapsed = startedAt.duration(to: ContinuousClock.now)
 
+        renderCompleted = true
         return RenderResult(
             outputURL: outputURL,
             durationSeconds: verifiedDuration,
@@ -419,6 +534,36 @@ final class VideoRenderPipeline {
             discardedDecodedFrames: discardedDecodedFrames,
             uncheckedInterpolatedFrames: uncheckedInterpolatedFrames
         )
+    }
+
+    // MARK: - Cache de session moteur
+
+    /// Session moteur (VT) conservée entre deux clips consécutifs de mêmes
+    /// dimensions — le démarrage coûte plusieurs centaines de millisecondes.
+    /// La file de rendu est STRICTEMENT séquentielle (un clip à la fois) :
+    /// aucun accès concurrent possible.
+    nonisolated(unsafe) private static var cachedEngineSlot: (engine: FrameInterpolationEngine, width: Int, height: Int)?
+
+    private static func takeCachedEngine(width: Int, height: Int) -> FrameInterpolationEngine? {
+        guard let slot = cachedEngineSlot else { return nil }
+        cachedEngineSlot = nil
+        guard slot.width == width, slot.height == height else {
+            slot.engine.endSession()
+            return nil
+        }
+        return slot.engine
+    }
+
+    private static func storeCachedEngine(_ engine: FrameInterpolationEngine, width: Int, height: Int) {
+        cachedEngineSlot?.engine.endSession()
+        cachedEngineSlot = (engine, width, height)
+    }
+
+    /// À appeler quand la file de rendu se vide : libère la session GPU
+    /// conservée (mémoire, thermique).
+    static func drainCachedEngine() {
+        cachedEngineSlot?.engine.endSession()
+        cachedEngineSlot = nil
     }
 
     // MARK: - Colorimétrie des buffers

@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA0000000000000000000021 /* ClipFlowWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000015 /* ClipFlowWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		AA0000000000000000000030 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -14,11 +18,33 @@
 			remoteGlobalIDString = AA0000000000000000000010;
 			remoteInfo = ClipFlow;
 		};
+		AA0000000000000000000032 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA0000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA0000000000000000000014;
+			remoteInfo = ClipFlowWidgets;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		AA0000000000000000000052 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				AA0000000000000000000021 /* ClipFlowWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		AA0000000000000000000011 /* ClipFlow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClipFlow.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA0000000000000000000012 /* ClipFlowTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ClipFlowTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA0000000000000000000015 /* ClipFlowWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ClipFlowWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -40,6 +66,15 @@
 			path = ClipFlowTests;
 			sourceTree = "<group>";
 		};
+		AA0000000000000000000042 /* ClipFlowWidgets */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = ClipFlowWidgets;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -57,6 +92,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AA0000000000000000000053 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -65,6 +107,7 @@
 			children = (
 				AA0000000000000000000040 /* ClipFlow */,
 				AA0000000000000000000041 /* ClipFlowTests */,
+				AA0000000000000000000042 /* ClipFlowWidgets */,
 				AA0000000000000000000061 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -74,6 +117,7 @@
 			children = (
 				AA0000000000000000000011 /* ClipFlow.app */,
 				AA0000000000000000000012 /* ClipFlowTests.xctest */,
+				AA0000000000000000000015 /* ClipFlowWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -88,10 +132,12 @@
 				AA0000000000000000000080 /* Sources */,
 				AA0000000000000000000050 /* Frameworks */,
 				AA0000000000000000000090 /* Resources */,
+				AA0000000000000000000052 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				AA0000000000000000000033 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				AA0000000000000000000040 /* ClipFlow */,
@@ -102,6 +148,28 @@
 			productName = ClipFlow;
 			productReference = AA0000000000000000000011 /* ClipFlow.app */;
 			productType = "com.apple.product-type.application";
+		};
+		AA0000000000000000000014 /* ClipFlowWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA0000000000000000000073 /* Build configuration list for PBXNativeTarget "ClipFlowWidgets" */;
+			buildPhases = (
+				AA0000000000000000000082 /* Sources */,
+				AA0000000000000000000053 /* Frameworks */,
+				AA0000000000000000000092 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				AA0000000000000000000042 /* ClipFlowWidgets */,
+			);
+			name = ClipFlowWidgets;
+			packageProductDependencies = (
+			);
+			productName = ClipFlowWidgets;
+			productReference = AA0000000000000000000015 /* ClipFlowWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 		AA0000000000000000000013 /* ClipFlowTests */ = {
 			isa = PBXNativeTarget;
@@ -143,6 +211,9 @@
 						CreatedOnToolsVersion = 26.0;
 						TestTargetID = AA0000000000000000000010;
 					};
+					AA0000000000000000000014 = {
+						CreatedOnToolsVersion = 26.0;
+					};
 				};
 			};
 			buildConfigurationList = AA0000000000000000000071 /* Build configuration list for PBXProject "ClipFlow" */;
@@ -162,6 +233,7 @@
 			targets = (
 				AA0000000000000000000010 /* ClipFlow */,
 				AA0000000000000000000013 /* ClipFlowTests */,
+				AA0000000000000000000014 /* ClipFlowWidgets */,
 			);
 		};
 /* End PBXProject section */
@@ -175,6 +247,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		AA0000000000000000000091 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA0000000000000000000092 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -198,6 +277,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AA0000000000000000000082 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -205,6 +291,11 @@
 			isa = PBXTargetDependency;
 			target = AA0000000000000000000010 /* ClipFlow */;
 			targetProxy = AA0000000000000000000030 /* PBXContainerItemProxy */;
+		};
+		AA0000000000000000000033 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA0000000000000000000014 /* ClipFlowWidgets */;
+			targetProxy = AA0000000000000000000032 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -275,6 +366,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "ClipFlow enregistre les passages ralentis export\U00e9s dans votre phototh\U00e8que.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "ClipFlow enregistre vos clips exportés dans l'album « ClipFlow » de votre photothèque.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -302,6 +394,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "ClipFlow enregistre les passages ralentis export\U00e9s dans votre phototh\U00e8que.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "ClipFlow enregistre vos clips exportés dans l'album « ClipFlow » de votre photothèque.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -316,6 +409,54 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.clipflow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		AA00000000000000000000A6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ClipFlowWidgetsSupport/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "ClipFlow Widgets";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.clipflow.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		AA00000000000000000000A7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ClipFlowWidgetsSupport/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "ClipFlow Widgets";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.clipflow.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -381,6 +522,15 @@
 			buildConfigurations = (
 				AA00000000000000000000A4 /* Debug */,
 				AA00000000000000000000A5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AA0000000000000000000073 /* Build configuration list for PBXNativeTarget "ClipFlowWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA00000000000000000000A6 /* Debug */,
+				AA00000000000000000000A7 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

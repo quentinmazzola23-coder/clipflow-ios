@@ -465,11 +465,38 @@ struct ProjectEditorView: View {
         .keyboardShortcut(.return, modifiers: [])
     }
 
+    /// Pastille « clip courant / total + % » affichée dans la barre flottante
+    /// pendant que la file d'export tourne (miroir de la Live Activity).
+    @ViewBuilder
+    private var exportProgressChip: some View {
+        let queue = RenderQueueController.shared.snapshot
+        if queue.isRunning {
+            HStack(spacing: 6) {
+                ZStack {
+                    Circle()
+                        .stroke(Theme.accent.opacity(0.25), lineWidth: 3)
+                    Circle()
+                        .trim(from: 0, to: max(0.02, queue.currentProgress))
+                        .stroke(Theme.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+                .frame(width: 16, height: 16)
+                Text("\(queue.currentClipNumber)/\(queue.totalJobs) · \(Int(queue.currentProgress * 100)) %")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .glassEffect(.regular, in: Capsule())
+        }
+    }
+
     private func controlBar(isLandscape: Bool) -> some View {
         Group {
             if isLandscape {
                 HStack(spacing: 10) {
                     transportButtons
+                    exportProgressChip
                     actionButtons
                 }
             } else {
@@ -480,6 +507,7 @@ struct ProjectEditorView: View {
                             .frame(maxWidth: .infinity)
                     }
                     HStack(spacing: 12) {
+                        exportProgressChip
                         actionButtons
                     }
                 }
