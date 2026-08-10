@@ -358,22 +358,28 @@ final class VideoRenderPipeline {
                     if let tp = tilesPrev, let tn = tilesNext,
                        let tb = Self.tileLuma(of: buffer),
                        tp.count == tb.count, tn.count == tb.count {
-                        let phase = Double(phases[phaseIndex])
-                        var worstTileDeviation: Double = 0
-                        var globalExpected: Double = 0
-                        var globalActual: Double = 0
+                        // Test d'ENVELOPPE, pas d'écart à la moyenne : sur un
+                        // panoramique rapide, une interpolation PARFAITE
+                        // diffère fortement des DEUX sources (le contenu s'est
+                        // déplacé) — l'ancien test la jetait en rafale →
+                        // doublons → clip quasi figé puis saut de rattrapage
+                        // (constaté sur export réel). Un vrai artefact (flash
+                        // blanc, trou noir), lui, SORT de la plage [min, max]
+                        // des deux sources ; un mouvement, jamais.
+                        let margin = 26.0
+                        var worstOvershoot: Double = 0
                         for tileIndex in 0..<tb.count {
-                            let expected = tp[tileIndex] * (1 - phase) + tn[tileIndex] * phase
-                            worstTileDeviation = max(worstTileDeviation, abs(tb[tileIndex] - expected))
-                            globalExpected += expected
-                            globalActual += tb[tileIndex]
+                            let low = min(tp[tileIndex], tn[tileIndex]) - margin
+                            let high = max(tp[tileIndex], tn[tileIndex]) + margin
+                            if tb[tileIndex] < low {
+                                worstOvershoot = max(worstOvershoot, low - tb[tileIndex])
+                            } else if tb[tileIndex] > high {
+                                worstOvershoot = max(worstOvershoot, tb[tileIndex] - high)
+                            }
                         }
-                        let globalDeviation = abs(globalActual - globalExpected) / Double(tb.count)
-                        maxLumaDeviation = max(maxLumaDeviation, worstTileDeviation)
-                        // Tuile isolée très déviante (artefact local) OU dérive
-                        // globale (flash) → image écartée.
-                        if worstTileDeviation > 55 || globalDeviation > 40 {
-                            outputBuffer = phase < 0.5 ? prev : next
+                        maxLumaDeviation = max(maxLumaDeviation, worstOvershoot)
+                        if worstOvershoot > 12 {
+                            outputBuffer = phases[phaseIndex] < 0.5 ? prev : next
                             correctedCount += 1
                         }
                     } else {
