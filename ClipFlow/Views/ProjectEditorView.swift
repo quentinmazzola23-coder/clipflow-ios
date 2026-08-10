@@ -248,6 +248,8 @@ struct ProjectEditorView: View {
             }
         }
         .onAppear {
+            // Réglages globaux appliqués à l'ouverture (maintien entre projets).
+            AppSettings.apply(to: project)
             rebuildSegments()
             RenderQueueController.shared.configure(container: modelContext.container)
             playback.lightPreview = project.previewLight
@@ -1035,9 +1037,12 @@ struct ProjectEditorView: View {
     }
 
     /// Sauvegarde automatique après chaque modification importante.
+    /// Les réglages du projet deviennent les réglages GLOBAUX (maintenus
+    /// entre les projets).
     private func touch() {
         project.updatedAt = .now
         try? modelContext.save()
+        AppSettings.capture(from: project)
     }
 }
 

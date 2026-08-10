@@ -36,6 +36,13 @@ struct ProjectListView: View {
         }
         // Pas de rebond de défilement quand la liste tient à l'écran.
         .scrollBounceBehavior(.basedOnSize)
+        // Version + horodatage de build, discrets en bas de la page.
+        .safeAreaInset(edge: .bottom) {
+            Text("v\(BuildInfo.version) (\(BuildInfo.build)) · \(BuildInfo.stamp)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.bottom, 4)
+        }
         .overlay {
             if projects.isEmpty {
                 ContentUnavailableView(
@@ -81,12 +88,13 @@ struct ProjectListView: View {
                     Button(preset.label) {
                         project.finalDurationCentiseconds = preset.centiseconds
                         try? modelContext.save()
+                        AppSettings.capture(from: project)
                     }
                 }
             }
-            Toggle("Toucher = centre de la sélection", isOn: Bindable(project).touchAnchorIsCenter)
-            Toggle("Export automatique à la validation", isOn: Bindable(project).autoExportOnValidate)
-            Toggle("Aperçu léger (540p, + fluide)", isOn: Bindable(project).previewLight)
+            Toggle("Toucher = centre de la sélection", isOn: settingBinding(project, \.touchAnchorIsCenter))
+            Toggle("Export automatique à la validation", isOn: settingBinding(project, \.autoExportOnValidate))
+            Toggle("Aperçu léger (540p, + fluide)", isOn: settingBinding(project, \.previewLight))
             Button {
                 guard !RenderQueueController.shared.isBusy() else { return }
                 _ = MediaAvailabilityService.releaseSources(in: project)
@@ -97,15 +105,24 @@ struct ProjectListView: View {
                 Label("Libérer l'espace (\(StorageManager.formatBytes(releasable)))",
                       systemImage: "internaldrive")
             }
-            Section {
-                Text("v\(BuildInfo.version) (\(BuildInfo.build)) · \(BuildInfo.stamp)")
-                    .font(.caption2)
-            }
         } label: {
             Image(systemName: "ellipsis.circle")
                 .foregroundStyle(.secondary)
         }
         .buttonStyle(.borderless)
+    }
+
+    /// Liaison de réglage : écrit le projet ET les réglages globaux.
+    private func settingBinding(_ project: ClipProject,
+                                _ keyPath: ReferenceWritableKeyPath<ClipProject, Bool>) -> Binding<Bool> {
+        Binding(
+            get: { project[keyPath: keyPath] },
+            set: { newValue in
+                project[keyPath: keyPath] = newValue
+                try? modelContext.save()
+                AppSettings.capture(from: project)
+            }
+        )
     }
 
     /// La cascade SwiftData efface les entités, PAS les fichiers : suppression
@@ -132,6 +149,8 @@ struct ProjectListView: View {
         formatter.locale = Locale(identifier: "fr_FR")
         formatter.dateStyle = .medium
         let project = ClipProject(name: "Projet du \(formatter.string(from: .now))")
+        // Nouveau projet = réglages globaux courants (maintien entre projets).
+        AppSettings.apply(to: project)
         modelContext.insert(project)
         try? modelContext.save()
     }
