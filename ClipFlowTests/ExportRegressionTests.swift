@@ -125,6 +125,39 @@ struct EnvelopeFailsafeTests {
     }
 }
 
+/// Disjoncteur anti-rafale : un artefact réel est isolé ; remplacer en rafale
+/// fige le clip (défaut pire). Constaté deux fois sur exports réels.
+struct FailsafeCircuitBreakerTests {
+
+    /// Artefact isolé : remplacement appliqué normalement.
+    @Test func isolatedArtifactIsReplaced() {
+        #expect(VideoRenderPipeline.failsafeShouldReplace(
+            correctedSoFar: 0, maxCorrections: 11, consecutiveRejectedGroups: 0
+        ))
+        #expect(VideoRenderPipeline.failsafeShouldReplace(
+            correctedSoFar: 1, maxCorrections: 11, consecutiveRejectedGroups: 1
+        ))
+    }
+
+    /// Troisième groupe consécutif rejeté : le failsafe se trompe — sortie
+    /// moteur acceptée telle quelle (pas de rafale de doublons).
+    @Test func consecutiveBurstIsNeutralized() {
+        #expect(!VideoRenderPipeline.failsafeShouldReplace(
+            correctedSoFar: 2, maxCorrections: 11, consecutiveRejectedGroups: 2
+        ))
+        #expect(!VideoRenderPipeline.failsafeShouldReplace(
+            correctedSoFar: 2, maxCorrections: 11, consecutiveRejectedGroups: 5
+        ))
+    }
+
+    /// Budget par clip épuisé (15 % des images) : plus aucun remplacement.
+    @Test func perClipBudgetIsEnforced() {
+        #expect(!VideoRenderPipeline.failsafeShouldReplace(
+            correctedSoFar: 11, maxCorrections: 11, consecutiveRejectedGroups: 0
+        ))
+    }
+}
+
 struct ColorAttachmentPropagationTests {
 
     private func makeBuffer() throws -> CVPixelBuffer {

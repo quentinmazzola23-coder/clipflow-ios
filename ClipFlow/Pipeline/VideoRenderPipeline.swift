@@ -59,6 +59,18 @@ struct RenderResult: Sendable {
     var discardedDecodedFrames: Int
     /// Images interpolées non contrôlables par le failsafe (format non géré).
     var uncheckedInterpolatedFrames: Int
+    /// Rejets du failsafe NON appliqués par le disjoncteur anti-rafale (un
+    /// artefact réel est isolé ; une rafale de rejets = failsafe qui se
+    /// trompe, et remplacer en rafale FIGE le clip — défaut pire).
+    var failsafeOverrides: Int
+    /// Paires d'images consécutives IDENTIQUES dans le fichier produit
+    /// (vérité terrain mesurée à la vérification : un ralenti interpolé sain
+    /// n'en contient pratiquement aucune).
+    var duplicatePairs: Int
+    /// Cadence réelle de la source décodée : « médian/min/max ms » — révèle
+    /// immédiatement une source VFR (l'iPhone baisse la cadence en basse
+    /// lumière ou scène statique).
+    var sourceIntervalInfo: String
 }
 
 enum RenderError: Error, LocalizedError {
@@ -191,6 +203,17 @@ final class VideoRenderPipeline {
             abandonWarmup()
             throw RenderError.readerFailed("plage source trop courte (\(sourcePTS.count) image(s))")
         }
+
+        // Cadence réelle de la source décodée (diagnostic VFR au bilan : une
+        // caméra iPhone peut tomber à 30 voire 15 fps en basse lumière).
+        let sortedIntervalsMs = zip(sourcePTS.dropFirst(), sourcePTS)
+            .map { CMTimeSubtract($0, $1).seconds * 1000 }
+            .sorted()
+        let sourceIntervalInfo = String(
+            format: "%.1f ms (min %.1f, max %.1f)",
+            sortedIntervalsMs[sortedIntervalsMs.count / 2],
+            sortedIntervalsMs.first ?? 0, sortedIntervalsMs.last ?? 0
+        )
 
         // --- Plan d'images exact. ---
         let (expectedFrames, exact) = TimeMath.outputFrameCount(final: job.finalDuration, fps: job.fps)
@@ -392,6 +415,12 @@ final class VideoRenderPipeline {
         var pendingGroup: PendingInterpolation?
         // Copies décodées arrivées derrière un groupe non encore encodé.
         var copyBacklog: [CVPixelBuffer] = []
+        // DISJONCTEUR ANTI-RAFALE du failsafe : budget de remplacements par
+        // clip + plafond de groupes consécutifs rejetés (voir
+        // failsafeShouldReplace).
+        var failsafeOverrides = 0
+        var consecutiveRejectedGroups = 0
+        let maxCorrections = max(4, expectedFrames * 15 / 100)
 
         /// FAILSAFE ANTI-ARTEFACT v3 : le flux optique produit parfois des
         /// images aberrantes (flash global OU zone noire partielle). Chaque
@@ -405,6 +434,7 @@ final class VideoRenderPipeline {
                 pendingGroup = nil
                 let tilesPrev = Self.tileLuma(of: group.prev)
                 let tilesNext = Self.tileLuma(of: group.next)
+                var groupRejected = false
                 for (phaseIndex, buffer) in group.produced.enumerated() {
                     var outputBuffer = buffer
                     if let tp = tilesPrev, let tn = tilesNext,
@@ -413,8 +443,19 @@ final class VideoRenderPipeline {
                         let worstOvershoot = Self.envelopeOvershoot(previous: tp, next: tn, candidate: tb)
                         maxLumaDeviation = max(maxLumaDeviation, worstOvershoot)
                         if worstOvershoot > Self.envelopeRejectThreshold {
-                            outputBuffer = group.phases[phaseIndex] < 0.5 ? group.prev : group.next
-                            correctedCount += 1
+                            groupRejected = true
+                            if Self.failsafeShouldReplace(
+                                correctedSoFar: correctedCount,
+                                maxCorrections: maxCorrections,
+                                consecutiveRejectedGroups: consecutiveRejectedGroups
+                            ) {
+                                outputBuffer = group.phases[phaseIndex] < 0.5 ? group.prev : group.next
+                                correctedCount += 1
+                            } else {
+                                // Disjoncteur : remplacer en rafale FIGERAIT
+                                // le clip (défaut pire qu'un artefact isolé).
+                                failsafeOverrides += 1
+                            }
                         }
                     } else {
                         // Format non mesurable : signalé, jamais silencieux.
@@ -430,6 +471,7 @@ final class VideoRenderPipeline {
                     try await appendOutput(outputBuffer)
                     interpolatedCount += 1
                 }
+                consecutiveRejectedGroups = groupRejected ? consecutiveRejectedGroups + 1 : 0
             }
             for buffer in copyBacklog {
                 try await appendOutput(buffer)
@@ -506,7 +548,7 @@ final class VideoRenderPipeline {
         }
 
         // --- Vérification du fichier produit. ---
-        let (verifiedDuration, verifiedCount) = try await verify(outputURL: outputURL)
+        let (verifiedDuration, verifiedCount, duplicatePairs) = try await verify(outputURL: outputURL)
         guard verifiedCount == expectedFrames else {
             throw RenderError.verificationFailed(expected: expectedFrames, actual: verifiedCount)
         }
@@ -532,7 +574,10 @@ final class VideoRenderPipeline {
             correctedFrames: correctedCount,
             maxLumaDeviation: maxLumaDeviation,
             discardedDecodedFrames: discardedDecodedFrames,
-            uncheckedInterpolatedFrames: uncheckedInterpolatedFrames
+            uncheckedInterpolatedFrames: uncheckedInterpolatedFrames,
+            failsafeOverrides: failsafeOverrides,
+            duplicatePairs: duplicatePairs,
+            sourceIntervalInfo: sourceIntervalInfo
         )
     }
 
@@ -587,6 +632,22 @@ final class VideoRenderPipeline {
     /// Dépassement d'enveloppe (au pire des tuiles) au-delà duquel l'image
     /// interpolée est écartée au profit de la source la plus proche.
     static let envelopeRejectThreshold: Double = 12
+
+    /// DISJONCTEUR ANTI-RAFALE : faut-il réellement APPLIQUER un remplacement
+    /// demandé par le test d'enveloppe ? Un artefact réel du flux optique est
+    /// ISOLÉ (une à deux images). Une rafale de rejets consécutifs ou un
+    /// volume anormal sur le clip signifie que c'est le failsafe qui se trompe
+    /// — et remplacer en rafale produit des doublons en chaîne = clip FIGÉ
+    /// puis saut (constaté deux fois sur exports réels). Au-delà de 2 groupes
+    /// consécutifs rejetés ou du budget par clip, la sortie du moteur est
+    /// acceptée telle quelle et l'événement est compté (failsafeOverrides).
+    static func failsafeShouldReplace(correctedSoFar: Int,
+                                      maxCorrections: Int,
+                                      consecutiveRejectedGroups: Int) -> Bool {
+        guard consecutiveRejectedGroups < 2 else { return false }
+        guard correctedSoFar < maxCorrections else { return false }
+        return true
+    }
 
     /// Test d'ENVELOPPE, pas d'écart à la moyenne : sur un panoramique rapide,
     /// une interpolation PARFAITE diffère fortement de ses DEUX sources (le
@@ -742,11 +803,16 @@ final class VideoRenderPipeline {
 
     // MARK: - Vérification
 
-    /// Durée et nombre d'images du fichier rendu.
+    /// Durée, nombre d'images et paires d'images consécutives IDENTIQUES du
+    /// fichier rendu.
     /// Comptage en DÉCODANT : le mode passthrough peut regrouper ou ajouter des
     /// échantillons conteneur (observé : +4 constants) ; seuls les buffers
     /// décodés comptent les images réellement présentées.
-    static func verify(outputURL: URL) async throws -> (duration: Double, frameCount: Int) {
+    /// Doublons : vérité terrain du rythme — un ralenti interpolé sain n'a
+    /// pratiquement aucune paire identique ; une rafale de doublons = clip
+    /// figé (défaut constaté deux fois sur exports réels, invisible dans les
+    /// compteurs de production seuls).
+    static func verify(outputURL: URL) async throws -> (duration: Double, frameCount: Int, duplicatePairs: Int) {
         let asset = AVURLAsset(url: outputURL)
         let duration = try await asset.load(.duration)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
@@ -762,12 +828,24 @@ final class VideoRenderPipeline {
             throw RenderError.writerFailed("relecture de vérification impossible")
         }
         var count = 0
+        var duplicatePairs = 0
+        var previousTiles: [Double]?
         while let sample = output.copyNextSampleBuffer() {
-            if CMSampleBufferGetImageBuffer(sample) != nil { count += 1 }
+            guard let image = CMSampleBufferGetImageBuffer(sample) else { continue }
+            count += 1
+            if let tiles = tileLuma(of: image) {
+                if let previous = previousTiles, previous.count == tiles.count,
+                   zip(previous, tiles).allSatisfy({ abs($0 - $1) < 0.02 }) {
+                    duplicatePairs += 1
+                }
+                previousTiles = tiles
+            } else {
+                previousTiles = nil
+            }
         }
         if reader.status == .failed {
             throw RenderError.writerFailed("vérification interrompue : \(reader.error?.localizedDescription ?? "?")")
         }
-        return (duration.seconds, count)
+        return (duration.seconds, count, duplicatePairs)
     }
 }

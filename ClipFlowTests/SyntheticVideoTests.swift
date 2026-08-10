@@ -83,7 +83,7 @@ struct SyntheticVideoTests {
         let url = try await SyntheticVideoFactory.makeClip(fps: 30, frames: 30)
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let (duration, frameCount) = try await VideoRenderPipeline.verify(outputURL: url)
+        let (duration, frameCount, _) = try await VideoRenderPipeline.verify(outputURL: url)
         #expect(frameCount == 30)
         #expect(abs(duration - 1.0) < 0.05)
     }
@@ -92,7 +92,7 @@ struct SyntheticVideoTests {
         let url = try await SyntheticVideoFactory.makeClip(fps: 60, frames: 120)
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let (duration, frameCount) = try await VideoRenderPipeline.verify(outputURL: url)
+        let (duration, frameCount, _) = try await VideoRenderPipeline.verify(outputURL: url)
         #expect(frameCount == 120)
         #expect(abs(duration - 2.0) < 0.05)
     }

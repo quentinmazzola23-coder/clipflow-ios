@@ -277,12 +277,19 @@ final class RenderQueueController {
                 if result.maxLumaDeviation > 0 {
                     corrected += String(format: " (dev max %.0f)", result.maxLumaDeviation)
                 }
+                if result.failsafeOverrides > 0 {
+                    corrected += ", \(result.failsafeOverrides) rejet(s) neutralisé(s) par le disjoncteur"
+                }
+                if result.duplicatePairs > 0 {
+                    corrected += ", ⚠️ \(result.duplicatePairs) paire(s) d'images identiques"
+                }
                 if result.uncheckedInterpolatedFrames > 0 {
                     corrected += ", \(result.uncheckedInterpolatedFrames) non contrôlée(s)"
                 }
                 if result.discardedDecodedFrames > 0 {
                     corrected += ", \(result.discardedDecodedFrames) écartée(s) au décodage"
                 }
+                corrected += ", cadence source \(result.sourceIntervalInfo)"
                 snapshot.lastResultSummary = String(
                     format: "%@ — %.2f s, %d images, %@, %d×%d, %@, moteur : %@%@, rendu en %.0f s",
                     filename, result.durationSeconds, result.frameCount,
