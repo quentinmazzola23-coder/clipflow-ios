@@ -18,6 +18,7 @@ import Foundation
 import CoreVideo
 import CoreMedia
 import VideoToolbox
+import os
 
 // Les classes VTFrameProcessor n'existent pas dans le SDK simulateur —
 // moteur compilé uniquement pour appareil réel.
@@ -35,11 +36,18 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
     private var vtFormat: OSType = kCVPixelFormatType_32BGRA
     private var usesDirectBGRA = true
     private var transferSession: VTPixelTransferSession?
+    /// Format réel du pool de destination — négocié SÉPARÉMENT du format
+    /// d'entrée : VideoToolbox peut parfaitement entrer en RGB et sortir en
+    /// YCbCr. Les confondre fait écrire une géométrie de plans dans un buffer
+    /// déclaré autrement : aucune erreur, pixels faux.
+    private var vtDestinationFormat: OSType = kCVPixelFormatType_32BGRA
     private var vtInputPool: CVPixelBufferPool?
     private var vtDestinationPool: CVPixelBufferPool?
     private var bgraOutputPool: CVPixelBufferPool?
     private var width = 0
     private var height = 0
+
+    private static let log = OSLog(subsystem: "com.example.clipflow", category: "Interpolation")
 
     // MARK: - Compatibilité
 
@@ -63,18 +71,6 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
         configuration?.sourcePixelBufferAttributes as? [String: Any]
     }
 
-    /// Formats de pixel acceptés en SOURCE par la configuration (la clé peut
-    /// porter un nombre unique ou une liste).
-    private static func supportedSourceFormats(
-        of configuration: VTFrameRateConversionConfiguration
-    ) -> [OSType] {
-        guard let attributes = configuration.sourcePixelBufferAttributes as? [String: Any],
-              let value = attributes[kCVPixelBufferPixelFormatTypeKey as String] else { return [] }
-        if let number = value as? NSNumber { return [number.uint32Value] }
-        if let list = value as? [NSNumber] { return list.map { $0.uint32Value } }
-        return []
-    }
-
     func startSession(width: Int, height: Int) async throws {
         guard let configuration = VTFrameRateConversionConfiguration(
             frameWidth: width,
@@ -89,34 +85,85 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
         let processor = VTFrameProcessor()
         try processor.startSession(configuration: configuration)
 
-        // NÉGOCIATION du format de travail.
-        let supported = Self.supportedSourceFormats(of: configuration)
-        if supported.isEmpty || supported.contains(kCVPixelFormatType_32BGRA) {
+        // ÉTAPE 0 — INSTRUMENTATION. Rien dans le dépôt ne montrait ce que
+        // VideoToolbox demande réellement ; toute la négociation reposait sur
+        // des suppositions. À retirer une fois les branches arbitrées.
+        os_log("VT config %dx%d — sourcePixelBufferAttributes :\n%{public}@",
+               log: Self.log, type: .info, width, height,
+               VideoToolboxFormatProbe.describeAttributes(configuration.sourcePixelBufferAttributes))
+        os_log("VT config %dx%d — destinationPixelBufferAttributes :\n%{public}@",
+               log: Self.log, type: .info, width, height,
+               VideoToolboxFormatProbe.describeAttributes(configuration.destinationPixelBufferAttributes))
+        let probedSource = VideoToolboxFormatProbe.pixelFormats(in: configuration.sourcePixelBufferAttributes)
+        let probedDestination = VideoToolboxFormatProbe.pixelFormats(in: configuration.destinationPixelBufferAttributes)
+        os_log("VT formats — source : [%{public}@] / destination : [%{public}@]",
+               log: Self.log, type: .info,
+               probedSource.map(VideoToolboxFormatProbe.fourCC).joined(separator: ", "),
+               probedDestination.map(VideoToolboxFormatProbe.fourCC).joined(separator: ", "))
+
+        // NÉGOCIATION du format d'ENTRÉE. AUCUNE SUPPOSITION : une liste vide
+        // signifie que la configuration n'a rien annoncé d'exploitable —
+        // supposer BGRA réinterpréterait la mémoire des plans SANS erreur
+        // (ciel rose, verts turquoise, constaté sur exports réels). Échec net.
+        guard !probedSource.isEmpty else {
+            processor.endSession()
+            throw InterpolationError.processingFailed(
+                "Aucun format de pixel source exploitable annoncé par "
+                + "VTFrameRateConversionConfiguration. Attributs bruts : "
+                + String(describing: configuration.sourcePixelBufferAttributes)
+            )
+        }
+        if probedSource.contains(kCVPixelFormatType_32BGRA) {
             usesDirectBGRA = true
             vtFormat = kCVPixelFormatType_32BGRA
         } else {
             // La configuration impose son format : conversions aux frontières.
             usesDirectBGRA = false
-            vtFormat = supported[0]
+            vtFormat = probedSource[0]
+        }
+
+        // NÉGOCIATION du format de DESTINATION, indépendante de l'entrée.
+        guard !probedDestination.isEmpty else {
+            processor.endSession()
+            throw InterpolationError.processingFailed(
+                "Aucun format de pixel destination annoncé. Attributs bruts : "
+                + String(describing: configuration.destinationPixelBufferAttributes)
+            )
+        }
+        // Préférence au format d'entrée quand il est aussi proposé en sortie
+        // (une conversion de moins), jamais imposition.
+        vtDestinationFormat = probedDestination.contains(vtFormat) ? vtFormat : probedDestination[0]
+
+        // La session de transfert sert dès que L'UNE OU L'AUTRE frontière
+        // convertit — les lier à la seule branche d'entrée laissait la sortie
+        // sans convertisseur.
+        let needsInputConversion = !usesDirectBGRA
+        let needsOutputConversion = vtDestinationFormat != kCVPixelFormatType_32BGRA
+        if needsInputConversion || needsOutputConversion {
             var session: VTPixelTransferSession?
             let status = VTPixelTransferSessionCreate(
                 allocator: kCFAllocatorDefault, pixelTransferSessionOut: &session
             )
             guard status == noErr, let session else {
+                processor.endSession()
                 throw InterpolationError.processingFailed("VTPixelTransferSession indisponible (\(status)).")
             }
             transferSession = session
+        }
+        if needsInputConversion {
             vtInputPool = try Self.makePool(
                 width: width, height: height, format: vtFormat,
                 base: configuration.sourcePixelBufferAttributes as? [String: Any]
             )
+        }
+        if needsOutputConversion {
             bgraOutputPool = try Self.makePool(
                 width: width, height: height,
                 format: kCVPixelFormatType_32BGRA, base: nil
             )
         }
         vtDestinationPool = try Self.makePool(
-            width: width, height: height, format: vtFormat,
+            width: width, height: height, format: vtDestinationFormat,
             base: configuration.destinationPixelBufferAttributes as? [String: Any]
         )
 
@@ -147,13 +194,32 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
 
         var destinationFrames: [VTFrameProcessorFrame] = []
         destinationFrames.reserveCapacity(phases.count)
+        // Base de temps FIXE et fine (1/90000) : arrondir au timescale SOURCE
+        // confondait deux phases dès que celui-ci était grossier (≤ 100 sur les
+        // réencodages Photos), produisant des PTS de destination identiques ou
+        // décroissants — sans erreur, avec des images fausses.
         let interval = CMTimeSubtract(nextPTS, previousPTS)
+        let ptsTimescale: CMTimeScale = 90_000
+        let base = CMTimeConvertScale(previousPTS, timescale: ptsTimescale,
+                                      method: .roundHalfAwayFromZero)
+        let span = CMTimeConvertScale(interval, timescale: ptsTimescale,
+                                      method: .roundHalfAwayFromZero)
+        var lastPTS = base
         for phase in phases {
             guard let buffer = buffer(from: vtDestinationPool) else {
                 throw InterpolationError.bufferAllocationFailed
             }
-            let offsetSeconds = interval.seconds * Double(phase)
-            let pts = CMTimeAdd(previousPTS, CMTime(seconds: offsetSeconds, preferredTimescale: interval.timescale))
+            let pts = CMTimeAdd(base, CMTimeMultiplyByFloat64(span, multiplier: Float64(phase)))
+            // Une phase strictement croissante DOIT donner un PTS strictement
+            // croissant. Sinon la soumission est dégénérée : échec net plutôt
+            // qu'un groupe d'images fausses.
+            guard CMTimeCompare(pts, lastPTS) > 0 else {
+                throw InterpolationError.processingFailed(
+                    "PTS de destination non monotone (phase \(phase), intervalle "
+                    + "\(interval.seconds) s, timescale source \(interval.timescale))."
+                )
+            }
+            lastPTS = pts
             guard let frame = VTFrameProcessorFrame(buffer: buffer, presentationTimeStamp: pts) else {
                 throw InterpolationError.processingFailed("Création d'une frame de destination impossible.")
             }
@@ -177,8 +243,10 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
             throw InterpolationError.processingFailed(String(describing: error))
         }
 
-        // Frontière de SORTIE : retour en BGRA uniforme si nécessaire.
-        if usesDirectBGRA {
+        // Frontière de SORTIE : dépend du format du pool de DESTINATION, pas de
+        // la branche d'entrée — les confondre laissait sortir du YCbCr annoncé
+        // comme du BGRA.
+        if vtDestinationFormat == kCVPixelFormatType_32BGRA {
             return destinationFrames.map { $0.buffer }
         }
         return try destinationFrames.map { try convert($0.buffer, using: bgraOutputPool) }
@@ -192,6 +260,9 @@ final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
         vtInputPool = nil
         vtDestinationPool = nil
         bgraOutputPool = nil
+        vtDestinationFormat = kCVPixelFormatType_32BGRA
+        usesDirectBGRA = true
+        vtFormat = kCVPixelFormatType_32BGRA
     }
 
     // MARK: - Buffers et conversions
