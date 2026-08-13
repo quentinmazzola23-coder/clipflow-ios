@@ -998,6 +998,13 @@ struct ProjectEditorView: View {
                 if pts.isValid, CMTimeCompare(pts, minPTS) < 0 { minPTS = pts }
                 samples.append(sample)
             }
+            // STATUT DU LECTEUR : `copyNextSampleBuffer` renvoie nil aussi bien
+            // à la fin normale du flux QUE sur erreur. Sans ce contrôle, une
+            // lecture interrompue produisait une plage cachée TRONQUÉE, promue
+            // ensuite source d'export après « Val. + Suppr. » — le rush
+            // original ayant été purgé, la perte était définitive et
+            // silencieuse.
+            guard reader.status == .completed else { return nil }
             guard !samples.isEmpty, minPTS != .positiveInfinity else { return nil }
 
             let writer = try AVAssetWriter(outputURL: destination, fileType: .mov)
@@ -1012,7 +1019,14 @@ struct ProjectEditorView: View {
             writer.startSession(atSourceTime: minPTS)
 
             for sample in samples {
+                // Attente BORNÉE : un encodeur qui n'accepte plus rien figerait
+                // la mise en cache indéfiniment, sans message.
+                let deadline = ContinuousClock.now.advanced(by: .seconds(30))
                 while !input.isReadyForMoreMediaData {
+                    if writer.status == .failed || ContinuousClock.now > deadline {
+                        writer.cancelWriting()
+                        return nil
+                    }
                     try await Task.sleep(for: .milliseconds(4))
                 }
                 guard input.append(sample) else {
