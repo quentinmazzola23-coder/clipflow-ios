@@ -72,6 +72,17 @@ struct RenderResult: Sendable {
     /// immédiatement une source VFR (l'iPhone baisse la cadence en basse
     /// lumière ou scène statique).
     var sourceIntervalInfo: String
+    /// Indices des images du FICHIER PRODUIT jugées aberrantes par l'analyse
+    /// finale (luma + chrominance, grille 8×8) — vérité terrain.
+    var artifactFrames: [Int]
+    /// Écart maximal hors enveloppe mesuré sur le fichier produit (toutes
+    /// composantes) — instrumentation du seuil sur contenu réel.
+    var maxOutputAnomaly: Double
+    /// Images réparées par re-rendu (forcées en copie source).
+    var repairedFrames: Int = 0
+    /// Anomalies SUBSISTANTES après réparation = présentes dans la source
+    /// (changement d'exposition brutal filmé par l'iPhone), pas fabriquées.
+    var sourceAnomalyFrames: Int = 0
 }
 
 enum RenderError: Error, LocalizedError {
@@ -104,9 +115,55 @@ final class VideoRenderPipeline {
 
     private static let signpostLog = OSLog(subsystem: "com.example.clipflow", category: "Render")
 
-    /// Rendu complet d'un passage. `onProgress` ∈ [0;1], appelé hors MainActor.
+    /// Nombre maximal de passes de réparation (voir `render`).
+    static let maxRepairPasses = 2
+
+    /// Rendu d'un passage AVEC CONTRÔLE ET RÉPARATION EN BOUCLE FERMÉE.
+    ///
+    /// Le failsafe en ligne (enveloppe de luma pendant la production) est un
+    /// filet de sécurité, pas une preuve : il ne voit ni la chrominance, ni
+    /// les images copiées, ni ce que l'ENCODEUR a réellement écrit. Ici, le
+    /// FICHIER PRODUIT est ré-analysé image par image (luma + chrominance,
+    /// grille 8×8) ; toute image aberrante isolée est réparée par un nouveau
+    /// rendu où cette image est forcée à l'image source la plus proche — puis
+    /// le fichier est ré-analysé. Une anomalie qui SURVIT à cette réparation
+    /// vient de la source elle-même (changement d'exposition de l'iPhone) :
+    /// elle est signalée, jamais « corrigée » en inventant du contenu.
+    ///
+    /// Conséquence : un artefact produit par l'app ne peut plus atteindre la
+    /// photothèque sans avoir été vu par la machine.
     static func render(job: RenderJob,
                        onProgress: @escaping @Sendable (Double) -> Void) async throws -> RenderResult {
+        var forcedCopies: Set<Int> = []
+        var result = try await renderPass(job: job, forcedCopyOutputIndices: forcedCopies, onProgress: onProgress)
+
+        for pass in 1...maxRepairPasses {
+            let suspects = result.artifactFrames
+            // Rien à réparer, ou toutes les images suspectes sont DÉJÀ des
+            // copies (donc du contenu source) : on s'arrête.
+            let repairable = suspects.filter { !forcedCopies.contains($0) }
+            if repairable.isEmpty { break }
+            forcedCopies.formUnion(repairable)
+            os_log("Artefacts détectés (%d) — passe de réparation %d",
+                   log: signpostLog, type: .info, repairable.count, pass)
+            result = try await renderPass(
+                job: job, forcedCopyOutputIndices: forcedCopies, onProgress: onProgress
+            )
+        }
+
+        result.repairedFrames = forcedCopies.count
+        // Ce qui reste après réparation est du contenu source, pas un artefact
+        // fabriqué : signalé au bilan, l'export n'est pas bloqué.
+        result.sourceAnomalyFrames = result.artifactFrames.count
+        return result
+    }
+
+    /// Une passe de rendu. `forcedCopyOutputIndices` : indices d'images de
+    /// SORTIE à produire par copie de la source la plus proche au lieu d'une
+    /// interpolation (réparation ciblée).
+    private static func renderPass(job: RenderJob,
+                                   forcedCopyOutputIndices: Set<Int>,
+                                   onProgress: @escaping @Sendable (Double) -> Void) async throws -> RenderResult {
         let signpostID = OSSignpostID(log: signpostLog)
         os_signpost(.begin, log: signpostLog, name: "RenderPassage", signpostID: signpostID)
         defer { os_signpost(.end, log: signpostLog, name: "RenderPassage", signpostID: signpostID) }
@@ -281,7 +338,17 @@ final class VideoRenderPipeline {
             kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any],
         ]
         let readerOutput = AVAssetReaderTrackOutput(track: track, outputSettings: readerSettings)
-        readerOutput.alwaysCopiesSampleData = false
+        // alwaysCopiesSampleData = TRUE, délibérément.
+        // À false, Apple autorise le décodeur à RÉUTILISER la mémoire des
+        // échantillons déjà livrés. Or ce pipeline retient les images bien
+        // au-delà de leur livraison : previousBuffer/currentBuffer traversent
+        // l'interpolation du groupe suivant (recouvrement GPU/CPU), le
+        // failsafe, une file de copies en attente, et l'encodage lui-même est
+        // asynchrone. Une image réécrite pendant que l'encodeur la lit = UNE
+        // image corrompue isolée dans le fichier — exactement le symptôme
+        // « flash d'une seule image ». La copie coûte quelques dizaines de
+        // millisecondes par clip : sans commune mesure avec le défaut.
+        readerOutput.alwaysCopiesSampleData = true
         reader.add(readerOutput)
         guard reader.startReading() else {
             throw RenderError.readerFailed(reader.error?.localizedDescription ?? "startReading")
@@ -438,9 +505,17 @@ final class VideoRenderPipeline {
                 var groupRejected = false
                 for (phaseIndex, buffer) in group.produced.enumerated() {
                     var outputBuffer = buffer
-                    if let tp = tilesPrev, let tn = tilesNext,
-                       let tb = Self.tileLuma(of: buffer),
-                       tp.count == tb.count, tn.count == tb.count {
+                    // RÉPARATION CIBLÉE (prioritaire, indépendante du failsafe
+                    // en ligne) : cette image de sortie a été jugée aberrante
+                    // DANS LE FICHIER PRODUIT à la passe précédente — elle est
+                    // remplacée par la source la plus proche, contenu réel
+                    // garanti sans artefact.
+                    if forcedCopyOutputIndices.contains(outputFrameIndex) {
+                        outputBuffer = group.phases[phaseIndex] < 0.5 ? group.prev : group.next
+                        correctedCount += 1
+                    } else if let tp = tilesPrev, let tn = tilesNext,
+                              let tb = Self.tileLuma(of: buffer),
+                              tp.count == tb.count, tn.count == tb.count {
                         let worstOvershoot = Self.envelopeOvershoot(previous: tp, next: tn, candidate: tb)
                         maxLumaDeviation = max(maxLumaDeviation, worstOvershoot)
                         if worstOvershoot > Self.envelopeRejectThreshold {
@@ -553,7 +628,8 @@ final class VideoRenderPipeline {
         }
 
         // --- Vérification du fichier produit. ---
-        let (verifiedDuration, verifiedCount, duplicatePairs) = try await verify(outputURL: outputURL)
+        let (verifiedDuration, verifiedCount, duplicatePairs, anomalies, maxAnomaly) =
+            try await verify(outputURL: outputURL)
         guard verifiedCount == expectedFrames else {
             throw RenderError.verificationFailed(expected: expectedFrames, actual: verifiedCount)
         }
@@ -582,7 +658,9 @@ final class VideoRenderPipeline {
             uncheckedInterpolatedFrames: uncheckedInterpolatedFrames,
             failsafeOverrides: failsafeOverrides,
             duplicatePairs: duplicatePairs,
-            sourceIntervalInfo: sourceIntervalInfo
+            sourceIntervalInfo: sourceIntervalInfo,
+            artifactFrames: anomalies,
+            maxOutputAnomaly: maxAnomaly
         )
     }
 
@@ -822,6 +900,128 @@ final class VideoRenderPipeline {
 
     // MARK: - Vérification
 
+    // MARK: - Analyse du fichier produit (vérité terrain)
+
+    /// Signature d'une image : moyennes par tuile d'une grille 8×8, sur les
+    /// TROIS composantes (Y, Cb, Cr). La chrominance est indispensable : un
+    /// flash bleu/rose peut laisser la luma presque inchangée — l'ancien
+    /// détecteur, purement luma, ne pouvait pas le voir.
+    struct FrameSignature: Sendable {
+        var luma: [Double]
+        var cb: [Double]
+        var cr: [Double]
+    }
+
+    /// Grille de l'analyse finale : 8×8 (64 tuiles) — quatre fois plus fine
+    /// que le failsafe en ligne, un flash localisé sur ~1/64ᵉ de l'image ne
+    /// peut plus se noyer dans une moyenne.
+    static let outputGrid = 8
+    /// Marge tolérée hors enveloppe des deux voisines, par composante.
+    static let outputEnvelopeMargin: Double = 24
+    /// Dépassement au-delà duquel l'image est déclarée aberrante.
+    static let outputAnomalyThreshold: Double = 16
+
+    /// Signature 8×8 d'un buffer NV12 (8 bits bi-planaire) : Y sur le plan 0,
+    /// Cb/Cr entrelacés sur le plan 1. nil si le format n'est pas géré.
+    static func frameSignature(of buffer: CVPixelBuffer) -> FrameSignature? {
+        let format = CVPixelBufferGetPixelFormatType(buffer)
+        guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+              CVPixelBufferGetPlaneCount(buffer) >= 2 else { return nil }
+
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let lumaBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 0),
+              let chromaBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 1) else { return nil }
+
+        let grid = outputGrid
+        let lumaWidth = CVPixelBufferGetWidthOfPlane(buffer, 0)
+        let lumaHeight = CVPixelBufferGetHeightOfPlane(buffer, 0)
+        let lumaStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+        guard lumaWidth >= grid, lumaHeight >= grid else { return nil }
+
+        var lumaTotals = [Double](repeating: 0, count: grid * grid)
+        var lumaCounts = [Int](repeating: 0, count: grid * grid)
+        let stepX = max(lumaWidth / (grid * 16), 1)
+        let stepY = max(lumaHeight / (grid * 16), 1)
+        let lumaPointer = lumaBase.assumingMemoryBound(to: UInt8.self)
+        var y = 0
+        while y < lumaHeight {
+            let tileY = min(y * grid / lumaHeight, grid - 1)
+            let row = lumaPointer + y * lumaStride
+            var x = 0
+            while x < lumaWidth {
+                let index = tileY * grid + min(x * grid / lumaWidth, grid - 1)
+                lumaTotals[index] += Double(row[x])
+                lumaCounts[index] += 1
+                x += stepX
+            }
+            y += stepY
+        }
+
+        let chromaWidth = CVPixelBufferGetWidthOfPlane(buffer, 1)   // paires CbCr
+        let chromaHeight = CVPixelBufferGetHeightOfPlane(buffer, 1)
+        let chromaStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)
+        guard chromaWidth >= grid, chromaHeight >= grid else { return nil }
+
+        var cbTotals = [Double](repeating: 0, count: grid * grid)
+        var crTotals = [Double](repeating: 0, count: grid * grid)
+        var chromaCounts = [Int](repeating: 0, count: grid * grid)
+        let cStepX = max(chromaWidth / (grid * 16), 1)
+        let cStepY = max(chromaHeight / (grid * 16), 1)
+        let chromaPointer = chromaBase.assumingMemoryBound(to: UInt8.self)
+        var cy = 0
+        while cy < chromaHeight {
+            let tileY = min(cy * grid / chromaHeight, grid - 1)
+            let row = chromaPointer + cy * chromaStride
+            var cx = 0
+            while cx < chromaWidth {
+                let index = tileY * grid + min(cx * grid / chromaWidth, grid - 1)
+                cbTotals[index] += Double(row[cx * 2])
+                crTotals[index] += Double(row[cx * 2 + 1])
+                chromaCounts[index] += 1
+                cx += cStepX
+            }
+            cy += cStepY
+        }
+
+        guard lumaCounts.allSatisfy({ $0 > 0 }), chromaCounts.allSatisfy({ $0 > 0 }) else { return nil }
+        return FrameSignature(
+            luma: zip(lumaTotals, lumaCounts).map { $0 / Double($1) },
+            cb: zip(cbTotals, chromaCounts).map { $0 / Double($1) },
+            cr: zip(crTotals, chromaCounts).map { $0 / Double($1) }
+        )
+    }
+
+    /// Une image est ABERRANTE si elle sort de l'enveloppe [min, max] de ses
+    /// DEUX voisines temporelles, sur n'importe quelle composante et
+    /// n'importe quelle tuile. Un mouvement, même rapide, reste borné par ses
+    /// voisines ; un flash (blanc, coloré) ou un trou noir en sort.
+    /// Retourne le pire dépassement (0 = sain).
+    static func anomalyScore(previous: FrameSignature,
+                             candidate: FrameSignature,
+                             next: FrameSignature) -> Double {
+        func worst(_ p: [Double], _ c: [Double], _ n: [Double]) -> Double {
+            guard p.count == c.count, n.count == c.count else { return 0 }
+            var result: Double = 0
+            for index in 0..<c.count {
+                let low = min(p[index], n[index]) - outputEnvelopeMargin
+                let high = max(p[index], n[index]) + outputEnvelopeMargin
+                if c[index] < low {
+                    result = max(result, low - c[index])
+                } else if c[index] > high {
+                    result = max(result, c[index] - high)
+                }
+            }
+            return result
+        }
+        return max(
+            worst(previous.luma, candidate.luma, next.luma),
+            max(worst(previous.cb, candidate.cb, next.cb),
+                worst(previous.cr, candidate.cr, next.cr))
+        )
+    }
+
     /// Durée, nombre d'images et paires d'images consécutives IDENTIQUES du
     /// fichier rendu.
     /// Comptage en DÉCODANT : le mode passthrough peut regrouper ou ajouter des
@@ -831,7 +1031,12 @@ final class VideoRenderPipeline {
     /// pratiquement aucune paire identique ; une rafale de doublons = clip
     /// figé (défaut constaté deux fois sur exports réels, invisible dans les
     /// compteurs de production seuls).
-    static func verify(outputURL: URL) async throws -> (duration: Double, frameCount: Int, duplicatePairs: Int) {
+    /// Analyse aussi CHAQUE image du fichier (luma + chrominance, grille 8×8)
+    /// et retourne les indices des images aberrantes : c'est la seule mesure
+    /// qui voit ce que l'encodeur a réellement écrit — images interpolées ET
+    /// copiées, flashs blancs ET colorés.
+    static func verify(outputURL: URL) async throws
+        -> (duration: Double, frameCount: Int, duplicatePairs: Int, anomalies: [Int], maxAnomaly: Double) {
         let asset = AVURLAsset(url: outputURL)
         let duration = try await asset.load(.duration)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
@@ -841,7 +1046,10 @@ final class VideoRenderPipeline {
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
         ])
-        output.alwaysCopiesSampleData = false
+        // true : les signatures sont calculées pendant la lecture, mais le
+        // coût d'une image recyclée sous les pieds de l'analyse serait un
+        // diagnostic faux — jamais d'économie sur la mesure de vérité.
+        output.alwaysCopiesSampleData = true
         reader.add(output)
         guard reader.startReading() else {
             throw RenderError.writerFailed("relecture de vérification impossible")
@@ -849,8 +1057,26 @@ final class VideoRenderPipeline {
         var count = 0
         var duplicatePairs = 0
         var previousTiles: [Double]?
+        // Fenêtre glissante de trois signatures pour le test d'enveloppe.
+        var window: [(index: Int, signature: FrameSignature?)] = []
+        var anomalies: [Int] = []
+        var maxAnomaly: Double = 0
+
+        func evaluateMiddle() {
+            guard window.count == 3,
+                  let p = window[0].signature,
+                  let c = window[1].signature,
+                  let n = window[2].signature else { return }
+            let score = anomalyScore(previous: p, candidate: c, next: n)
+            maxAnomaly = max(maxAnomaly, score)
+            if score > outputAnomalyThreshold {
+                anomalies.append(window[1].index)
+            }
+        }
+
         while let sample = output.copyNextSampleBuffer() {
             guard let image = CMSampleBufferGetImageBuffer(sample) else { continue }
+            let index = count
             count += 1
             if let tiles = tileLuma(of: image) {
                 if let previous = previousTiles, previous.count == tiles.count,
@@ -861,10 +1087,13 @@ final class VideoRenderPipeline {
             } else {
                 previousTiles = nil
             }
+            window.append((index, frameSignature(of: image)))
+            if window.count > 3 { window.removeFirst() }
+            evaluateMiddle()
         }
         if reader.status == .failed {
             throw RenderError.writerFailed("vérification interrompue : \(reader.error?.localizedDescription ?? "?")")
         }
-        return (duration.seconds, count, duplicatePairs)
+        return (duration.seconds, count, duplicatePairs, anomalies, maxAnomaly)
     }
 }

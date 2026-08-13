@@ -125,6 +125,82 @@ struct EnvelopeFailsafeTests {
     }
 }
 
+/// Détecteur d'anomalies du FICHIER PRODUIT (luma + chrominance, grille 8×8) :
+/// c'est lui qui rend un artefact impossible à livrer — l'export est ré-rendu
+/// tant qu'une image aberrante subsiste.
+struct OutputAnomalyDetectorTests {
+
+    private func signature(luma: Double, cb: Double = 128, cr: Double = 128) -> VideoRenderPipeline.FrameSignature {
+        let count = VideoRenderPipeline.outputGrid * VideoRenderPipeline.outputGrid
+        return VideoRenderPipeline.FrameSignature(
+            luma: Array(repeating: luma, count: count),
+            cb: Array(repeating: cb, count: count),
+            cr: Array(repeating: cr, count: count)
+        )
+    }
+
+    /// Mouvement continu (panoramique) : aucune image n'est aberrante.
+    @Test func smoothMotionHasNoAnomaly() {
+        let score = VideoRenderPipeline.anomalyScore(
+            previous: signature(luma: 60), candidate: signature(luma: 110), next: signature(luma: 160)
+        )
+        #expect(score == 0)
+    }
+
+    /// Flash blanc d'une seule image entre deux images sombres.
+    @Test func singleWhiteFlashIsDetected() {
+        let score = VideoRenderPipeline.anomalyScore(
+            previous: signature(luma: 70), candidate: signature(luma: 245), next: signature(luma: 72)
+        )
+        #expect(score > VideoRenderPipeline.outputAnomalyThreshold)
+    }
+
+    /// Trou noir d'une seule image.
+    @Test func singleBlackFrameIsDetected() {
+        let score = VideoRenderPipeline.anomalyScore(
+            previous: signature(luma: 120), candidate: signature(luma: 4), next: signature(luma: 118)
+        )
+        #expect(score > VideoRenderPipeline.outputAnomalyThreshold)
+    }
+
+    /// FLASH COLORÉ à LUMA CONSTANTE : invisible pour l'ancien détecteur
+    /// (purement luma), détecté ici par la chrominance. C'est le cas des
+    /// teintes bleues/roses constatées sur exports réels.
+    @Test func colorFlashAtConstantLumaIsDetected() {
+        let previous = signature(luma: 120, cb: 128, cr: 128)
+        let candidate = signature(luma: 120, cb: 210, cr: 96)   // forte dérive bleue
+        let next = signature(luma: 120, cb: 129, cr: 127)
+        let score = VideoRenderPipeline.anomalyScore(previous: previous, candidate: candidate, next: next)
+        #expect(score > VideoRenderPipeline.outputAnomalyThreshold)
+        // Preuve de l'angle mort comblé : sur la luma seule, l'écart est nul.
+        #expect(VideoRenderPipeline.envelopeOvershoot(
+            previous: previous.luma, next: next.luma, candidate: candidate.luma
+        ) == 0)
+    }
+
+    /// Flash LOCALISÉ (une tuile sur 64) : la grille 8×8 le voit là où une
+    /// moyenne globale le noierait.
+    @Test func localizedFlashIsDetected() {
+        let previous = signature(luma: 100)
+        var candidate = signature(luma: 100)
+        candidate.luma[27] = 250
+        let next = signature(luma: 101)
+        let score = VideoRenderPipeline.anomalyScore(previous: previous, candidate: candidate, next: next)
+        #expect(score > VideoRenderPipeline.outputAnomalyThreshold)
+    }
+
+    /// Bruit de compression : sous le seuil, aucun faux positif (sinon chaque
+    /// export déclencherait des re-rendus inutiles).
+    @Test func compressionNoiseIsNotFlagged() {
+        let score = VideoRenderPipeline.anomalyScore(
+            previous: signature(luma: 100, cb: 130, cr: 126),
+            candidate: signature(luma: 112, cb: 141, cr: 137),
+            next: signature(luma: 101, cb: 131, cr: 127)
+        )
+        #expect(score <= VideoRenderPipeline.outputAnomalyThreshold)
+    }
+}
+
 /// Disjoncteur anti-rafale : un artefact réel est isolé ; remplacer en rafale
 /// fige le clip (défaut pire). Constaté deux fois sur exports réels.
 struct FailsafeCircuitBreakerTests {

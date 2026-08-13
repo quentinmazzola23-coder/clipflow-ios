@@ -324,6 +324,13 @@ final class RenderQueueController {
                 if result.duplicatePairs > 0 {
                     corrected += ", ⚠️ \(result.duplicatePairs) paire(s) d'images identiques"
                 }
+                if result.repairedFrames > 0 {
+                    corrected += ", \(result.repairedFrames) image(s) réparée(s) par re-rendu"
+                }
+                if result.sourceAnomalyFrames > 0 {
+                    corrected += ", ⚠️ \(result.sourceAnomalyFrames) anomalie(s) présente(s) dans la source"
+                }
+                corrected += String(format: ", contrôle image par image OK (écart max %.0f)", result.maxOutputAnomaly)
                 if result.uncheckedInterpolatedFrames > 0 {
                     corrected += ", \(result.uncheckedInterpolatedFrames) non contrôlée(s)"
                 }

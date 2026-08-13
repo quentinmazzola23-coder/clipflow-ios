@@ -109,3 +109,45 @@ jobs:
             -destination "platform=iOS Simulator,name=$DEVICE" \
             CODE_SIGNING_ALLOWED=NO \
             test
+
+  # BANC D'ESSAI DU VRAI MOTEUR.
+  # Le simulateur n'embarque pas VTFrameProcessor : aucun test n'y prouve
+  # l'absence d'artefact de flux optique. Le runner macOS est en Apple
+  # Silicon — l'app iOS peut y tourner NATIVEMENT (« Designed for iPad »),
+  # avec le vrai VideoToolbox. Objectif : que les artefacts soient constatés
+  # par la machine ici, et non par l'utilisateur sur son iPhone.
+  # Expérimental et non bloquant : si la destination n'est pas disponible sur
+  # l'image du runner, le journal le dit et l'IPA reste produite.
+  moteur-reel:
+    runs-on: macos-26
+    timeout-minutes: 45
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sélectionner Xcode 26 si présent
+        run: |
+          XCODE_26=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$XCODE_26" ]; then
+            sudo xcode-select -s "$XCODE_26"
+          fi
+          xcodebuild -version
+          uname -m
+
+      - name: Destinations disponibles (diagnostic)
+        run: |
+          xcodebuild -project ClipFlow.xcodeproj -scheme ClipFlow -showdestinations || true
+
+      - name: Tests du moteur réel (app iOS exécutée sur macOS)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ClipFlow.xcodeproj \
+            -scheme ClipFlow \
+            -destination 'platform=macOS,arch=arm64,variant=Designed for iPad' \
+            -derivedDataPath build-mac \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="-" \
+            test
