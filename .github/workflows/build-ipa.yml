@@ -148,10 +148,16 @@ jobs:
           set -o pipefail
           swift build --build-tests --package-path . 2>&1 | tail -40
 
-      - name: Tests du pipeline avec le moteur réel (macOS natif)
-        # Pas de `timeout` ici : c'est un outil GNU absent de macOS. Le
-        # garde-fou est ailleurs — attentes bornées dans le code et dans le
-        # banc, plus timeout-minutes du job.
+      # SONDE D'ABORD : elle seule répond à « le flux optique existe-t-il ici,
+      # et si oui, à quelle étape ça bloque ». Sortie EN DIRECT (surtout pas de
+      # redirection vers `tail`, qui masquait tout jusqu'à la fin), chien de
+      # garde qui échantillonne les piles d'appels avant de tuer.
+      - name: Sonde du moteur (disponibilité, session, une interpolation)
         run: |
-          set -o pipefail
-          swift test --package-path . 2>&1 | tail -100
+          bash PipelineHarness/run-with-watchdog.sh 300 \
+            swift test --package-path . --filter EngineProbeTests
+
+      - name: Banc d'essai complet (rendus adversariaux)
+        run: |
+          bash PipelineHarness/run-with-watchdog.sh 600 \
+            swift test --package-path . --filter RealEngineArtifactTests
