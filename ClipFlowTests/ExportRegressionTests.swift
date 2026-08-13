@@ -542,3 +542,63 @@ struct DetectorAcceptanceTests {
         #expect(score == 0)
     }
 }
+
+/// TOLÉRANCE ADAPTATIVE — la tension centrale du détecteur.
+///
+/// Il doit être assez sensible pour voir un flash minuscule sur une scène
+/// calme, et assez tolérant pour ne pas crier sur un panoramique rapide où les
+/// statistiques d'une tuile changent LÉGITIMEMENT de plus de 100 niveaux. Un
+/// seuil fixe ne peut pas tenir les deux : mesuré par le banc, il signalait une
+/// image sur quatre d'un rendu SANS un seul pixel inventé.
+struct AdaptiveToleranceTests {
+
+    private func uniform(_ value: Double) -> VideoRenderPipeline.FrameSignature {
+        let count = VideoRenderPipeline.outputGrid * VideoRenderPipeline.outputGrid
+        let array = Array(repeating: value, count: count)
+        return VideoRenderPipeline.FrameSignature(
+            luma: array, lumaMax: array, lumaMin: array,
+            cb: array, cbMax: array, cbMin: array,
+            cr: array, crMax: array, crMin: array
+        )
+    }
+
+    /// L'amplitude se mesure sur l'ENSEMBLE des références.
+    @Test func spreadMeasuresReferenceRange() throws {
+        let spread = try #require(VideoRenderPipeline.spreadSignature(
+            of: [uniform(100), uniform(160), uniform(120)]
+        ))
+        #expect(abs(spread.luma[0] - 60) < 0.001)
+    }
+
+    /// Références identiques → amplitude nulle → aucune indulgence.
+    @Test func calmSceneKeepsFullSensitivity() throws {
+        let calm = [uniform(100), uniform(100), uniform(100)]
+        let spread = try #require(VideoRenderPipeline.spreadSignature(of: calm))
+        let score = VideoRenderPipeline.medianEnvelopeScore(
+            left: uniform(100), right: uniform(100), candidate: uniform(130), spread: spread
+        )
+        #expect(score > VideoRenderPipeline.outputAnomalyThreshold,
+                "Un écart de 30 niveaux sur une scène immobile doit être signalé")
+    }
+
+    /// Voisinage agité de 120 niveaux : une image qui s'en écarte d'autant
+    /// reste dans l'ordinaire — c'est du mouvement, pas un artefact.
+    @Test func agitatedNeighbourhoodAbsorbsLegitimateMotion() throws {
+        let agitated = [uniform(40), uniform(160), uniform(90), uniform(150), uniform(60)]
+        let spread = try #require(VideoRenderPipeline.spreadSignature(of: agitated))
+        let score = VideoRenderPipeline.medianEnvelopeScore(
+            left: uniform(90), right: uniform(100), candidate: uniform(200), spread: spread
+        )
+        #expect(score == 0, "Mouvement rapide signalé comme artefact (score \(score))")
+    }
+
+    /// Mais un flash qui dépasse DE LOIN l'agitation locale reste vu.
+    @Test func flashBeyondLocalAgitationIsStillDetected() throws {
+        let agitated = [uniform(90), uniform(120), uniform(100), uniform(110), uniform(95)]
+        let spread = try #require(VideoRenderPipeline.spreadSignature(of: agitated))
+        let score = VideoRenderPipeline.medianEnvelopeScore(
+            left: uniform(100), right: uniform(105), candidate: uniform(250), spread: spread
+        )
+        #expect(score > VideoRenderPipeline.outputAnomalyThreshold)
+    }
+}

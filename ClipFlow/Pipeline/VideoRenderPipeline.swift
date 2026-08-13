@@ -1051,15 +1051,23 @@ final class VideoRenderPipeline {
     /// n'importe quelle tuile. Un mouvement, même rapide, reste borné par ses
     /// voisines ; un flash (blanc, coloré) ou un trou noir en sort.
     /// Retourne le pire dépassement (0 = sain).
+    /// `spread` : amplitude de variation des images de RÉFÉRENCE, tuile par
+    /// tuile. La tolérance s'y adapte — voir la note sur la tolérance adaptative
+    /// dans `spreadSignature`.
     static func anomalyScore(previous: FrameSignature,
                              candidate: FrameSignature,
-                             next: FrameSignature) -> Double {
-        func worst(_ p: [Double], _ c: [Double], _ n: [Double]) -> Double {
+                             next: FrameSignature,
+                             spread: FrameSignature? = nil) -> Double {
+        func worst(_ p: [Double], _ c: [Double], _ n: [Double], _ s: [Double]?) -> Double {
             guard p.count == c.count, n.count == c.count else { return 0 }
             var result: Double = 0
             for index in 0..<c.count {
-                let low = min(p[index], n[index]) - outputEnvelopeMargin
-                let high = max(p[index], n[index]) + outputEnvelopeMargin
+                // TOLÉRANCE ADAPTATIVE : marge fixe + amplitude que le
+                // voisinage lui-même présente sur cette tuile.
+                let tolerance = outputEnvelopeMargin
+                    + ((s?.count == c.count) ? s![index] : 0)
+                let low = min(p[index], n[index]) - tolerance
+                let high = max(p[index], n[index]) + tolerance
                 if c[index] < low {
                     result = max(result, low - c[index])
                 } else if c[index] > high {
@@ -1073,16 +1081,58 @@ final class VideoRenderPipeline {
         // moyenne reste testée, mais elle ne voit que les défauts pleine
         // image — c'est elle qui laissait passer les artefacts localisés.
         return [
-            worst(previous.luma, candidate.luma, next.luma),
-            worst(previous.lumaMax, candidate.lumaMax, next.lumaMax),
-            worst(previous.lumaMin, candidate.lumaMin, next.lumaMin),
-            worst(previous.cb, candidate.cb, next.cb),
-            worst(previous.cbMax, candidate.cbMax, next.cbMax),
-            worst(previous.cbMin, candidate.cbMin, next.cbMin),
-            worst(previous.cr, candidate.cr, next.cr),
-            worst(previous.crMax, candidate.crMax, next.crMax),
-            worst(previous.crMin, candidate.crMin, next.crMin),
+            worst(previous.luma, candidate.luma, next.luma, spread?.luma),
+            worst(previous.lumaMax, candidate.lumaMax, next.lumaMax, spread?.lumaMax),
+            worst(previous.lumaMin, candidate.lumaMin, next.lumaMin, spread?.lumaMin),
+            worst(previous.cb, candidate.cb, next.cb, spread?.cb),
+            worst(previous.cbMax, candidate.cbMax, next.cbMax, spread?.cbMax),
+            worst(previous.cbMin, candidate.cbMin, next.cbMin, spread?.cbMin),
+            worst(previous.cr, candidate.cr, next.cr, spread?.cr),
+            worst(previous.crMax, candidate.crMax, next.crMax, spread?.crMax),
+            worst(previous.crMin, candidate.crMin, next.crMin, spread?.crMin),
         ].max() ?? 0
+    }
+
+    /// Amplitude de variation des images de RÉFÉRENCE, tuile par tuile et
+    /// composante par composante (max − min sur l'ensemble des références).
+    ///
+    /// C'est le correctif d'un défaut mesuré par le banc d'essai : sur un
+    /// panoramique rapide sur texture, les statistiques d'une tuile changent
+    /// LÉGITIMEMENT de plus de 100 niveaux d'une image à l'autre, et rien ne
+    /// garantit qu'une image se situe « entre » ses deux voisines — trois
+    /// textures décalées successives n'ont aucune relation d'ordre. Avec un
+    /// seuil fixe, 256 tuiles × 9 statistiques rendaient un dépassement
+    /// certain à chaque image : le détecteur criait sur des rendus SANS un
+    /// seul pixel inventé.
+    ///
+    /// La tolérance devient donc contextuelle : une image peut s'écarter de
+    /// l'enveloppe de ses références d'au plus autant que ces références
+    /// s'écartent entre elles, plus la marge fixe. Scène calme → amplitude
+    /// nulle → détection d'un flash minuscule. Mouvement rapide → amplitude
+    /// large → pas de fausse alerte.
+    static func spreadSignature(of list: [FrameSignature]) -> FrameSignature? {
+        guard let first = list.first else { return nil }
+        func range(_ pick: (FrameSignature) -> [Double]) -> [Double] {
+            let count = pick(first).count
+            var result = [Double](repeating: 0, count: count)
+            for tile in 0..<count {
+                var low = Double.greatestFiniteMagnitude
+                var high = -Double.greatestFiniteMagnitude
+                for signature in list {
+                    let values = pick(signature)
+                    guard tile < values.count else { continue }
+                    low = min(low, values[tile])
+                    high = max(high, values[tile])
+                }
+                result[tile] = high > low ? high - low : 0
+            }
+            return result
+        }
+        return FrameSignature(
+            luma: range { $0.luma }, lumaMax: range { $0.lumaMax }, lumaMin: range { $0.lumaMin },
+            cb: range { $0.cb }, cbMax: range { $0.cbMax }, cbMin: range { $0.cbMin },
+            cr: range { $0.cr }, crMax: range { $0.crMax }, crMin: range { $0.crMin }
+        )
     }
 
     /// Nombre d'images prises de chaque côté pour établir la référence
@@ -1131,8 +1181,9 @@ final class VideoRenderPipeline {
     ///   côté), qui est du contenu source et ne doit pas être « corrigé ».
     static func medianEnvelopeScore(left: FrameSignature,
                                     right: FrameSignature,
-                                    candidate: FrameSignature) -> Double {
-        anomalyScore(previous: left, candidate: candidate, next: right)
+                                    candidate: FrameSignature,
+                                    spread: FrameSignature? = nil) -> Double {
+        anomalyScore(previous: left, candidate: candidate, next: right, spread: spread)
     }
 
     /// PREMIÈRE et DERNIÈRE image : sans voisine des deux côtés, l'enveloppe
@@ -1246,7 +1297,10 @@ final class VideoRenderPipeline {
 
             let score: Double
             if let leftMedian = medianSignature(of: left), let rightMedian = medianSignature(of: right) {
-                score = medianEnvelopeScore(left: leftMedian, right: rightMedian, candidate: candidate)
+                // Tolérance adaptée à l'agitation RÉELLE du voisinage.
+                let spread = spreadSignature(of: left + right)
+                score = medianEnvelopeScore(left: leftMedian, right: rightMedian,
+                                            candidate: candidate, spread: spread)
             } else if right.count >= 2 {
                 // Tout début du clip : extrapolation depuis la suite.
                 score = edgeAnomalyScore(neighbour: right[0], secondNeighbour: right[1], candidate: candidate)
