@@ -1105,33 +1105,42 @@ final class VideoRenderPipeline {
     /// certain à chaque image : le détecteur criait sur des rendus SANS un
     /// seul pixel inventé.
     ///
-    /// La tolérance devient donc contextuelle : une image peut s'écarter de
-    /// l'enveloppe de ses références d'au plus autant que ces références
-    /// s'écartent entre elles, plus la marge fixe. Scène calme → amplitude
-    /// nulle → détection d'un flash minuscule. Mouvement rapide → amplitude
-    /// large → pas de fausse alerte.
+    /// La tolérance devient donc contextuelle. Mais elle est mesurée par un
+    /// ÉCART ABSOLU MÉDIAN, pas par l'amplitude totale : en ralenti, un flash
+    /// d'une image du rush occupe 3 à 4 images de sortie, donc jusqu'à 30 % de
+    /// la fenêtre de référence. L'amplitude totale l'englobait et rendait le
+    /// détecteur aveugle au flash même — mesuré par le banc, écart max tombé à
+    /// 0. L'écart médian, lui, reste dicté par la majorité saine des
+    /// références (robuste jusqu'à 50 % de contamination).
+    ///
+    /// Scène calme → écart nul → un flash minuscule reste détecté.
+    /// Mouvement rapide → écart large → pas de fausse alerte.
+    static let spreadRobustFactor: Double = 4
+
     static func spreadSignature(of list: [FrameSignature]) -> FrameSignature? {
         guard let first = list.first else { return nil }
-        func range(_ pick: (FrameSignature) -> [Double]) -> [Double] {
+        func robustSpread(_ pick: (FrameSignature) -> [Double]) -> [Double] {
             let count = pick(first).count
+            let arrays = list.map(pick)
             var result = [Double](repeating: 0, count: count)
+            var column = [Double](repeating: 0, count: arrays.count)
             for tile in 0..<count {
-                var low = Double.greatestFiniteMagnitude
-                var high = -Double.greatestFiniteMagnitude
-                for signature in list {
-                    let values = pick(signature)
-                    guard tile < values.count else { continue }
-                    low = min(low, values[tile])
-                    high = max(high, values[tile])
+                for (index, values) in arrays.enumerated() {
+                    column[index] = tile < values.count ? values[tile] : 0
                 }
-                result[tile] = high > low ? high - low : 0
+                let sorted = column.sorted()
+                let median = sorted[sorted.count / 2]
+                let deviations = column.map { abs($0 - median) }.sorted()
+                result[tile] = deviations[deviations.count / 2] * spreadRobustFactor
             }
             return result
         }
         return FrameSignature(
-            luma: range { $0.luma }, lumaMax: range { $0.lumaMax }, lumaMin: range { $0.lumaMin },
-            cb: range { $0.cb }, cbMax: range { $0.cbMax }, cbMin: range { $0.cbMin },
-            cr: range { $0.cr }, crMax: range { $0.crMax }, crMin: range { $0.crMin }
+            luma: robustSpread { $0.luma },
+            lumaMax: robustSpread { $0.lumaMax },
+            lumaMin: robustSpread { $0.lumaMin },
+            cb: robustSpread { $0.cb }, cbMax: robustSpread { $0.cbMax }, cbMin: robustSpread { $0.cbMin },
+            cr: robustSpread { $0.cr }, crMax: robustSpread { $0.crMax }, crMin: robustSpread { $0.crMin }
         )
     }
 

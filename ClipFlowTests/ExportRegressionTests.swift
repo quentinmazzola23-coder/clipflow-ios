@@ -562,12 +562,33 @@ struct AdaptiveToleranceTests {
         )
     }
 
-    /// L'amplitude se mesure sur l'ENSEMBLE des références.
-    @Test func spreadMeasuresReferenceRange() throws {
+    /// L'agitation se mesure par un ÉCART ABSOLU MÉDIAN, pas par l'amplitude
+    /// totale : un flash occupe jusqu'à 30 % de la fenêtre de référence, et
+    /// l'amplitude totale l'engloberait — rendant le détecteur aveugle au
+    /// flash même (mesuré : écart max tombé à 0).
+    /// [100, 160, 120] → médiane 120, écarts {20, 40, 0} → médian 20 → ×4.
+    @Test func spreadUsesRobustDeviation() throws {
         let spread = try #require(VideoRenderPipeline.spreadSignature(
             of: [uniform(100), uniform(160), uniform(120)]
         ))
-        #expect(abs(spread.luma[0] - 60) < 0.001)
+        #expect(abs(spread.luma[0] - 20 * VideoRenderPipeline.spreadRobustFactor) < 0.001)
+    }
+
+    /// Le point décisif : une minorité d'images FLASHÉES parmi les références
+    /// ne doit pas gonfler la tolérance, sinon le flash se cache lui-même.
+    @Test func minorityOfFlashedReferencesDoesNotInflateTolerance() throws {
+        // 7 images calmes, 3 flashées — la situation exacte d'un flash d'une
+        // image du rush étalé sur 4 images de sortie.
+        let references = [uniform(100), uniform(102), uniform(98), uniform(101),
+                          uniform(99), uniform(100), uniform(103),
+                          uniform(250), uniform(250), uniform(250)]
+        let spread = try #require(VideoRenderPipeline.spreadSignature(of: references))
+        #expect(spread.luma[0] < 40,
+                "Les images flashées ont gonflé la tolérance (\(spread.luma[0]))")
+        let score = VideoRenderPipeline.medianEnvelopeScore(
+            left: uniform(100), right: uniform(101), candidate: uniform(250), spread: spread
+        )
+        #expect(score > VideoRenderPipeline.outputAnomalyThreshold)
     }
 
     /// Références identiques → amplitude nulle → aucune indulgence.

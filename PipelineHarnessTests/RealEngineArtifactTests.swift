@@ -313,26 +313,21 @@ struct RealEngineArtifactTests {
                 "Flux optique écarté sur un panoramique régulier : \(result.rejectedArtifactFrames) image(s) aberrante(s) — seuil trop serré ?")
     }
 
-    /// LIMITE CONNUE, CONSIGNÉE PLUTÔT QUE MASQUÉE.
+    /// LIMITE LEVÉE — mesurée, puis corrigée.
     ///
-    /// Sur une texture périodique qui s'aliase (damier se ré-alignant toutes
-    /// les deux images source), le contenu inverse RÉELLEMENT d'une image à
-    /// l'autre : aucun test temporel ne peut distinguer cette inversion d'un
-    /// flash. Le détecteur signale donc des images saines — mesuré : cadence
-    /// stricte de 8 images, soit exactement la période du motif.
+    /// Une texture périodique qui s'aliase (damier se ré-alignant toutes les
+    /// deux images source) inverse RÉELLEMENT d'une image à l'autre. Avec une
+    /// tolérance fixe, le détecteur y voyait des flashs et signalait une image
+    /// sur huit — soit exactement la période du motif — sur un rendu sans un
+    /// seul pixel inventé.
     ///
-    /// Conséquence pour l'utilisateur : sur un contenu très périodique et très
-    /// rapide (grillage, rayures, mire), le repli total peut se déclencher sans
-    /// artefact réel. Le clip reste correct, simplement rendu sans flux
-    /// optique. C'est le compromis assumé — préférer un repli injustifié à un
-    /// artefact livré.
-    ///
-    /// Ce test échouera le jour où le détecteur saura faire la différence :
-    /// ce sera un progrès, à constater, pas une régression.
-    @Test func aliasingIsAKnownLimitation() async throws {
+    /// La tolérance adaptée à l'agitation locale a supprimé cette confusion :
+    /// un voisinage qui oscille de 175 niveaux rend une oscillation de 175
+    /// niveaux ordinaire. Ce test verrouille l'acquis.
+    @Test func aliasingIsNoLongerConfusedWithFlash() async throws {
         let result = try await renderAndScan(pattern: .aliasingCheckerboard)
-        #expect(!result.artifactFrames.isEmpty,
-                "Le détecteur ne confond plus aliasing et flash — limite levée, mettre ce test à jour")
+        #expect(result.artifactFrames.isEmpty,
+                "Texture périodique de nouveau prise pour des flashs : \(result.artifactFrames)")
     }
 
     /// Un pic d'UNE image PRÉSENT DANS LA SOURCE traverse le rendu sans flux
