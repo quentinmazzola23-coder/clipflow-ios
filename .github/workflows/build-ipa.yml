@@ -110,14 +110,15 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             test
 
-  # BANC D'ESSAI DU VRAI MOTEUR.
-  # Le simulateur n'embarque pas VTFrameProcessor : aucun test n'y prouve
-  # l'absence d'artefact de flux optique. Le runner macOS est en Apple
-  # Silicon — l'app iOS peut y tourner NATIVEMENT (« Designed for iPad »),
-  # avec le vrai VideoToolbox. Objectif : que les artefacts soient constatés
-  # par la machine ici, et non par l'utilisateur sur son iPhone.
-  # Expérimental et non bloquant : si la destination n'est pas disponible sur
-  # l'image du runner, le journal le dit et l'IPA reste produite.
+  # BANC D'ESSAI DU VRAI MOTEUR (flux optique VideoToolbox).
+  # Le simulateur n'embarque pas VTFrameProcessor et la variante « Designed
+  # for iPad » exige une identité de signature qu'un runner n'a pas. Le paquet
+  # Swift ClipFlowPipeline compile LES MÊMES fichiers sources du pipeline pour
+  # macOS (Apple Silicon) : `swift test` s'exécute sans aucune signature, avec
+  # le vrai moteur. Objectif : les artefacts sont constatés par la machine ici,
+  # plus par l'utilisateur sur son iPhone.
+  # Non bloquant tant que la disponibilité du moteur sur le runner n'est pas
+  # confirmée (les tests se SAUTENT proprement s'il est absent).
   moteur-reel:
     runs-on: macos-26
     timeout-minutes: 45
@@ -133,21 +134,14 @@ jobs:
             sudo xcode-select -s "$XCODE_26"
           fi
           xcodebuild -version
+          swift --version
           uname -m
+          sw_vers
 
-      - name: Destinations disponibles (diagnostic)
-        run: |
-          xcodebuild -project ClipFlow.xcodeproj -scheme ClipFlow -showdestinations || true
+      - name: Synchroniser les sources du pipeline vers le banc d'essai
+        run: bash PipelineHarness/sync-sources.sh
 
-      - name: Tests du moteur réel (app iOS exécutée sur macOS)
+      - name: Tests du pipeline avec le moteur réel (macOS natif)
         run: |
           set -o pipefail
-          xcodebuild \
-            -project ClipFlow.xcodeproj \
-            -scheme ClipFlow \
-            -destination 'platform=macOS,arch=arm64,variant=Designed for iPad' \
-            -derivedDataPath build-mac \
-            CODE_SIGNING_ALLOWED=YES \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="-" \
-            test
+          swift test --package-path . 2>&1 | tail -80

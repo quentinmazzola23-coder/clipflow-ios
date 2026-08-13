@@ -5,11 +5,14 @@
 //  BANC D'ESSAI DU VRAI MOTEUR — le seul test qui prouve l'absence d'artefact
 //  sans passer par l'œil de l'utilisateur.
 //
-//  Le simulateur iOS n'embarque pas VTFrameProcessor : ces tests ne prouvent
-//  rien s'ils y tournent. Ils s'exécutent réellement sur une destination où le
-//  flux optique existe (appareil, ou « Designed for iPad » sur un Mac Apple
-//  Silicon — c'est ce que fait le job « moteur-reel » de la CI). Quand le
-//  moteur est absent, le test le DIT au lieu de passer en silence.
+//  Exécuté par `swift test` sur le runner macOS Apple Silicon (job CI
+//  « moteur-reel »), via le paquet ClipFlowPipeline qui compile LES MÊMES
+//  fichiers sources que l'app. Le simulateur iOS n'embarque pas
+//  VTFrameProcessor et la variante « Designed for iPad » exige une identité
+//  de signature absente d'un runner : le paquet Swift contourne les deux.
+//
+//  Si le moteur de flux optique n'est pas disponible sur la machine, les
+//  tests sont SAUTÉS (trait .enabled) — jamais verts par accident.
 //
 //  Principe : des rushes synthétiques ADVERSARIAUX (les contenus qui font
 //  échouer l'interpolation dans la vraie vie) sont rendus par la chaîne
@@ -21,7 +24,7 @@ import Testing
 import AVFoundation
 import CoreMedia
 import CoreVideo
-@testable import ClipFlow
+@testable import ClipFlowPipeline
 
 /// Générateur de contenus difficiles pour un flux optique.
 enum AdversarialVideoFactory {
@@ -150,11 +153,13 @@ enum AdversarialVideoFactory {
     }
 }
 
-struct RealEngineArtifactTests {
+/// Le moteur de flux optique existe-t-il sur CETTE machine ? Utilisé comme
+/// condition d'exécution : sans lui, les tests sont sautés (résultat honnête),
+/// jamais verts par défaut.
+let opticalFlowAvailable = InterpolationEngineFactory.highQualityAvailable
 
-    /// Le moteur haute qualité est-il réellement disponible ici ? (false dans
-    /// le simulateur : le test le signale au lieu de faire semblant.)
-    private var engineAvailable: Bool { InterpolationEngineFactory.highQualityAvailable }
+@Suite(.enabled(if: opticalFlowAvailable, "Moteur de flux optique indisponible sur cette machine."))
+struct RealEngineArtifactTests {
 
     private func renderAndScan(pattern: AdversarialVideoFactory.Pattern) async throws -> RenderResult {
         let source = try await AdversarialVideoFactory.makeClip(pattern: pattern)
@@ -185,7 +190,6 @@ struct RealEngineArtifactTests {
         AdversarialVideoFactory.Pattern.staticNoise,
     ])
     func adversarialContentProducesNoArtifact(pattern: AdversarialVideoFactory.Pattern) async throws {
-        try #require(engineAvailable, "Moteur de flux optique absent ici (simulateur) — test non probant.")
         let result = try await renderAndScan(pattern: pattern)
         #expect(result.frameCount == 78)
         // Après la boucle de réparation, plus aucune anomalie ne subsiste.
@@ -196,7 +200,6 @@ struct RealEngineArtifactTests {
     /// Un panoramique rapide ne doit pas être « réparé » en rafale : le clip
     /// resterait fluide, sans doublons (régression du clip figé).
     @Test func fastPanStaysFluid() async throws {
-        try #require(engineAvailable, "Moteur de flux optique absent ici (simulateur) — test non probant.")
         let result = try await renderAndScan(pattern: .fastPan)
         #expect(result.duplicatePairs <= 2, "Doublons : \(result.duplicatePairs) — clip figé ?")
         #expect(result.repairedFrames <= 4, "Réparations : \(result.repairedFrames) — failsafe trop agressif ?")
@@ -205,7 +208,6 @@ struct RealEngineArtifactTests {
     /// Un défaut PRÉSENT DANS LA SOURCE (palier d'exposition) est signalé, pas
     /// masqué en inventant du contenu — et n'empêche pas l'export.
     @Test func sourceExposureJumpIsReportedNotFabricated() async throws {
-        try #require(engineAvailable, "Moteur de flux optique absent ici (simulateur) — test non probant.")
         let result = try await renderAndScan(pattern: .exposureJump)
         #expect(result.frameCount == 78)
     }

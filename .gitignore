@@ -1,10 +1,2 @@
-# Xcode
-build/
-DerivedData/
-*.xcuserstate
-xcuserdata/
-*.ipa
-Payload/
-
-# macOS
-.DS_Store
+PipelineHarness/Sources/ClipFlowPipeline/*.swift
+.build/
