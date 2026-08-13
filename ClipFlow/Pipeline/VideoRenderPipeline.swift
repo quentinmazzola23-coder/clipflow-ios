@@ -83,6 +83,13 @@ struct RenderResult: Sendable {
     /// Anomalies SUBSISTANTES après réparation = présentes dans la source
     /// (changement d'exposition brutal filmé par l'iPhone), pas fabriquées.
     var sourceAnomalyFrames: Int = 0
+    /// Images forcées en réparation qui restent aberrantes : ni réparées, ni
+    /// prouvées « source ». Interdit d'afficher « réparée » quand rien n'a
+    /// changé.
+    var unrepairedAnomalyFrames: Int = 0
+    /// Images de sortie à réparer mais sans voisine décodée disponible
+    /// (image 0 du clip) — signalées, jamais maquillées.
+    var unrepairableCopyFrames: Int = 0
 }
 
 enum RenderError: Error, LocalizedError {
@@ -151,9 +158,13 @@ final class VideoRenderPipeline {
             )
         }
 
-        result.repairedFrames = forcedCopies.count
-        // Ce qui reste après réparation est du contenu source, pas un artefact
-        // fabriqué : signalé au bilan, l'export n'est pas bloqué.
+        // COMPTAGE HONNÊTE : « réparée » = image forcée en copie ET DISPARUE du
+        // fichier final. Une image forcée qui reste aberrante n'a rien réparé —
+        // compter `forcedCopies.count` affichait « 1 image réparée » alors que
+        // le second rendu pouvait être strictement identique.
+        let remaining = Set(result.artifactFrames)
+        result.repairedFrames = forcedCopies.subtracting(remaining).count
+        result.unrepairedAnomalyFrames = remaining.intersection(forcedCopies).count
         result.sourceAnomalyFrames = result.artifactFrames.count
         return result
     }
@@ -475,6 +486,11 @@ final class VideoRenderPipeline {
         // des appends reste exactement celui du plan : le groupe en attente
         // est encodé avant les copies retenues derrière lui.
         struct PendingInterpolation {
+            /// Index de PLAN de la première image du groupe. Le plan contient
+            /// exactement une entrée par image de sortie, donc index de plan ==
+            /// index d'image de SORTIE : copies et interpolations partagent le
+            /// MÊME référentiel que `forcedCopyOutputIndices`.
+            let startIndex: Int
             let prev: CVPixelBuffer
             let next: CVPixelBuffer
             let phases: [Float]
@@ -487,6 +503,7 @@ final class VideoRenderPipeline {
         // clip + plafond de groupes consécutifs rejetés (voir
         // failsafeShouldReplace).
         var failsafeOverrides = 0
+        var unrepairableCopyFrames = 0
         var consecutiveRejectedGroups = 0
         let maxCorrections = max(4, expectedFrames * 15 / 100)
 
@@ -510,7 +527,7 @@ final class VideoRenderPipeline {
                     // DANS LE FICHIER PRODUIT à la passe précédente — elle est
                     // remplacée par la source la plus proche, contenu réel
                     // garanti sans artefact.
-                    if forcedCopyOutputIndices.contains(outputFrameIndex) {
+                    if forcedCopyOutputIndices.contains(group.startIndex + phaseIndex) {
                         outputBuffer = group.phases[phaseIndex] < 0.5 ? group.prev : group.next
                         correctedCount += 1
                     } else if let tp = tilesPrev, let tn = tilesNext,
@@ -566,15 +583,40 @@ final class VideoRenderPipeline {
                 guard let buffer = currentBuffer else {
                     throw RenderError.readerFailed("buffer manquant à l'image \(index)")
                 }
+                // RÉPARATION CIBLÉE DES COPIES.
+                // Sans elle, une image de sortie aberrante produite par une
+                // entrée `.copy` est INRÉPARABLE : la boucle relance un rendu
+                // strictement identique (plan déterministe, mêmes pixels), puis
+                // livre l'artefact étiqueté « anomalie de la source ». Or sur
+                // un ralenti 0,5×, 25 à 50 % des images de sortie sont des
+                // copies : la boucle fermée était aveugle sur la moitié du
+                // fichier. Référentiel : `entryIndex` est l'index de l'image de
+                // SORTIE (une entrée de plan = une image) — `outputFrameIndex`
+                // serait FAUX ici, il retarde tant que des copies attendent
+                // dans copyBacklog.
+                var outputBuffer = buffer
+                if forcedCopyOutputIndices.contains(entryIndex) {
+                    if let replacement = previousBuffer {
+                        // Duplication d'une image source RÉELLE voisine : aucun
+                        // contenu inventé, un doublon (compté) plutôt qu'un
+                        // flash visible.
+                        outputBuffer = replacement
+                        correctedCount += 1
+                    } else {
+                        // Première image du clip : pas de voisine gauche
+                        // décodée. Signalée, jamais maquillée en « réparée ».
+                        unrepairableCopyFrames += 1
+                    }
+                }
                 if pendingGroup == nil {
-                    try await appendOutput(buffer)
+                    try await appendOutput(outputBuffer)
                     copiedCount += 1
                 } else {
                     // Ordre du plan : cette copie suit le groupe en attente.
                     // Borne de rétention (pression sur le pool du décodeur) :
                     // au-delà de 4 copies retenues, encodage immédiat du
                     // groupe (pur CPU, son résultat est déjà matérialisé).
-                    copyBacklog.append(buffer)
+                    copyBacklog.append(outputBuffer)
                     if copyBacklog.count >= 4 {
                         try await flushPending()
                     }
@@ -612,6 +654,7 @@ final class VideoRenderPipeline {
                 )
                 try await flushPending()
                 pendingGroup = PendingInterpolation(
+                    startIndex: entryIndex,
                     prev: prev, next: next, phases: groupPhases, produced: try await producedNow
                 )
                 entryIndex = lookahead
@@ -660,7 +703,8 @@ final class VideoRenderPipeline {
             duplicatePairs: duplicatePairs,
             sourceIntervalInfo: sourceIntervalInfo,
             artifactFrames: anomalies,
-            maxOutputAnomaly: maxAnomaly
+            maxOutputAnomaly: maxAnomaly,
+            unrepairableCopyFrames: unrepairableCopyFrames
         )
     }
 
@@ -1022,6 +1066,40 @@ final class VideoRenderPipeline {
         )
     }
 
+    /// PREMIÈRE et DERNIÈRE image : sans voisine des deux côtés, l'enveloppe
+    /// n'existe pas — elles échapperaient au contrôle, alors qu'un flash en
+    /// tête de clip est le plus visible de tous. La valeur attendue est donc
+    /// EXTRAPOLÉE linéairement depuis les deux images suivantes (ou
+    /// précédentes) : `attendu = 2·voisine − suivante`, ce qui suit un
+    /// mouvement régulier. Marge élargie (×1,5) car une extrapolation est
+    /// moins sûre qu'une interpolation : mieux vaut rater un artefact
+    /// limite que réparer une image saine.
+    static func edgeAnomalyScore(neighbour: FrameSignature,
+                                 secondNeighbour: FrameSignature,
+                                 candidate: FrameSignature) -> Double {
+        let margin = outputEnvelopeMargin * 1.5
+        func worst(_ a: [Double], _ b: [Double], _ c: [Double]) -> Double {
+            guard a.count == c.count, b.count == c.count else { return 0 }
+            var result: Double = 0
+            for index in 0..<c.count {
+                let extrapolated = 2 * a[index] - b[index]
+                let low = min(a[index], extrapolated) - margin
+                let high = max(a[index], extrapolated) + margin
+                if c[index] < low {
+                    result = max(result, low - c[index])
+                } else if c[index] > high {
+                    result = max(result, c[index] - high)
+                }
+            }
+            return result
+        }
+        return max(
+            worst(neighbour.luma, secondNeighbour.luma, candidate.luma),
+            max(worst(neighbour.cb, secondNeighbour.cb, candidate.cb),
+                worst(neighbour.cr, secondNeighbour.cr, candidate.cr))
+        )
+    }
+
     /// Durée, nombre d'images et paires d'images consécutives IDENTIQUES du
     /// fichier rendu.
     /// Comptage en DÉCODANT : le mode passthrough peut regrouper ou ajouter des
@@ -1061,17 +1139,23 @@ final class VideoRenderPipeline {
         var window: [(index: Int, signature: FrameSignature?)] = []
         var anomalies: [Int] = []
         var maxAnomaly: Double = 0
+        // Les deux premières signatures sont conservées : la toute première
+        // image n'a pas de voisine à gauche et se contrôle par extrapolation.
+        var firstSignatures: [FrameSignature?] = []
+
+        func record(index: Int, score: Double) {
+            maxAnomaly = max(maxAnomaly, score)
+            if score > outputAnomalyThreshold, !anomalies.contains(index) {
+                anomalies.append(index)
+            }
+        }
 
         func evaluateMiddle() {
             guard window.count == 3,
                   let p = window[0].signature,
                   let c = window[1].signature,
                   let n = window[2].signature else { return }
-            let score = anomalyScore(previous: p, candidate: c, next: n)
-            maxAnomaly = max(maxAnomaly, score)
-            if score > outputAnomalyThreshold {
-                anomalies.append(window[1].index)
-            }
+            record(index: window[1].index, score: anomalyScore(previous: p, candidate: c, next: n))
         }
 
         while let sample = output.copyNextSampleBuffer() {
@@ -1087,13 +1171,32 @@ final class VideoRenderPipeline {
             } else {
                 previousTiles = nil
             }
-            window.append((index, frameSignature(of: image)))
+            let signature = frameSignature(of: image)
+            if firstSignatures.count < 3 { firstSignatures.append(signature) }
+            window.append((index, signature))
             if window.count > 3 { window.removeFirst() }
             evaluateMiddle()
         }
         if reader.status == .failed {
             throw RenderError.writerFailed("vérification interrompue : \(reader.error?.localizedDescription ?? "?")")
         }
+
+        // BORDS DU CLIP : la première et la dernière image n'ont jamais été
+        // évaluées par la fenêtre glissante — contrôle par extrapolation.
+        if firstSignatures.count >= 3,
+           let first = firstSignatures[0], let second = firstSignatures[1], let third = firstSignatures[2] {
+            record(index: 0, score: edgeAnomalyScore(
+                neighbour: second, secondNeighbour: third, candidate: first
+            ))
+        }
+        if window.count == 3,
+           let last = window[2].signature, let before = window[1].signature, let beforeThat = window[0].signature {
+            record(index: window[2].index, score: edgeAnomalyScore(
+                neighbour: before, secondNeighbour: beforeThat, candidate: last
+            ))
+        }
+        anomalies.sort()
+
         return (duration.seconds, count, duplicatePairs, anomalies, maxAnomaly)
     }
 }

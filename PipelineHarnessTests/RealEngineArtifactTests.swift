@@ -40,6 +40,11 @@ enum AdversarialVideoFactory {
         case highContrastEdges
         /// Scène quasi statique avec bruit : piège à doublons.
         case staticNoise
+        /// UNE seule image blanche au milieu — le symptôme rapporté par
+        /// l'utilisateur. Placée sur une image source qui tombe sur une entrée
+        /// `.copy` du plan : c'est le cas que la boucle de réparation ne
+        /// savait pas traiter.
+        case singleFrameFlash
     }
 
     static func makeClip(pattern: Pattern,
@@ -138,6 +143,16 @@ enum AdversarialVideoFactory {
                     p[0] = value; p[1] = value; p[2] = value; p[3] = 255
                 }
             }
+        case .singleFrameFlash:
+            // Dégradé stable, sauf l'image 12 : blanche.
+            let flash = (frameIndex == 12)
+            for y in 0..<height {
+                for x in 0..<width {
+                    let value: UInt8 = flash ? 252 : UInt8(clamping: 90 + (x * 40 / max(width, 1)))
+                    let p = pixels + y * stride + x * 4
+                    p[0] = value; p[1] = value; p[2] = value; p[3] = 255
+                }
+            }
         case .staticNoise:
             // Scène immobile + bruit déterministe faible (aucune vraie
             // duplication ne devrait apparaître).
@@ -203,6 +218,20 @@ struct RealEngineArtifactTests {
         let result = try await renderAndScan(pattern: .fastPan)
         #expect(result.duplicatePairs <= 2, "Doublons : \(result.duplicatePairs) — clip figé ?")
         #expect(result.repairedFrames <= 4, "Réparations : \(result.repairedFrames) — failsafe trop agressif ?")
+    }
+
+    /// LE TEST DU SYMPTÔME RAPPORTÉ : un pic d'UNE image doit disparaître du
+    /// fichier livré. Avant correctif, quand ce pic tombait sur une image
+    /// COPIÉE, la boucle relançait deux rendus strictement identiques, comptait
+    /// « 1 image réparée » (mensonger) et livrait quand même l'artefact sous
+    /// l'étiquette « anomalie de la source ».
+    @Test func isolatedFlashOnCopyEntryIsRepaired() async throws {
+        let result = try await renderAndScan(pattern: .singleFrameFlash)
+        #expect(result.sourceAnomalyFrames == 0,
+                "Images aberrantes livrées : \(result.artifactFrames)")
+        #expect(result.unrepairedAnomalyFrames == 0)
+        #expect(result.unrepairableCopyFrames == 0)
+        #expect(result.duplicatePairs <= 3, "Doublons : \(result.duplicatePairs)")
     }
 
     /// Un défaut PRÉSENT DANS LA SOURCE (palier d'exposition) est signalé, pas

@@ -189,6 +189,27 @@ struct OutputAnomalyDetectorTests {
         #expect(score > VideoRenderPipeline.outputAnomalyThreshold)
     }
 
+    /// PREMIÈRE image du clip : sans voisine à gauche, elle échappait au
+    /// contrôle — un flash en tête de clip est pourtant le plus visible.
+    @Test func flashOnFirstFrameIsDetected() {
+        let score = VideoRenderPipeline.edgeAnomalyScore(
+            neighbour: signature(luma: 80), secondNeighbour: signature(luma: 84),
+            candidate: signature(luma: 250)
+        )
+        #expect(score > VideoRenderPipeline.outputAnomalyThreshold)
+    }
+
+    /// Mouvement régulier au bord : l'extrapolation linéaire l'accepte
+    /// (première image d'un panoramique, pas un artefact).
+    @Test func linearMotionAtEdgeIsAccepted() {
+        // Progression régulière 90 → 100 → 110 vue à l'envers depuis le bord.
+        let score = VideoRenderPipeline.edgeAnomalyScore(
+            neighbour: signature(luma: 100), secondNeighbour: signature(luma: 110),
+            candidate: signature(luma: 90)
+        )
+        #expect(score == 0)
+    }
+
     /// Bruit de compression : sous le seuil, aucun faux positif (sinon chaque
     /// export déclencherait des re-rendus inutiles).
     @Test func compressionNoiseIsNotFlagged() {

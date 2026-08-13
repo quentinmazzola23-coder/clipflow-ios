@@ -327,10 +327,23 @@ final class RenderQueueController {
                 if result.repairedFrames > 0 {
                     corrected += ", \(result.repairedFrames) image(s) réparée(s) par re-rendu"
                 }
-                if result.sourceAnomalyFrames > 0 {
-                    corrected += ", ⚠️ \(result.sourceAnomalyFrames) anomalie(s) présente(s) dans la source"
+                if result.unrepairedAnomalyFrames > 0 {
+                    corrected += ", ⛔️ \(result.unrepairedAnomalyFrames) NON réparée(s) malgré re-rendu"
                 }
-                corrected += String(format: ", contrôle image par image OK (écart max %.0f)", result.maxOutputAnomaly)
+                if result.unrepairableCopyFrames > 0 {
+                    corrected += ", ⛔️ \(result.unrepairableCopyFrames) irremplaçable(s) (image 0)"
+                }
+                // Jamais « contrôle OK » quand des images aberrantes sont
+                // livrées : c'est la phrase qui transformerait un échec de
+                // réparation en preuve d'innocence.
+                if result.artifactFrames.isEmpty {
+                    corrected += String(format: ", contrôle image par image OK (écart max %.0f)",
+                                        result.maxOutputAnomaly)
+                } else {
+                    let indices = result.artifactFrames.prefix(8).map(String.init).joined(separator: ", ")
+                    corrected += ", ⚠️ image(s) aberrante(s) LIVRÉE(S) aux indices \(indices)"
+                        + String(format: " (écart max %.0f)", result.maxOutputAnomaly)
+                }
                 if result.uncheckedInterpolatedFrames > 0 {
                     corrected += ", \(result.uncheckedInterpolatedFrames) non contrôlée(s)"
                 }
