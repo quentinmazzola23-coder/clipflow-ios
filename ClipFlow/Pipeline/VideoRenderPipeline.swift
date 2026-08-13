@@ -123,7 +123,7 @@ final class VideoRenderPipeline {
     private static let signpostLog = OSLog(subsystem: "com.example.clipflow", category: "Render")
 
     /// Nombre maximal de passes de réparation (voir `render`).
-    static let maxRepairPasses = 2
+    static let maxRepairPasses = 3
 
     /// Rendu d'un passage AVEC CONTRÔLE ET RÉPARATION EN BOUCLE FERMÉE.
     ///
@@ -485,9 +485,37 @@ final class VideoRenderPipeline {
             }
         }
 
-        /// Append + progression (l'ordre des appends suit STRICTEMENT le plan).
+        /// Dernière image ÉCRITE qui n'était pas signalée comme aberrante.
+        var lastGoodOutputBuffer: CVPixelBuffer?
+
+        /// Append + progression + RÉPARATION, en un seul point.
+        ///
+        /// L'ordre des appends suit STRICTEMENT le plan, donc `outputFrameIndex`
+        /// est ici l'index exact de l'image écrite — c'est le seul endroit où le
+        /// forçage peut être appliqué sans risque de décalage.
+        ///
+        /// Stratégie : substituer la DERNIÈRE IMAGE SAINE ÉCRITE. Remplacer par
+        /// « la source la plus proche » était faux dès que la source elle-même
+        /// portait le défaut : un flash présent dans le rush est copié à un
+        /// index et sert de base aux images voisines — les « réparer » avec
+        /// cette même source réinjectait le flash (mesuré par le banc : 3
+        /// images restaient aberrantes). Une image saine dupliquée sur 2 à 4
+        /// images à 60 i/s (33 à 66 ms) est imperceptible ; un flash, non.
         func appendOutput(_ buffer: CVPixelBuffer) async throws {
-            try await appendWhenReady(buffer, pts: TimeMath.outputPTS(frameIndex: outputFrameIndex, fps: job.fps))
+            var toWrite = buffer
+            if forcedCopyOutputIndices.contains(outputFrameIndex) {
+                if let good = lastGoodOutputBuffer {
+                    toWrite = good
+                    correctedCount += 1
+                } else {
+                    // Aucune image saine encore écrite (début du clip) :
+                    // signalée, jamais maquillée en « réparée ».
+                    unrepairableCopyFrames += 1
+                }
+            } else {
+                lastGoodOutputBuffer = buffer
+            }
+            try await appendWhenReady(toWrite, pts: TimeMath.outputPTS(frameIndex: outputFrameIndex, fps: job.fps))
             outputFrameIndex += 1
             onProgress(Double(outputFrameIndex) / Double(expectedFrames))
         }
@@ -535,17 +563,12 @@ final class VideoRenderPipeline {
                 var groupRejected = false
                 for (phaseIndex, buffer) in group.produced.enumerated() {
                     var outputBuffer = buffer
-                    // RÉPARATION CIBLÉE (prioritaire, indépendante du failsafe
-                    // en ligne) : cette image de sortie a été jugée aberrante
-                    // DANS LE FICHIER PRODUIT à la passe précédente — elle est
-                    // remplacée par la source la plus proche, contenu réel
-                    // garanti sans artefact.
-                    if forcedCopyOutputIndices.contains(group.startIndex + phaseIndex) {
-                        outputBuffer = group.phases[phaseIndex] < 0.5 ? group.prev : group.next
-                        correctedCount += 1
-                    } else if let tp = tilesPrev, let tn = tilesNext,
-                              let tb = Self.tileLuma(of: buffer),
-                              tp.count == tb.count, tn.count == tb.count {
+                    // La réparation ciblée est appliquée par appendOutput (point
+                    // unique, index fiable). Ici, seul le failsafe EN LIGNE
+                    // (artefacts du flux optique) intervient.
+                    if let tp = tilesPrev, let tn = tilesNext,
+                       let tb = Self.tileLuma(of: buffer),
+                       tp.count == tb.count, tn.count == tb.count {
                         let worstOvershoot = Self.envelopeOvershoot(previous: tp, next: tn, candidate: tb)
                         maxLumaDeviation = max(maxLumaDeviation, worstOvershoot)
                         if worstOvershoot > Self.envelopeRejectThreshold {
@@ -596,40 +619,18 @@ final class VideoRenderPipeline {
                 guard let buffer = currentBuffer else {
                     throw RenderError.readerFailed("buffer manquant à l'image \(index)")
                 }
-                // RÉPARATION CIBLÉE DES COPIES.
-                // Sans elle, une image de sortie aberrante produite par une
-                // entrée `.copy` est INRÉPARABLE : la boucle relance un rendu
-                // strictement identique (plan déterministe, mêmes pixels), puis
-                // livre l'artefact étiqueté « anomalie de la source ». Or sur
-                // un ralenti 0,5×, 25 à 50 % des images de sortie sont des
-                // copies : la boucle fermée était aveugle sur la moitié du
-                // fichier. Référentiel : `entryIndex` est l'index de l'image de
-                // SORTIE (une entrée de plan = une image) — `outputFrameIndex`
-                // serait FAUX ici, il retarde tant que des copies attendent
-                // dans copyBacklog.
-                var outputBuffer = buffer
-                if forcedCopyOutputIndices.contains(entryIndex) {
-                    if let replacement = previousBuffer {
-                        // Duplication d'une image source RÉELLE voisine : aucun
-                        // contenu inventé, un doublon (compté) plutôt qu'un
-                        // flash visible.
-                        outputBuffer = replacement
-                        correctedCount += 1
-                    } else {
-                        // Première image du clip : pas de voisine gauche
-                        // décodée. Signalée, jamais maquillée en « réparée ».
-                        unrepairableCopyFrames += 1
-                    }
-                }
+                // Les images COPIÉES passent par le même appendOutput que les
+                // interpolées : la réparation y est appliquée en un point
+                // unique, sur un index fiable.
                 if pendingGroup == nil {
-                    try await appendOutput(outputBuffer)
+                    try await appendOutput(buffer)
                     copiedCount += 1
                 } else {
                     // Ordre du plan : cette copie suit le groupe en attente.
                     // Borne de rétention (pression sur le pool du décodeur) :
                     // au-delà de 4 copies retenues, encodage immédiat du
                     // groupe (pur CPU, son résultat est déjà matérialisé).
-                    copyBacklog.append(outputBuffer)
+                    copyBacklog.append(buffer)
                     if copyBacklog.count >= 4 {
                         try await flushPending()
                     }
