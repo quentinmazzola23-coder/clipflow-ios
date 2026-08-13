@@ -155,7 +155,7 @@ jobs:
       - name: Sonde du moteur (disponibilité, session, une interpolation)
         run: |
           bash PipelineHarness/run-with-watchdog.sh 300 \
-            swift test --package-path . --filter EngineProbeTests
+            swift test --package-path . --no-parallel --filter EngineProbeTests
 
       # Rendus adversariaux de bout en bout. Sur une machine sans flux optique
       # utilisable, ils s'exécutent avec le moteur de repli : plan, décodage,
@@ -164,4 +164,4 @@ jobs:
       - name: Banc d'essai complet (rendus adversariaux)
         run: |
           bash PipelineHarness/run-with-watchdog.sh 600 \
-            swift test --package-path . --filter RealEngineArtifactTests
+            swift test --package-path . --no-parallel --filter RealEngineArtifactTests

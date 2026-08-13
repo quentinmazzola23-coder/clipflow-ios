@@ -211,6 +211,15 @@ func opticalFlowSessionUsable() async -> Bool {
     }
 }
 
+/// `.serialized` OBLIGATOIRE : Swift Testing exécute les tests en parallèle par
+/// défaut, et chaque test de ce banc ouvre un AVAssetReader + un AVAssetWriter.
+/// Plusieurs sessions de décodage matériel concurrentes se privent mutuellement
+/// du décodeur : diagnostic établi par échantillonnage des piles sur le runner —
+/// trois tests simultanément bloqués dans `copyNextSampleBuffer` →
+/// `FigSemaphoreWaitRelative`, 10 minutes sans progresser d'une image.
+/// (L'app, elle, rend un clip à la fois : ce parallélisme n'existe que dans le
+/// banc d'essai.)
+@Suite(.serialized)
 struct RealEngineArtifactTests {
 
     /// `useOpticalFlow: false` → moteur de repli : la chaîne complète est

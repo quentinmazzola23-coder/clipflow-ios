@@ -19,6 +19,7 @@ import CoreVideo
 import AVFoundation
 @testable import ClipFlowPipeline
 
+@Suite(.serialized)
 struct EngineProbeTests {
 
     @Test func reportsOpticalFlowAvailability() {
