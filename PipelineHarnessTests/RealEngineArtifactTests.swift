@@ -70,14 +70,29 @@ enum AdversarialVideoFactory {
             ]
         )
         writer.add(input)
-        writer.startWriting()
+        guard writer.startWriting() else {
+            throw writer.error ?? NSError(domain: "AdversarialVideo", code: 2)
+        }
         writer.startSession(atSourceTime: .zero)
 
         let width = Int(size.width)
         let height = Int(size.height)
 
         for frameIndex in 0..<frames {
+            // Attente BORNÉE : un encodeur qui n'accepte jamais de données
+            // ferait tourner le banc d'essai à l'infini (constaté en CI :
+            // 45 minutes de runner pour rien, sans le moindre message).
+            let deadline = ContinuousClock.now.advanced(by: .seconds(20))
             while !input.isReadyForMoreMediaData {
+                if writer.status == .failed {
+                    throw writer.error ?? NSError(domain: "AdversarialVideo", code: 3)
+                }
+                if ContinuousClock.now > deadline {
+                    throw NSError(domain: "AdversarialVideo", code: 4, userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Encodeur de test bloqué à l'image \(frameIndex) (statut \(writer.status.rawValue))",
+                    ])
+                }
                 try await Task.sleep(for: .milliseconds(2))
             }
             guard let pool = adaptor.pixelBufferPool else { break }

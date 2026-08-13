@@ -462,9 +462,22 @@ final class VideoRenderPipeline {
         }
 
         /// Attente coopérative que le writer accepte des données.
+        /// BORNÉE : un encodeur qui n'accepte plus rien (échec interne, mémoire,
+        /// session invalide) laissait cette boucle tourner À L'INFINI — un
+        /// export figé pour toujours, sans message. Au-delà du délai, l'échec
+        /// est explicite.
         func appendWhenReady(_ buffer: CVPixelBuffer, pts: CMTime) async throws {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(30))
             while !writerInput.isReadyForMoreMediaData {
                 try Task.checkCancellation()
+                if writer.status == .failed {
+                    throw RenderError.writerFailed(writer.error?.localizedDescription ?? "encodeur en échec")
+                }
+                if ContinuousClock.now > deadline {
+                    throw RenderError.writerFailed(
+                        "encodeur bloqué : aucune image acceptée depuis 30 s (statut \(writer.status.rawValue))"
+                    )
+                }
                 try await Task.sleep(for: .milliseconds(5))
             }
             guard adaptor.append(buffer, withPresentationTime: pts) else {
