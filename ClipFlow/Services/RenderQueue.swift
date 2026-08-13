@@ -202,8 +202,8 @@ final class RenderQueueController {
             worker = nil
             endActivity()
             if pendingPassageIDs.isEmpty {
-                // File vide : libère la session moteur conservée entre les clips.
-                VideoRenderPipeline.drainCachedEngine()
+                // Rien à drainer : chaque passe de rendu ferme sa propre
+                // session moteur (plus de cache entre clips).
             } else {
                 // Des passages ont été (ré)ajoutés pendant le drainage d'une
                 // annulation : relance immédiate (worker était encore non-nil,
@@ -310,8 +310,10 @@ final class RenderQueueController {
                         RenderQueueController.shared.updateActivityThrottled()
                     }
                 }
+                // Album par projet (réglage global) : sinon album commun.
                 let assetID = try await PhotoExportService.saveToPhotos(
-                    fileURL: result.outputURL, projectName: project.name
+                    fileURL: result.outputURL,
+                    projectName: project.albumPerProject ? project.name : nil
                 )
 
                 passage.exportState = .exported
@@ -335,14 +337,16 @@ final class RenderQueueController {
                 if result.duplicatePairs > 0, project.opticalFlowEnabled {
                     corrected += ", ⚠️ \(result.duplicatePairs) paire(s) d'images identiques"
                 }
-                if result.repairedFrames > 0 {
-                    corrected += ", \(result.repairedFrames) image(s) réparée(s) par re-rendu"
+                // REJET DU FLUX OPTIQUE : donnée décisive pour savoir si ce
+                // moteur mérite d'être rallumé — elle doit être VISIBLE.
+                if result.opticalFlowRejected {
+                    corrected += ", ⛔️ flux optique écarté sur ce clip "
+                        + "(\(result.rejectedArtifactFrames) image(s) aberrante(s)) — "
+                        + "rendu sans interpolation"
                 }
-                if result.unrepairedAnomalyFrames > 0 {
-                    corrected += ", ⛔️ \(result.unrepairedAnomalyFrames) NON réparée(s) malgré re-rendu"
-                }
-                if result.unrepairableCopyFrames > 0 {
-                    corrected += ", ⛔️ \(result.unrepairableCopyFrames) irremplaçable(s) (image 0)"
+                if result.untaggedInterpolatedFrames > 0 {
+                    corrected += ", ⛔️ \(result.untaggedInterpolatedFrames) image(s) sans "
+                        + "attachement colorimétrique (étiquetées 709 par défaut)"
                 }
                 // Jamais « contrôle OK » quand des images aberrantes sont
                 // livrées : c'est la phrase qui transformerait un échec de
