@@ -83,3 +83,42 @@ struct ChronoSortTests {
         #expect(sorted == [2, 1, 0])
     }
 }
+
+/// Nommage des albums Photos : un album PAR PROJET, tous préfixés « ClipFlow »
+/// pour rester groupés dans Photos.
+struct PhotoAlbumNamingTests {
+
+    @Test func albumIsNamedAfterProject() {
+        #expect(PhotoExportService.albumTitle(forProjectNamed: "Session moto")
+                == "ClipFlow — Session moto")
+    }
+
+    /// Nom vide ou réduit à des espaces : album générique, jamais
+    /// « ClipFlow —  » avec un tiret orphelin.
+    @Test func blankNameFallsBackToGenericAlbum() {
+        #expect(PhotoExportService.albumTitle(forProjectNamed: "") == "ClipFlow")
+        #expect(PhotoExportService.albumTitle(forProjectNamed: "   ") == "ClipFlow")
+        #expect(PhotoExportService.albumTitle(forProjectNamed: "\n\t") == "ClipFlow")
+    }
+
+    /// Retours à la ligne et caractères de contrôle : remplacés, sinon le
+    /// titre devient illisible dans Photos.
+    @Test func controlCharactersAreReplaced() {
+        let title = PhotoExportService.albumTitle(forProjectNamed: "Ligne1\nLigne2")
+        #expect(!title.contains("\n"))
+        #expect(title == "ClipFlow — Ligne1 Ligne2")
+    }
+
+    /// Titre borné : Photos tronque de toute façon à l'affichage.
+    @Test func veryLongNameIsBounded() {
+        let long = String(repeating: "a", count: 200)
+        let title = PhotoExportService.albumTitle(forProjectNamed: long)
+        #expect(title.count <= 60 + "ClipFlow — ".count)
+    }
+
+    /// Deux projets distincts ne partagent jamais le même album.
+    @Test func distinctProjectsGetDistinctAlbums() {
+        #expect(PhotoExportService.albumTitle(forProjectNamed: "Projet A")
+                != PhotoExportService.albumTitle(forProjectNamed: "Projet B"))
+    }
+}

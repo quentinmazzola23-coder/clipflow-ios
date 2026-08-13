@@ -118,7 +118,7 @@ passe par le protocole `FrameInterpolationEngine`.
 | Clé | Usage |
 |---|---|
 | `NSPhotoLibraryAddUsageDescription` | Enregistrement des exports dans Photos |
-| `NSPhotoLibraryUsageDescription` | Accès complet — requis pour l'album « ClipFlow » (créé automatiquement, synchronisé iCloud) |
+| `NSPhotoLibraryUsageDescription` | Accès complet — requis pour les albums « ClipFlow — <projet> » (créés automatiquement, synchronisés iCloud) |
 
 `PhotosPicker` n'exige aucune autorisation (interface système hors processus).
 

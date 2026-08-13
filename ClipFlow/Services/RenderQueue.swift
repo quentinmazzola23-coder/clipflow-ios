@@ -310,7 +310,9 @@ final class RenderQueueController {
                         RenderQueueController.shared.updateActivityThrottled()
                     }
                 }
-                let assetID = try await PhotoExportService.saveToPhotos(fileURL: result.outputURL)
+                let assetID = try await PhotoExportService.saveToPhotos(
+                    fileURL: result.outputURL, projectName: project.name
+                )
 
                 passage.exportState = .exported
                 passage.exportedFilename = filename
