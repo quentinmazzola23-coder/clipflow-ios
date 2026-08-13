@@ -710,8 +710,21 @@ final class VideoRenderPipeline {
         guard source !== destination else { return }
         if let attachments = CVBufferCopyAttachments(source, .shouldPropagate) {
             CVBufferSetAttachments(destination, attachments, .shouldPropagate)
-            return
         }
+        // `CVBufferCopyAttachments` renvoie un dictionnaire VIDE, pas nil,
+        // quand la source ne porte rien — tester la seule nullité laissait
+        // donc passer le cas à corriger (mesuré par le banc : compteur à 0 et
+        // image nue). Ce qui compte est l'état RÉEL de la destination.
+        let colorKeys = [
+            kCVImageBufferYCbCrMatrixKey,
+            kCVImageBufferColorPrimariesKey,
+            kCVImageBufferTransferFunctionKey,
+        ]
+        let hasAnyColorTag = colorKeys.contains { CVBufferCopyAttachment(destination, $0, nil) != nil }
+        // Un étiquetage PARTIEL est laissé tel quel : l'encodeur a de quoi
+        // travailler, et écraser ce que la source annonce serait pire. Seule
+        // l'absence TOTALE est comblée — et comptée.
+        guard !hasAnyColorTag else { return }
         untagged += 1
         CVBufferSetAttachment(destination, kCVImageBufferColorPrimariesKey,
                               kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)

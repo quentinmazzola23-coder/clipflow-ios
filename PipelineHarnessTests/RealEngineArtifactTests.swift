@@ -263,9 +263,10 @@ struct RealEngineArtifactTests {
         #expect(result.frameCount == 78)
         // Sans flux optique, aucun pixel n'est inventé : le fichier livré ne
         // peut contenir d'anomalie fabriquée par le rendu.
+        // Le commentaire d'une assertion doit être un LITTÉRAL : `Comment`
+        // se construit par interpolation, jamais par concaténation.
         #expect(result.artifactFrames.isEmpty,
-                "Images aberrantes livrées : \(result.artifactFrames) "
-                + "(écart max \(result.maxOutputAnomaly))")
+                "Images aberrantes livrées : \(result.artifactFrames) (écart max \(result.maxOutputAnomaly))")
     }
 
     // MARK: - Exige le VRAI flux optique (sinon s'abstient en le disant)
@@ -281,8 +282,7 @@ struct RealEngineArtifactTests {
         let result = try await renderAndScan(pattern: .fastPan, useOpticalFlow: true)
         #expect(result.duplicatePairs <= 2, "Doublons : \(result.duplicatePairs) — clip figé ?")
         #expect(!result.opticalFlowRejected,
-                "Flux optique écarté sur un panoramique régulier : "
-                + "\(result.rejectedArtifactFrames) image(s) aberrante(s) — seuil trop serré ?")
+                "Flux optique écarté sur un panoramique régulier : \(result.rejectedArtifactFrames) image(s) aberrante(s) — seuil trop serré ?")
     }
 
     /// Un pic d'UNE image PRÉSENT DANS LA SOURCE traverse le rendu sans flux
