@@ -45,6 +45,11 @@ enum AdversarialVideoFactory {
         /// `.copy` du plan : c'est le cas que la boucle de réparation ne
         /// savait pas traiter.
         case singleFrameFlash
+        /// Damier régulier défilant à 24 px/image sur des cases de 40 px : le
+        /// motif se ré-aligne toutes les deux images source. Conservé
+        /// EXPRÈS pour documenter une limite réelle du détecteur (voir le test
+        /// `aliasingIsAKnownLimitation`), jamais comme cas nominal.
+        case aliasingCheckerboard
     }
 
     static func makeClip(pattern: Pattern,
@@ -125,12 +130,23 @@ enum AdversarialVideoFactory {
                              stride: Int, width: Int, height: Int) {
         switch pattern {
         case .fastPan:
-            // Damier défilant vite (24 px/image) : mouvement large et net.
+            // Texture NON PÉRIODIQUE défilant vite (24 px/image).
+            //
+            // La version précédente était un damier régulier : à 24 px/image
+            // sur des cases de 40 px, le motif se ré-alignait toutes les deux
+            // images source. C'est de l'ALIASING TEMPOREL — le contenu inverse
+            // réellement d'une image à l'autre, et aucun test temporel ne peut
+            // le distinguer d'un flash. Le banc signalait donc des images
+            // parfaitement saines, en cadence stricte de 8 (mesuré). Un motif
+            // pseudo-aléatoire qui TRANSLATE supprime l'ambiguïté tout en
+            // restant difficile pour un flux optique.
             let offset = frameIndex * 24
             for y in 0..<height {
                 for x in 0..<width {
-                    let cell = (((x + offset) / 40) + (y / 40)) % 2
-                    let value: UInt8 = cell == 0 ? 40 : 215
+                    let world = x + offset
+                    let cell = UInt32(truncatingIfNeeded: (world / 37) &+ (y / 29) &* 7919)
+                    let hash = cell &* 2_654_435_761
+                    let value = UInt8(20 + Int(hash % 210))
                     let p = pixels + y * stride + x * 4
                     p[0] = value; p[1] = value; p[2] = value; p[3] = 255
                 }
@@ -149,11 +165,13 @@ enum AdversarialVideoFactory {
                 }
             }
         case .highContrastEdges:
-            // Barres verticales noires/blanches qui glissent : arêtes dures.
-            let offset = frameIndex * 6
+            // UNE arête franche qui balaie l'image (occlusion progressive),
+            // au lieu de barres régulières qui aliasaient exactement comme le
+            // damier ci-dessus.
+            let edge = 40 + frameIndex * 14
             for y in 0..<height {
                 for x in 0..<width {
-                    let value: UInt8 = (((x + offset) / 12) % 2 == 0) ? 5 : 250
+                    let value: UInt8 = x < edge ? 8 : 246
                     let p = pixels + y * stride + x * 4
                     p[0] = value; p[1] = value; p[2] = value; p[3] = 255
                 }
@@ -164,6 +182,16 @@ enum AdversarialVideoFactory {
             for y in 0..<height {
                 for x in 0..<width {
                     let value: UInt8 = flash ? 252 : UInt8(clamping: 90 + (x * 40 / max(width, 1)))
+                    let p = pixels + y * stride + x * 4
+                    p[0] = value; p[1] = value; p[2] = value; p[3] = 255
+                }
+            }
+        case .aliasingCheckerboard:
+            let offset = frameIndex * 24
+            for y in 0..<height {
+                for x in 0..<width {
+                    let cell = (((x + offset) / 40) + (y / 40)) % 2
+                    let value: UInt8 = cell == 0 ? 40 : 215
                     let p = pixels + y * stride + x * 4
                     p[0] = value; p[1] = value; p[2] = value; p[3] = 255
                 }
@@ -283,6 +311,28 @@ struct RealEngineArtifactTests {
         #expect(result.duplicatePairs <= 2, "Doublons : \(result.duplicatePairs) — clip figé ?")
         #expect(!result.opticalFlowRejected,
                 "Flux optique écarté sur un panoramique régulier : \(result.rejectedArtifactFrames) image(s) aberrante(s) — seuil trop serré ?")
+    }
+
+    /// LIMITE CONNUE, CONSIGNÉE PLUTÔT QUE MASQUÉE.
+    ///
+    /// Sur une texture périodique qui s'aliase (damier se ré-alignant toutes
+    /// les deux images source), le contenu inverse RÉELLEMENT d'une image à
+    /// l'autre : aucun test temporel ne peut distinguer cette inversion d'un
+    /// flash. Le détecteur signale donc des images saines — mesuré : cadence
+    /// stricte de 8 images, soit exactement la période du motif.
+    ///
+    /// Conséquence pour l'utilisateur : sur un contenu très périodique et très
+    /// rapide (grillage, rayures, mire), le repli total peut se déclencher sans
+    /// artefact réel. Le clip reste correct, simplement rendu sans flux
+    /// optique. C'est le compromis assumé — préférer un repli injustifié à un
+    /// artefact livré.
+    ///
+    /// Ce test échouera le jour où le détecteur saura faire la différence :
+    /// ce sera un progrès, à constater, pas une régression.
+    @Test func aliasingIsAKnownLimitation() async throws {
+        let result = try await renderAndScan(pattern: .aliasingCheckerboard)
+        #expect(!result.artifactFrames.isEmpty,
+                "Le détecteur ne confond plus aliasing et flash — limite levée, mettre ce test à jour")
     }
 
     /// Un pic d'UNE image PRÉSENT DANS LA SOURCE traverse le rendu sans flux
