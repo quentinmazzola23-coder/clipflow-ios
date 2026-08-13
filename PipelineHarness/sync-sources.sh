@@ -18,6 +18,7 @@ SOURCES=(
   "ClipFlow/Interpolation/FrameInterpolationEngine.swift"
   "ClipFlow/Interpolation/PassthroughRetimeEngine.swift"
   "ClipFlow/Interpolation/VideoToolboxFrameInterpolationEngine.swift"
+  "ClipFlow/Interpolation/VideoToolboxFormatProbe.swift"
   "ClipFlow/Pipeline/VideoRenderPipeline.swift"
   "ClipFlow/Services/StorageManager.swift"
 )

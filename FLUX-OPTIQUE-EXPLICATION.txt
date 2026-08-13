@@ -1,0 +1,1065 @@
+================================================================================
+  LE FLUX OPTIQUE DANS CLIPFLOW — EXPLICATION INTÉGRALE, DE A À Z
+  Document autonome. Écrit le 13/08/2026, à l'état du commit c28920c.
+  Statut du système décrit : DÉSACTIVÉ PAR DÉFAUT depuis le commit 1cf7414.
+================================================================================
+
+Ce document explique la totalité du système d'interpolation par flux optique :
+à quoi il servait, comment il fonctionnait étape par étape, le code exact de
+chaque pièce, les défauts découverts, et pourquoi il est aujourd'hui rangé
+derrière un interrupteur éteint. Il se lit sans avoir le dépôt sous les yeux.
+
+
+================================================================================
+SOMMAIRE
+================================================================================
+
+  1.  Le problème de départ : pourquoi un ralenti a besoin d'images inventées
+  2.  Vue d'ensemble de la chaîne
+  3.  Étape 1 — Décider CE QU'IL FAUT produire : le plan d'images
+  4.  Étape 2 — Le contrat de moteur (abstraction)
+  5.  Étape 3 — Le moteur VideoToolbox : l'interpolation elle-même
+  6.  Étape 4 — Le pipeline : décoder, grouper, soumettre, encoder
+  7.  Étape 5 — Les garde-fous successifs (et pourquoi chacun a échoué)
+  8.  Étape 6 — Le contrôle du fichier produit et la réparation
+  9.  Le verdict : pourquoi le flux optique est désactivé
+  10. Où se trouve l'interrupteur, et ce qui se passe quand il est éteint
+  11. Ce qu'il faudrait pour le réactiver sereinement
+  12. Annexe — code intégral des fichiers clés
+
+
+================================================================================
+  1. LE PROBLÈME DE DÉPART
+================================================================================
+
+ClipFlow prélève un passage court dans un rush et le restitue ralenti à 0,5×,
+en 60 images/seconde, pour une durée finale exacte (1,30 s par défaut).
+
+Arithmétique du cas nominal :
+
+    durée finale       1,30 s
+    cadence de sortie  60 i/s          -> 78 images de sortie exactement
+    vitesse            0,5×            -> 0,65 s prélevés dans le rush
+    rush filmé à       30 i/s          -> 0,65 s = environ 20 images sources
+
+Il faut donc produire 78 images à partir de 20. Deux réponses possibles :
+
+  (a) RÉPÉTER chaque image source ~4 fois.
+      Aucun pixel inventé. Mouvement saccadé (chaque image « tenue » 66 ms).
+
+  (b) FABRIQUER les images manquantes en estimant le mouvement entre deux
+      images réelles : c'est l'interpolation par FLUX OPTIQUE.
+      Mouvement fluide. Mais les images produites n'existent nulle part : ce
+      sont des inventions plausibles, et une invention peut être fausse.
+
+Le système décrit ici implémentait (b). L'app est aujourd'hui repassée en (a).
+
+Remarque décisive, souvent négligée : si le rush est filmé à 60 i/s, un ralenti
+0,5× vers 60 i/s ne demande AUCUNE image intermédiaire — chaque image de sortie
+tombe exactement sur une image source. Le flux optique devient inutile, et la
+fluidité est parfaite. La cadence de tournage résout le problème mieux que
+n'importe quel algorithme.
+
+
+================================================================================
+  2. VUE D'ENSEMBLE DE LA CHAÎNE
+================================================================================
+
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ RenderQueue           décide d'exporter un passage                  │
+    │                       construit un RenderJob                        │
+    │                       (forceFastEngine = !opticalFlowEnabled)       │
+    └──────────────────────────────┬──────────────────────────────────────┘
+                                   v
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ VideoRenderPipeline.render()   BOUCLE FERMÉE                        │
+    │   renderPass() -> fichier -> verify() -> anomalies ?                │
+    │        ^                                    │                       │
+    │        └──────── re-rendu réparateur ───────┘  (3 passes max)       │
+    └──────────────────────────────┬──────────────────────────────────────┘
+                                   v
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ renderPass()                                                        │
+    │   1. passe 1 : timestamps réels des images DÉCODÉES                 │
+    │   2. FramePlanner.plan() : copie ou interpolation, image par image  │
+    │   3. décodage séquentiel (AVAssetReader, BGRA)                      │
+    │   4. moteur d'interpolation  <── LE FLUX OPTIQUE EST ICI            │
+    │   5. failsafe anti-artefact en ligne                                │
+    │   6. encodage (AVAssetWriter, HEVC)                                 │
+    │   7. vérification du fichier produit                                │
+    └─────────────────────────────────────────────────────────────────────┘
+
+Deux implémentations du moteur, interchangeables derrière un protocole :
+
+    VideoToolboxFrameInterpolationEngine   flux optique matériel (iOS 26+)
+    PassthroughRetimeEngine                duplication de l'image la plus proche
+
+
+================================================================================
+  3. ÉTAPE 1 — LE PLAN D'IMAGES
+================================================================================
+
+Avant de calculer quoi que ce soit, le pipeline décide POUR CHAQUE IMAGE DE
+SORTIE si elle est une copie exacte d'une image source, ou une interpolation
+entre deux images sources à une « phase » donnée (0 = image de gauche,
+1 = image de droite, 0,5 = à mi-chemin).
+
+Les mathématiques sont entièrement RATIONNELLES (jamais de flottants pour le
+temps) afin que 1,30 s donne exactement 78 images, sans dérive.
+
+--------------------------------------------------------------------------------
+FICHIER : ClipFlow/Core/TimeMath.swift
+--------------------------------------------------------------------------------
+
+    /// Durée à prélever dans le rush ORIGINAL pour obtenir `final` après
+    /// ralentissement à `speed`.
+    ///
+    /// duréeSource = duréeFinale × vitesse.
+    /// Exemple : 1,3 s à 0,5× → 0,65 s exactement.
+    static func sourceDuration(final: ExactDuration, speed: RationalSpeed) -> CMTime {
+        let value = CMTimeValue(final.centiseconds * speed.numerator)
+        let timescale = CMTimeScale(100 * speed.denominator)
+        return reduce(CMTime(value: value, timescale: timescale))
+    }
+
+    /// Nombre d'images de sortie pour `final` à `fps`.
+    /// frames = cs × fps / 100. Exact si divisible (1,3 s × 60 = 78).
+    static func outputFrameCount(final: ExactDuration, fps: Int) -> (count: Int, exact: Bool) {
+        let numerator = final.centiseconds * fps
+        if numerator % 100 == 0 {
+            return (numerator / 100, true)
+        }
+        return ((numerator + 50) / 100, false)
+    }
+
+    /// Temps SOURCE correspondant à l'image de sortie `index` :
+    /// t_source = start + (index / fps) × vitesse
+    ///          = start + index × num / (fps × den)   — exact.
+    static func sourceTime(forOutputFrame index: Int,
+                           fps: Int,
+                           speed: RationalSpeed,
+                           selectionStart: CMTime) -> CMTime {
+        let offset = CMTime(
+            value: CMTimeValue(index * speed.numerator),
+            timescale: CMTimeScale(fps * speed.denominator)
+        )
+        return CMTimeAdd(selectionStart, offset)
+    }
+
+Le plan lui-même. Chaque entrée décrit UNE image de sortie :
+
+    enum FramePlanEntry: Equatable, Sendable {
+        /// L'image source `sourceIndex` correspond déjà exactement au timestamp voulu.
+        case copy(sourceIndex: Int)
+        /// Interpoler entre `previousIndex` et `nextIndex` à la phase `phase` ∈ ]0;1[.
+        case interpolate(previousIndex: Int, nextIndex: Int, phase: Float)
+    }
+
+Et sa construction :
+
+    static func plan(sourcePTS: [CMTime],
+                     selectionStart: CMTime,
+                     outputFrameCount: Int,
+                     fps: Int,
+                     speed: RationalSpeed) throws -> [FramePlanEntry] {
+        guard sourcePTS.count >= 2 else { throw FramePlanError.notEnoughSourceFrames }
+
+        var entries: [FramePlanEntry] = []
+        entries.reserveCapacity(outputFrameCount)
+
+        // Intervalle source médian : borne la tolérance de fin de rush.
+        var intervals: [Double] = []
+        for i in 1..<sourcePTS.count {
+            intervals.append(CMTimeSubtract(sourcePTS[i], sourcePTS[i - 1]).seconds)
+        }
+        let medianInterval = intervals.sorted()[intervals.count / 2]
+
+        // Parcours séquentiel : les cibles sont croissantes, on avance un curseur.
+        var cursor = 0
+
+        for frameIndex in 0..<outputFrameCount {
+            let target = TimeMath.sourceTime(forOutputFrame: frameIndex,
+                                             fps: fps,
+                                             speed: speed,
+                                             selectionStart: selectionStart)
+
+            while cursor + 1 < sourcePTS.count,
+                  CMTimeCompare(sourcePTS[cursor + 1], target) <= 0 {
+                cursor += 1
+            }
+
+            let current = sourcePTS[cursor]
+
+            // Correspondance exacte (à la tolérance près) ?
+            if CMTimeCompare(CMTimeAbsoluteValue(CMTimeSubtract(current, target)), matchTolerance) <= 0 {
+                entries.append(.copy(sourceIndex: cursor))
+                continue
+            }
+            if cursor + 1 < sourcePTS.count {
+                let next = sourcePTS[cursor + 1]
+                if CMTimeCompare(CMTimeAbsoluteValue(CMTimeSubtract(next, target)), matchTolerance) <= 0 {
+                    entries.append(.copy(sourceIndex: cursor + 1))
+                    continue
+                }
+                // Interpolation : phase = (cible − précédente) / (suivante − précédente).
+                let numerator = CMTimeSubtract(target, current)
+                let denominator = CMTimeSubtract(next, current)
+                let phase = Float(numerator.seconds / denominator.seconds)
+                guard phase > 0, phase < 1 else {
+                    throw FramePlanError.targetOutsideSourceRange(frameIndex: frameIndex)
+                }
+                entries.append(.interpolate(previousIndex: cursor, nextIndex: cursor + 1, phase: phase))
+            } else {
+                // Cible après la dernière image source : dernière image
+                // DUPLIQUÉE si l'écart reste inférieur à 1,5 intervalle source.
+                let overshoot = CMTimeSubtract(target, current).seconds
+                if overshoot <= medianInterval * 1.5 {
+                    entries.append(.copy(sourceIndex: cursor))
+                } else {
+                    throw FramePlanError.targetOutsideSourceRange(frameIndex: frameIndex)
+                }
+            }
+        }
+        return entries
+    }
+
+CE QU'IL FAUT RETENIR ICI, car cela explique presque tous les défauts observés :
+
+  • Source 30 i/s, sortie 60 i/s à 0,5× : une image de sortie sur quatre est une
+    COPIE, les trois autres sont interpolées aux phases 0,25 / 0,50 / 0,75.
+  • Source 60 i/s, sortie 60 i/s à 0,5× : TOUTES les images sont des copies.
+    Le flux optique n'est jamais appelé.
+  • Une image du rush qui contient un défaut (un flash d'exposition, par
+    exemple) est donc à la fois COPIÉE à un endroit ET utilisée comme base de
+    trois interpolations voisines. Un défaut d'une image dans le rush devient
+    un défaut de QUATRE images à l'écran. Ce point, longtemps ignoré, a rendu
+    aveugles tous les détecteurs qui comparaient une image à ses voisines
+    immédiates.
+
+
+================================================================================
+  4. ÉTAPE 2 — LE CONTRAT DE MOTEUR
+================================================================================
+
+Le pipeline ne connaît jamais VideoToolbox directement : il parle à un
+protocole. Cela a permis de basculer d'un moteur à l'autre sans toucher au
+reste, et c'est ce qui rend l'interrupteur d'aujourd'hui possible.
+
+--------------------------------------------------------------------------------
+FICHIER : ClipFlow/Interpolation/FrameInterpolationEngine.swift
+--------------------------------------------------------------------------------
+
+    protocol FrameInterpolationEngine: AnyObject {
+        /// Nom affiché à l'utilisateur — doit être honnête sur la qualité.
+        var displayName: String { get }
+
+        /// Attributs de pixel buffer exigés par le moteur pour ses entrées,
+        /// à passer au décodeur (AVAssetReader). nil = pas d'exigence.
+        var sourcePixelBufferAttributes: [String: Any]? { get }
+
+        /// Démarre une session pour des images de dimensions données.
+        func startSession(width: Int, height: Int) async throws
+
+        /// Produit les images interpolées entre `previous` et `next` aux phases
+        /// demandées (croissantes, dans ]0;1[). Retourne un buffer par phase.
+        func interpolate(previous: CVPixelBuffer,
+                         previousPTS: CMTime,
+                         next: CVPixelBuffer,
+                         nextPTS: CMTime,
+                         phases: [Float]) async throws -> [CVPixelBuffer]
+
+        /// Termine la session, libère les ressources.
+        func endSession()
+    }
+
+Et la fabrique, qui refuse tout repli silencieux :
+
+    enum InterpolationEngineFactory {
+
+        /// Moteur haute qualité disponible sur cet appareil pour ces dimensions,
+        /// ou nil s'il n'existe pas. AUCUN repli silencieux : l'appelant décide
+        /// explicitement (échec clair plutôt qu'un export dupliqué qui saccade).
+        /// Le moteur VideoToolbox n'existe pas dans le SDK simulateur.
+        static func bestEngine(width: Int, height: Int) -> FrameInterpolationEngine? {
+            #if !targetEnvironment(simulator)
+            if #available(iOS 26.0, *) {
+                if VideoToolboxFrameInterpolationEngine.isSupported(width: width, height: height) {
+                    return VideoToolboxFrameInterpolationEngine()
+                }
+            }
+            #endif
+            return nil
+        }
+
+        /// Le moteur haute qualité est-il disponible ? (pour l'afficher dans l'UI)
+        static var highQualityAvailable: Bool {
+            #if !targetEnvironment(simulator)
+            if #available(iOS 26.0, *) {
+                return VideoToolboxFrameInterpolationEngine.isSupported(width: 3840, height: 2160)
+            }
+            #endif
+            return false
+        }
+    }
+
+PIÈGE DÉCOUVERT ICI (13/08/2026, par le banc d'essai) : `isSupported` MENT.
+Il vérifie seulement qu'une CONFIGURATION est constructible, pas qu'une session
+peut démarrer. Sur une machine virtualisée (runner d'intégration continue), il
+répond `true` en 640×360 comme en 4K, puis `startSession` échoue avec
+`VTFrameProcessorErrorDomain Code=-19730`. Sur l'iPhone 16 Pro, la session
+démarre réellement — mais l'app se fiait à une garantie qui n'en était pas une.
+
+
+================================================================================
+  5. ÉTAPE 3 — LE MOTEUR VIDEOTOOLBOX
+================================================================================
+
+C'est le cœur du sujet. iOS 26 expose `VTFrameProcessor`, un processeur
+d'images matériel, et une configuration `VTFrameRateConversionConfiguration`
+qui fait précisément ce qu'il nous faut : produire des images intermédiaires
+entre deux images, par estimation du flux optique (le champ de déplacement
+apparent des pixels de l'une vers l'autre).
+
+Fonctionnement conceptuel, en trois temps :
+
+  1. ESTIMATION DU MOUVEMENT. Le processeur compare l'image A et l'image B et
+     calcule, pour chaque pixel, un vecteur de déplacement. C'est le « flux
+     optique ». Coûteux, matériel, non déterministe d'un appareil à l'autre.
+
+  2. DÉFORMATION (warping). Pour une phase p, chaque pixel de A est déplacé de
+     p × son vecteur, et chaque pixel de B de (1−p) × son vecteur inverse.
+
+  3. FUSION. Les deux déformations sont mélangées, avec traitement des zones
+     découvertes (occlusions) — les pixels qui n'existent dans aucune des deux
+     images parce qu'un objet en cachait un autre.
+
+C'est l'étape 3 qui fabrique des artefacts : là où le mouvement est ambigu
+(surface uniforme, reflet, changement d'éclairage, objet qui apparaît), le
+mélange peut produire des pixels aberrants — taches, halos, éclats lumineux.
+
+--------------------------------------------------------------------------------
+FICHIER : ClipFlow/Interpolation/VideoToolboxFrameInterpolationEngine.swift
+         (intégralité, tel qu'il existe encore dans le dépôt)
+--------------------------------------------------------------------------------
+
+//
+//  VideoToolboxFrameInterpolationEngine.swift
+//  ClipFlow
+//
+//  Moteur principal : VTFrameProcessor + VTFrameRateConversionConfiguration
+//  (iOS 26+). Flux optique à la volée, qualityPrioritization = .quality.
+//
+//  CONTRAT : l'extérieur du moteur est TOUJOURS en 32BGRA (chaîne tout-RGB du
+//  pipeline). Le format de travail INTERNE est NÉGOCIÉ avec la configuration
+//  au démarrage — jamais supposé : fournir à VT un format qu'il n'exige pas
+//  réinterprète la mémoire des plans et inverse la chrominance (ciel rose,
+//  verts turquoise — constaté sur exports réels). Si la configuration
+//  n'accepte pas BGRA, les frontières sont converties par
+//  VTPixelTransferSession (conversions couleur gérées par VideoToolbox).
+//
+
+import Foundation
+import CoreVideo
+import CoreMedia
+import VideoToolbox
+
+// Les classes VTFrameProcessor n'existent pas dans le SDK simulateur —
+// moteur compilé uniquement pour appareil réel.
+#if !targetEnvironment(simulator)
+
+@available(iOS 26.0, *)
+final class VideoToolboxFrameInterpolationEngine: FrameInterpolationEngine {
+
+    let displayName = "VideoToolbox — flux optique (qualité maximale)"
+
+    private var processor: VTFrameProcessor?
+    private var configuration: VTFrameRateConversionConfiguration?
+    /// Format de travail interne négocié (BGRA si accepté, sinon le premier
+    /// format exigé par la configuration).
+    private var vtFormat: OSType = kCVPixelFormatType_32BGRA
+    private var usesDirectBGRA = true
+    private var transferSession: VTPixelTransferSession?
+    private var vtInputPool: CVPixelBufferPool?
+    private var vtDestinationPool: CVPixelBufferPool?
+    private var bgraOutputPool: CVPixelBufferPool?
+    private var width = 0
+    private var height = 0
+
+    // MARK: - Compatibilité
+
+    /// Vérifie la prise en charge réelle : classe disponible + configuration
+    /// constructible pour ces dimensions. Aucune supposition.
+    static func isSupported(width: Int, height: Int) -> Bool {
+        guard VTFrameRateConversionConfiguration.isSupported else { return false }
+        let probe = VTFrameRateConversionConfiguration(
+            frameWidth: width,
+            frameHeight: height,
+            usePrecomputedFlow: false,
+            qualityPrioritization: .quality,
+            revision: .revision1
+        )
+        return probe != nil
+    }
+
+    // MARK: - FrameInterpolationEngine
+
+    var sourcePixelBufferAttributes: [String: Any]? {
+        configuration?.sourcePixelBufferAttributes as? [String: Any]
+    }
+
+    /// Formats de pixel acceptés en SOURCE par la configuration (la clé peut
+    /// porter un nombre unique ou une liste).
+    private static func supportedSourceFormats(
+        of configuration: VTFrameRateConversionConfiguration
+    ) -> [OSType] {
+        guard let attributes = configuration.sourcePixelBufferAttributes as? [String: Any],
+              let value = attributes[kCVPixelBufferPixelFormatTypeKey as String] else { return [] }
+        if let number = value as? NSNumber { return [number.uint32Value] }
+        if let list = value as? [NSNumber] { return list.map { $0.uint32Value } }
+        return []
+    }
+
+    func startSession(width: Int, height: Int) async throws {
+        guard let configuration = VTFrameRateConversionConfiguration(
+            frameWidth: width,
+            frameHeight: height,
+            usePrecomputedFlow: false,          // flux optique calculé à la volée
+            qualityPrioritization: .quality,    // qualité maximale (hors temps réel)
+            revision: .revision1
+        ) else {
+            throw InterpolationError.unsupportedDimensions(width: width, height: height)
+        }
+
+        let processor = VTFrameProcessor()
+        try processor.startSession(configuration: configuration)
+
+        // NÉGOCIATION du format de travail.
+        let supported = Self.supportedSourceFormats(of: configuration)
+        if supported.isEmpty || supported.contains(kCVPixelFormatType_32BGRA) {
+            usesDirectBGRA = true
+            vtFormat = kCVPixelFormatType_32BGRA
+        } else {
+            // La configuration impose son format : conversions aux frontières.
+            usesDirectBGRA = false
+            vtFormat = supported[0]
+            var session: VTPixelTransferSession?
+            let status = VTPixelTransferSessionCreate(
+                allocator: kCFAllocatorDefault, pixelTransferSessionOut: &session
+            )
+            guard status == noErr, let session else {
+                throw InterpolationError.processingFailed("VTPixelTransferSession indisponible (\(status)).")
+            }
+            transferSession = session
+            vtInputPool = try Self.makePool(
+                width: width, height: height, format: vtFormat,
+                base: configuration.sourcePixelBufferAttributes as? [String: Any]
+            )
+            bgraOutputPool = try Self.makePool(
+                width: width, height: height,
+                format: kCVPixelFormatType_32BGRA, base: nil
+            )
+        }
+        vtDestinationPool = try Self.makePool(
+            width: width, height: height, format: vtFormat,
+            base: configuration.destinationPixelBufferAttributes as? [String: Any]
+        )
+
+        self.configuration = configuration
+        self.processor = processor
+        self.width = width
+        self.height = height
+    }
+
+    func interpolate(previous: CVPixelBuffer,
+                     previousPTS: CMTime,
+                     next: CVPixelBuffer,
+                     nextPTS: CMTime,
+                     phases: [Float]) async throws -> [CVPixelBuffer] {
+        guard let processor, vtDestinationPool != nil else {
+            throw InterpolationError.sessionNotStarted
+        }
+        guard !phases.isEmpty else { return [] }
+
+        // Frontière d'ENTRÉE : conversion vers le format négocié si nécessaire.
+        let vtPrevious = usesDirectBGRA ? previous : try convert(previous, using: vtInputPool)
+        let vtNext = usesDirectBGRA ? next : try convert(next, using: vtInputPool)
+
+        guard let sourceFrame = VTFrameProcessorFrame(buffer: vtPrevious, presentationTimeStamp: previousPTS),
+              let nextFrame = VTFrameProcessorFrame(buffer: vtNext, presentationTimeStamp: nextPTS) else {
+            throw InterpolationError.processingFailed("Création des VTFrameProcessorFrame impossible.")
+        }
+
+        var destinationFrames: [VTFrameProcessorFrame] = []
+        destinationFrames.reserveCapacity(phases.count)
+        let interval = CMTimeSubtract(nextPTS, previousPTS)
+        for phase in phases {
+            guard let buffer = buffer(from: vtDestinationPool) else {
+                throw InterpolationError.bufferAllocationFailed
+            }
+            let offsetSeconds = interval.seconds * Double(phase)
+            let pts = CMTimeAdd(previousPTS, CMTime(seconds: offsetSeconds, preferredTimescale: interval.timescale))
+            guard let frame = VTFrameProcessorFrame(buffer: buffer, presentationTimeStamp: pts) else {
+                throw InterpolationError.processingFailed("Création d'une frame de destination impossible.")
+            }
+            destinationFrames.append(frame)
+        }
+
+        guard let parameters = VTFrameRateConversionParameters(
+            sourceFrame: sourceFrame,
+            nextFrame: nextFrame,
+            opticalFlow: nil,
+            interpolationPhase: phases,
+            submissionMode: .sequential,
+            destinationFrames: destinationFrames
+        ) else {
+            throw InterpolationError.processingFailed("Paramètres de conversion invalides (phases : \(phases)).")
+        }
+
+        do {
+            try await processor.process(parameters: parameters)
+        } catch {
+            throw InterpolationError.processingFailed(String(describing: error))
+        }
+
+        // Frontière de SORTIE : retour en BGRA uniforme si nécessaire.
+        if usesDirectBGRA {
+            return destinationFrames.map { $0.buffer }
+        }
+        return try destinationFrames.map { try convert($0.buffer, using: bgraOutputPool) }
+    }
+
+    func endSession() {
+        processor?.endSession()
+        processor = nil
+        configuration = nil
+        transferSession = nil
+        vtInputPool = nil
+        vtDestinationPool = nil
+        bgraOutputPool = nil
+    }
+
+    // MARK: - Buffers et conversions
+
+    private static func makePool(width: Int, height: Int,
+                                 format: OSType,
+                                 base: [String: Any]?) throws -> CVPixelBufferPool {
+        var attributes = base ?? [:]
+        attributes[kCVPixelBufferWidthKey as String] = width
+        attributes[kCVPixelBufferHeightKey as String] = height
+        attributes[kCVPixelBufferPixelFormatTypeKey as String] = format
+        attributes[kCVPixelBufferIOSurfacePropertiesKey as String] = [:] as [String: Any]
+        attributes[kCVPixelBufferMetalCompatibilityKey as String] = true
+
+        var pool: CVPixelBufferPool?
+        let poolOptions: [String: Any] = [
+            kCVPixelBufferPoolMinimumBufferCountKey as String: 4,
+        ]
+        let status = CVPixelBufferPoolCreate(
+            kCFAllocatorDefault,
+            poolOptions as CFDictionary,
+            attributes as CFDictionary,
+            &pool
+        )
+        guard status == kCVReturnSuccess, let pool else {
+            throw InterpolationError.bufferAllocationFailed
+        }
+        return pool
+    }
+
+    private func buffer(from pool: CVPixelBufferPool?) -> CVPixelBuffer? {
+        guard let pool else { return nil }
+        var buffer: CVPixelBuffer?
+        let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer)
+        guard status == kCVReturnSuccess else { return nil }
+        return buffer
+    }
+
+    /// Conversion de format couleur-sûre (VideoToolbox gère matrices et plages
+    /// d'après les attachements des buffers).
+    private func convert(_ source: CVPixelBuffer, using pool: CVPixelBufferPool?) throws -> CVPixelBuffer {
+        guard let transferSession else {
+            throw InterpolationError.processingFailed("Session de transfert absente.")
+        }
+        guard let destination = buffer(from: pool) else {
+            throw InterpolationError.bufferAllocationFailed
+        }
+        let status = VTPixelTransferSessionTransferImage(transferSession, from: source, to: destination)
+        guard status == noErr else {
+            throw InterpolationError.processingFailed("Conversion de format échouée (\(status)).")
+        }
+        return destination
+    }
+}
+
+#endif
+
+--------------------------------------------------------------------------------
+COMMENTAIRE SUR LES CHOIX DE CE FICHIER
+--------------------------------------------------------------------------------
+
+• `usePrecomputedFlow: false` — le flux optique est recalculé à chaque paire.
+  L'alternative (pré-calculer le flux une fois et le réutiliser) est plus rapide
+  mais suppose des paires régulières ; ici chaque paire est indépendante.
+
+• `qualityPrioritization: .quality` — priorité qualité, pas temps réel. L'export
+  n'est pas interactif, autant prendre le meilleur mode.
+
+• `interpolationPhase: phases` — toutes les phases d'une même paire sont
+  soumises en UN appel. C'est un gain majeur : le flux optique n'est estimé
+  qu'une fois pour les trois images intermédiaires.
+
+• LA NÉGOCIATION DE FORMAT est née d'un bug réel. VideoToolbox annonce, via
+  `configuration.sourcePixelBufferAttributes`, le ou les formats de pixel qu'il
+  attend. Lui fournir autre chose ne provoque PAS d'erreur : il réinterprète la
+  mémoire telle quelle. Résultat observé sur exports réels : ciel rose, verdure
+  turquoise — la chrominance inversée, parce que les plans U et V étaient lus
+  à l'envers. D'où la lecture explicite des formats acceptés et, au besoin, une
+  conversion par `VTPixelTransferSession` aux frontières.
+
+
+================================================================================
+  6. ÉTAPE 4 — LE PIPELINE AUTOUR DU MOTEUR
+================================================================================
+
+--------------------------------------------------------------------------------
+6.1  La chaîne tout-BGRA
+--------------------------------------------------------------------------------
+
+Décision structurelle : tout ce qui circule dans le pipeline est en BGRA
+(rouge-vert-bleu + alpha), jamais en YCbCr.
+
+    // CHAÎNE TOUT-RGB (BGRA) — décision structurelle après diagnostic sur
+    // images réelles : les images interpolées sortaient du moteur VT avec
+    // la CHROMINANCE INVERSÉE (ciel rose, verts turquoise) — les pixels
+    // eux-mêmes, pas les étiquettes. En RGB, il n'existe ni matrice YCbCr
+    // ni ordre de plans à confondre : la classe entière du bug disparaît.
+    let readerPixelFormat: OSType = kCVPixelFormatType_32BGRA
+
+Le décodeur convertit (et tone-mappe le HDR) vers du RGB écran, VT interpole
+des textures RGB, l'encodeur reconvertit uniformément en YCbCr avec des
+étiquettes BT.709 identiques pour toutes les images.
+
+--------------------------------------------------------------------------------
+6.2  Le préchauffage de session
+--------------------------------------------------------------------------------
+
+Démarrer une session VideoToolbox coûte plusieurs centaines de millisecondes
+(allocation des pools, chargement des modèles). Elle est donc lancée EN
+PARALLÈLE de la lecture des timestamps, et réutilisée d'un clip au suivant.
+
+    let warmupTask: Task<Result<FrameInterpolationEngine, Error>, Never>? = {
+        guard !job.forceFastEngine else { return nil }
+        if let reused = takeCachedEngine(width: encodeWidth, height: encodeHeight) {
+            return Task { .success(reused) }
+        }
+        guard let fresh = InterpolationEngineFactory.bestEngine(width: encodeWidth, height: encodeHeight) else {
+            return nil
+        }
+        return Task {
+            do {
+                try await fresh.startSession(width: encodeWidth, height: encodeHeight)
+                return .success(fresh)
+            } catch {
+                return .failure(error)
+            }
+        }
+    }()
+
+C'est ici que passe l'interrupteur : `job.forceFastEngine` vaut
+`!project.opticalFlowEnabled`. Quand le flux optique est éteint, aucune session
+n'est même tentée.
+
+--------------------------------------------------------------------------------
+6.3  Le regroupement des phases et le recouvrement GPU/CPU
+--------------------------------------------------------------------------------
+
+Les entrées consécutives du plan qui partagent la MÊME paire source sont
+regroupées : une seule soumission au moteur pour les trois phases.
+
+    case .interpolate(let prevIdx, let nextIdx, _):
+        try advanceTo(index: nextIdx)
+        guard let prev = (nextIdx - prevIdx == 1 ? previousBuffer : nil),
+              let next = currentBuffer else {
+            throw RenderError.readerFailed("paire source indisponible (\(prevIdx), \(nextIdx))")
+        }
+        // Phases consécutives sur la même paire.
+        var phases: [Float] = []
+        var lookahead = entryIndex
+        while lookahead < plan.count,
+              case .interpolate(prevIdx, nextIdx, let phase) = plan[lookahead] {
+            phases.append(phase)
+            lookahead += 1
+        }
+        let groupPhases = phases
+        // Soumission GPU immédiate ; le groupe PRÉCÉDENT est contrôlé
+        // et encodé pendant que celui-ci se calcule.
+        async let producedNow = try await engine.interpolate(
+            previous: prev,
+            previousPTS: sourcePTS[prevIdx],
+            next: next,
+            nextPTS: sourcePTS[nextIdx],
+            phases: groupPhases
+        )
+        try await flushPending()
+        pendingGroup = PendingInterpolation(
+            startIndex: entryIndex,
+            prev: prev, next: next, phases: groupPhases, produced: try await producedNow
+        )
+        entryIndex = lookahead
+
+Pendant que le GPU calcule le groupe k+1, le CPU contrôle et encode le groupe k.
+Les appels moteur ne se chevauchent JAMAIS (le résultat de k est attendu avant
+de soumettre k+1), et l'ordre d'écriture reste strictement celui du plan.
+
+--------------------------------------------------------------------------------
+6.4  Les attachements colorimétriques
+--------------------------------------------------------------------------------
+
+Les buffers de destination sortent d'un pool : ils n'ont AUCUN attachement
+colorimétrique. L'encodeur les interprétait alors en BT.709 entre des copies
+étiquetées BT.2020 — une image sur deux virait au bleu.
+
+    /// Copie les attachements propageables (matrice YCbCr, primaires, fonction
+    /// de transfert…) d'un buffer source vers un buffer produit par un pool —
+    /// sans eux, l'encodeur retombe sur BT.709 et teinte les images.
+    static func propagateColorAttachments(from source: CVPixelBuffer, to destination: CVPixelBuffer) {
+        guard source !== destination else { return }
+        if let attachments = CVBufferCopyAttachments(source, .shouldPropagate) {
+            CVBufferSetAttachments(destination, attachments, .shouldPropagate)
+        }
+    }
+
+Appelé sur CHAQUE image interpolée avant encodage.
+
+
+================================================================================
+  7. ÉTAPE 5 — LES GARDE-FOUS SUCCESSIFS, ET POURQUOI CHACUN A ÉCHOUÉ
+================================================================================
+
+Quatre générations de failsafe se sont succédé. Leur histoire est instructive :
+chacun corrigeait le précédent tout en restant aveugle au vrai problème.
+
+--------------------------------------------------------------------------------
+v1 — Luminance moyenne globale
+--------------------------------------------------------------------------------
+Principe : comparer la luminance moyenne de l'image interpolée à celle de ses
+deux sources. Écart trop grand -> rejet.
+Échec : un artefact localisé (une tache sur 5 % de l'image) ne déplace pas la
+moyenne globale. Invisible.
+
+--------------------------------------------------------------------------------
+v2 — Grille de tuiles 4×4, écart à la MOYENNE des deux sources
+--------------------------------------------------------------------------------
+Principe : découper en 16 tuiles, comparer chaque tuile à la moyenne des deux
+sources correspondantes.
+Échec RETENTISSANT : sur un panoramique rapide, une interpolation PARFAITE
+diffère fortement des deux sources — c'est précisément son rôle, le contenu
+s'est déplacé. Le failsafe rejetait donc des images correctes en rafale et les
+remplaçait par des copies : le clip se FIGEAIT sur plusieurs images, puis
+« sautait » pour rattraper. Le remède causait un défaut pire que le mal.
+Mesuré sur un export réel : différence inter-images de 0,000 (doublons exacts)
+sur les images 6 à 28, puis un saut brutal.
+
+--------------------------------------------------------------------------------
+v3 — Test d'ENVELOPPE
+--------------------------------------------------------------------------------
+Principe : une image n'est aberrante que si elle sort de la plage [min, max] de
+ses deux sources, tuile par tuile. Un mouvement reste borné par ses voisines ;
+un flash blanc ou un trou noir en sort.
+
+    static func envelopeOvershoot(previous: [Double], next: [Double], candidate: [Double]) -> Double {
+        var worst: Double = 0
+        for tileIndex in 0..<candidate.count {
+            let low = min(previous[tileIndex], next[tileIndex]) - envelopeMargin
+            let high = max(previous[tileIndex], next[tileIndex]) + envelopeMargin
+            if candidate[tileIndex] < low {
+                worst = max(worst, low - candidate[tileIndex])
+            } else if candidate[tileIndex] > high {
+                worst = max(worst, candidate[tileIndex] - high)
+            }
+        }
+        return worst
+    }
+
+Progrès réel, mais deux angles morts subsistaient : la CHROMINANCE n'était pas
+mesurée (un flash bleu à luminance constante restait invisible), et les images
+COPIÉES n'étaient jamais contrôlées.
+
+--------------------------------------------------------------------------------
+v4 — Disjoncteur anti-rafale
+--------------------------------------------------------------------------------
+Constat : un artefact réel du flux optique est ISOLÉ. Une rafale de rejets
+signifie que c'est le failsafe qui se trompe.
+
+    /// DISJONCTEUR ANTI-RAFALE : faut-il réellement APPLIQUER un remplacement
+    /// demandé par le test d'enveloppe ? Un artefact réel du flux optique est
+    /// ISOLÉ (une à deux images). Une rafale de rejets consécutifs ou un
+    /// volume anormal sur le clip signifie que c'est le failsafe qui se trompe
+    /// — et remplacer en rafale produit des doublons en chaîne = clip FIGÉ
+    /// puis saut (constaté deux fois sur exports réels).
+    static func failsafeShouldReplace(correctedSoFar: Int,
+                                      maxCorrections: Int,
+                                      consecutiveRejectedGroups: Int) -> Bool {
+        guard consecutiveRejectedGroups < 2 else { return false }
+        guard correctedSoFar < maxCorrections else { return false }
+        return true
+    }
+
+
+================================================================================
+  8. ÉTAPE 6 — LE CONTRÔLE DU FICHIER PRODUIT ET LA RÉPARATION
+================================================================================
+
+Constat de fond : un failsafe qui juge les images AVANT encodage ne prouve rien
+sur le fichier livré. D'où une boucle fermée : rendre, relire le fichier,
+mesurer, réparer, re-mesurer.
+
+    static func render(job: RenderJob,
+                       onProgress: @escaping @Sendable (Double) -> Void) async throws -> RenderResult {
+        var forcedCopies: Set<Int> = []
+        var detectedEver: Set<Int> = []
+        var result = try await renderPass(job: job, forcedCopyOutputIndices: forcedCopies, onProgress: onProgress)
+
+        for pass in 1...maxRepairPasses {
+            detectedEver.formUnion(result.artifactFrames)
+            let repairable = result.artifactFrames.filter { !forcedCopies.contains($0) }
+            if repairable.isEmpty { break }
+
+            // DILATATION D'UNE IMAGE DE PART ET D'AUTRE. […]
+            let dilated = Set(repairable.flatMap { [$0 - 1, $0, $0 + 1] })
+                .filter { $0 >= 0 && $0 < result.frameCount }
+            let candidate = forcedCopies.union(dilated)
+            if candidate.count > max(6, result.frameCount / 5) {
+                break   // plus un artefact isolé : on cesse de réparer et on le DIT
+            }
+            forcedCopies = candidate
+            result = try await renderPass(
+                job: job, forcedCopyOutputIndices: forcedCopies, onProgress: onProgress
+            )
+        }
+        detectedEver.formUnion(result.artifactFrames)
+
+        let remaining = Set(result.artifactFrames)
+        result.repairedFrames = detectedEver.subtracting(remaining).count
+        result.unrepairedAnomalyFrames = remaining.count
+        result.sourceAnomalyFrames = remaining.count
+        return result
+    }
+
+Le détecteur final, luminance ET chrominance, sur une grille 8×8, avec des
+références en MÉDIANE de 5 images de chaque côté :
+
+    /// DÉTECTION D'ANOMALIE PAR MÉDIANES DE PART ET D'AUTRE.
+    ///
+    /// Le test contre les deux voisines IMMÉDIATES a un angle mort fatal en
+    /// ralenti : à 0,5×, un flash d'UNE image dans le rush devient 2 à 4 images
+    /// dans le fichier produit (copie + interpolations voisines). Chaque image
+    /// du flash a alors une voisine elle-même flashée, donc l'enveloppe
+    /// [min, max] des voisines CONTIENT le flash — invisible.
+    ///
+    /// Ici, la référence de chaque côté est la MÉDIANE de 5 images : un flash
+    /// court ne la déplace pas.
+    static func medianEnvelopeScore(left: FrameSignature,
+                                    right: FrameSignature,
+                                    candidate: FrameSignature) -> Double {
+        anomalyScore(previous: left, candidate: candidate, next: right)
+    }
+
+Et la réparation, dont la stratégie a dû être corrigée deux fois :
+
+    /// Stratégie : substituer la DERNIÈRE IMAGE SAINE ÉCRITE. Remplacer par
+    /// « la source la plus proche » était faux dès que la source elle-même
+    /// portait le défaut : un flash présent dans le rush est copié à un
+    /// index et sert de base aux images voisines — les « réparer » avec
+    /// cette même source réinjectait le flash.
+    func appendOutput(_ buffer: CVPixelBuffer) async throws {
+        var toWrite = buffer
+        if forcedCopyOutputIndices.contains(outputFrameIndex) {
+            if let good = lastGoodOutputBuffer {
+                toWrite = good
+                correctedCount += 1
+            } else {
+                unrepairableCopyFrames += 1
+            }
+        } else {
+            lastGoodOutputBuffer = buffer
+        }
+        try await appendWhenReady(toWrite, pts: TimeMath.outputPTS(frameIndex: outputFrameIndex, fps: job.fps))
+        outputFrameIndex += 1
+        onProgress(Double(outputFrameIndex) / Double(expectedFrames))
+    }
+
+TROIS DÉFAUTS SUCCESSIFS DE CETTE BOUCLE, tous découverts par un banc d'essai
+automatisé et non à l'œil :
+
+  1. La réparation ne s'appliquait qu'aux images INTERPOLÉES. Or 25 à 50 % des
+     images de sortie sont des copies. Une image copiée aberrante déclenchait
+     deux rendus strictement identiques, comptait « 1 image réparée »
+     (mensonger) et livrait quand même l'artefact sous l'étiquette « anomalie
+     de la source ».
+
+  2. La réparation remplaçait par « la source la plus proche » — c'est-à-dire
+     par le flash lui-même quand le défaut venait du rush.
+
+  3. « Dernière image saine » signifiait « dernière image non signalée ». Un
+     flash partiellement détecté laissait une de ses images passer pour saine,
+     elle devenait la référence, et la réparation RÉINJECTAIT le flash.
+     Raisonnement circulaire, corrigé par dilatation de la zone réparée.
+
+
+================================================================================
+  9. LE VERDICT
+================================================================================
+
+Après tout cela — chaîne tout-BGRA, négociation de format, attachements
+propagés, quatre générations de failsafe, détecteur luminance + chrominance en
+médiane sur grille 8×8, boucle de réparation en trois passes — des artefacts
+restaient visibles sur du contenu réel.
+
+Le test décisif : flux optique désactivé, mêmes rushes, mêmes réglages.
+Plus aucun artefact. La cause était donc bien l'interpolation elle-même.
+
+Ce qui, rétrospectivement, n'a rien d'étonnant :
+
+  • Le flux optique FABRIQUE des pixels qui n'existent nulle part. Une
+    fabrication peut être fausse ; aucun détecteur ne rattrape toutes les
+    fabrications fausses.
+  • Un détecteur qui compare une image à ses voisines est structurellement
+    faible en ralenti, où un défaut d'une image du rush s'étale sur 2 à 4
+    images de sortie — les voisines sont contaminées.
+  • Réparer une image inventée par une autre image inventée ne garantit rien.
+
+Décision : ranger le flux optique derrière un interrupteur, éteint par défaut.
+Un ralenti saccadé mais exact vaut mieux qu'un ralenti fluide mais faux.
+
+
+================================================================================
+  10. L'INTERRUPTEUR
+================================================================================
+
+Modèle (ClipFlow/Models/Models.swift) :
+
+    /// Interpolation par FLUX OPTIQUE (VideoToolbox) pour créer les images
+    /// intermédiaires du ralenti.
+    ///
+    /// DÉSACTIVÉ PAR DÉFAUT : le flux optique fabrique des images qui
+    /// n'existent pas, et fabrique donc aussi des artefacts visibles (flashs)
+    /// que ni le failsafe en ligne ni le contrôle du fichier produit n'ont
+    /// entièrement éliminés sur du contenu réel. Sans lui, chaque image du
+    /// ralenti est une VRAIE image du rush, répétée : le mouvement est plus
+    /// saccadé, mais aucun pixel n'est inventé — donc aucun artefact possible.
+    /// Réactivable à tout moment dans le menu ⋯.
+    var opticalFlowEnabled: Bool = false
+
+File de rendu (ClipFlow/Services/RenderQueue.swift) :
+
+    forceFastEngine: !project.opticalFlowEnabled
+
+Réglage global maintenu entre projets (ClipFlow/Services/AppSettings.swift),
+interrupteur présent dans le menu ⋯ de l'éditeur ET dans le menu de chaque
+projet de la liste.
+
+CE QUI SE PASSE QUAND IL EST ÉTEINT — le moteur de remplacement, intégralement :
+
+    //  Moteur HONNÊTE : ne fait AUCUNE interpolation. Pour chaque phase, duplique
+    //  l'image source la plus proche.
+    //
+    //  C'est le mode PAR DÉFAUT depuis que le flux optique s'est révélé capable de
+    //  fabriquer des artefacts visibles sur du contenu réel : aucun pixel n'est
+    //  inventé ici, donc aucun artefact ne peut naître du rendu. Le mouvement est
+    //  plus saccadé — compromis assumé, réversible dans le menu ⋯.
+
+    final class PassthroughRetimeEngine: FrameInterpolationEngine {
+
+        let displayName = "Images réelles répétées (sans interpolation)"
+
+        var sourcePixelBufferAttributes: [String: Any]? { nil }
+
+        func startSession(width: Int, height: Int) async throws {
+            // Rien à préparer.
+        }
+
+        func interpolate(previous: CVPixelBuffer,
+                         previousPTS: CMTime,
+                         next: CVPixelBuffer,
+                         nextPTS: CMTime,
+                         phases: [Float]) async throws -> [CVPixelBuffer] {
+            // Duplication : phase < 0,5 → image précédente, sinon suivante.
+            phases.map { phase in
+                phase < 0.5 ? previous : next
+            }
+        }
+
+        func endSession() {
+            // Rien à libérer.
+        }
+    }
+
+Tout le reste du pipeline est inchangé : même plan, même décodage, même
+encodage, même contrôle du fichier produit. Seule la fabrication des images
+intermédiaires diffère.
+
+
+================================================================================
+  11. CE QU'IL FAUDRAIT POUR LE RÉACTIVER SEREINEMENT
+================================================================================
+
+Trois voies, de la plus sûre à la plus ambitieuse.
+
+  A. FLUX OPTIQUE OPPORTUNISTE, REPLI TOTAL.
+     Rendre le clip AVEC flux optique, analyser le fichier produit ; à la
+     moindre image aberrante, re-rendre le clip ENTIER sans flux optique.
+     Pas de réparation partielle — c'est elle qui a échoué trois fois.
+     Toute l'infrastructure existe déjà (détecteur + rendu multi-passes).
+     Coût : temps d'export doublé uniquement quand le flux optique échoue.
+
+  B. FILMER À 60 i/s.
+     Le vrai correctif, et il ne coûte rien en calcul : à 60 i/s, un ralenti
+     0,5× vers 60 i/s n'appelle JAMAIS le flux optique (toutes les entrées du
+     plan sont des copies). Fluide et exact. L'app connaît déjà la cadence de
+     chaque rush mais ne l'affiche nulle part — l'exposer changerait la façon
+     de filmer, ce qui vaut mieux que n'importe quel algorithme correctif.
+
+  C. VALIDATION SUR APPAREIL.
+     Le banc d'essai d'intégration continue ne peut PAS valider le flux
+     optique : sur un runner virtualisé, `startSession` échoue
+     (`VTFrameProcessorErrorDomain Code=-19730`). Seul l'iPhone exécute
+     réellement ce moteur. Toute réactivation devrait donc s'accompagner d'un
+     test embarqué dans l'app, exécuté sur l'appareil, dont le résultat serait
+     visible dans les statistiques développeur.
+
+
+================================================================================
+  12. ANNEXE — OÙ TROUVER CHAQUE PIÈCE
+================================================================================
+
+  ClipFlow/Core/TimeMath.swift
+      Mathématiques temporelles rationnelles, FramePlanEntry, FramePlanner.plan
+
+  ClipFlow/Interpolation/FrameInterpolationEngine.swift
+      Protocole, erreurs, InterpolationEngineFactory
+
+  ClipFlow/Interpolation/VideoToolboxFrameInterpolationEngine.swift
+      Le moteur de flux optique (reproduit intégralement en section 5)
+
+  ClipFlow/Interpolation/PassthroughRetimeEngine.swift
+      Le moteur sans interpolation (reproduit intégralement en section 10)
+
+  ClipFlow/Pipeline/VideoRenderPipeline.swift
+      render() (boucle fermée), renderPass(), failsafe, détecteur, verify()
+
+  ClipFlow/Services/RenderQueue.swift
+      Construction du RenderJob, bilan d'export affiché à l'utilisateur
+
+  ClipFlow/Models/Models.swift        opticalFlowEnabled
+  ClipFlow/Services/AppSettings.swift persistance du réglage global
+
+  PipelineHarnessTests/RealEngineArtifactTests.swift
+      Banc d'essai : rushes synthétiques adversariaux, analyse du fichier
+
+  PipelineHarnessTests/EngineProbeTests.swift
+      Sonde de disponibilité réelle du flux optique sur la machine courante
+
+================================================================================
+FIN
+================================================================================

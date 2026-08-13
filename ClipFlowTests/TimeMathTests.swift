@@ -137,3 +137,47 @@ struct TimeMathTests {
         }
     }
 }
+
+/// Correctif 7 — PTS de destination des images interpolées.
+///
+/// L'ancien calcul arrondissait au timescale SOURCE : à 600 (iPhone) les
+/// phases 0,25/0,50/0,75 restaient distinctes, mais à un timescale grossier
+/// (≤ 100, cas des réencodages Photos) elles retombaient sur la MÊME valeur —
+/// PTS dupliqués ou décroissants, sans la moindre erreur, avec des images
+/// fausses à l'arrivée. La base fixe 1/90000 rend ce cas impossible.
+struct InterpolatedPTSTests {
+
+    /// Reproduit le calcul du moteur (même formule, sans VideoToolbox).
+    private func destinationPTS(previous: CMTime, next: CMTime, phases: [Float]) -> [CMTime] {
+        let ptsTimescale: CMTimeScale = 90_000
+        let base = CMTimeConvertScale(previous, timescale: ptsTimescale, method: .roundHalfAwayFromZero)
+        let span = CMTimeConvertScale(CMTimeSubtract(next, previous),
+                                      timescale: ptsTimescale, method: .roundHalfAwayFromZero)
+        return phases.map { CMTimeAdd(base, CMTimeMultiplyByFloat64(span, multiplier: Float64($0))) }
+    }
+
+    /// Cas qui cassait : source à 30 i/s exprimée au timescale 30. L'intervalle
+    /// vaut 1/30 ; arrondi à ce timescale, les trois phases donnaient 0.
+    @Test func coarseSourceTimescaleStillYieldsDistinctPTS() {
+        let previous = CMTime(value: 3, timescale: 30)
+        let next = CMTime(value: 4, timescale: 30)
+        let stamps = destinationPTS(previous: previous, next: next, phases: [0.25, 0.5, 0.75])
+        for index in 1..<stamps.count {
+            #expect(CMTimeCompare(stamps[index], stamps[index - 1]) > 0,
+                    "PTS non strictement croissants : \(stamps.map(\.seconds))")
+        }
+        #expect(CMTimeCompare(stamps[0], previous) > 0)
+        #expect(CMTimeCompare(stamps[stamps.count - 1], next) < 0)
+    }
+
+    /// Timescale fin (600, cas iPhone) : le comportement ne régresse pas.
+    @Test func fineSourceTimescaleRemainsCorrect() {
+        let previous = CMTime(value: 60, timescale: 600)
+        let next = CMTime(value: 80, timescale: 600)
+        let stamps = destinationPTS(previous: previous, next: next, phases: [0.25, 0.5, 0.75])
+        #expect(abs(stamps[1].seconds - 0.11666) < 0.001)
+        for index in 1..<stamps.count {
+            #expect(CMTimeCompare(stamps[index], stamps[index - 1]) > 0)
+        }
+    }
+}

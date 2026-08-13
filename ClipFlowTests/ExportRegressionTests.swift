@@ -130,12 +130,19 @@ struct EnvelopeFailsafeTests {
 /// tant qu'une image aberrante subsiste.
 struct OutputAnomalyDetectorTests {
 
+    /// Image unie : moyenne, max et min confondus sur chaque tuile.
     private func signature(luma: Double, cb: Double = 128, cr: Double = 128) -> VideoRenderPipeline.FrameSignature {
         let count = VideoRenderPipeline.outputGrid * VideoRenderPipeline.outputGrid
         return VideoRenderPipeline.FrameSignature(
             luma: Array(repeating: luma, count: count),
+            lumaMax: Array(repeating: luma, count: count),
+            lumaMin: Array(repeating: luma, count: count),
             cb: Array(repeating: cb, count: count),
-            cr: Array(repeating: cr, count: count)
+            cbMax: Array(repeating: cb, count: count),
+            cbMin: Array(repeating: cb, count: count),
+            cr: Array(repeating: cr, count: count),
+            crMax: Array(repeating: cr, count: count),
+            crMin: Array(repeating: cr, count: count)
         )
     }
 
@@ -336,6 +343,36 @@ struct ColorAttachmentPropagationTests {
         let value = CVBufferCopyAttachment(destination, kCVImageBufferYCbCrMatrixKey, nil)
         #expect((value as? String) == (kCVImageBufferYCbCrMatrix_ITU_R_2020 as String))
     }
+
+    /// La source porte des attachements : ils sont recopiés, rien n'est compté
+    /// comme non étiqueté.
+    @Test func taggingCopiesSourceAttachments() throws {
+        let source = try makeBuffer()
+        let destination = try makeBuffer()
+        CVBufferSetAttachment(source, kCVImageBufferYCbCrMatrixKey,
+                              kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
+        var untagged = 0
+        VideoRenderPipeline.tagInterpolatedBuffer(destination, from: source, untagged: &untagged)
+        let value = CVBufferCopyAttachment(destination, kCVImageBufferYCbCrMatrixKey, nil)
+        #expect((value as? String) == (kCVImageBufferYCbCrMatrix_ITU_R_2020 as String))
+        #expect(untagged == 0)
+    }
+
+    /// SOURCE SANS ATTACHEMENT : l'ancienne version laissait l'image
+    /// interpolée NUE — l'encodeur la traitait en 709 sans conversion, entre
+    /// des copies étiquetées et converties : une image sur deux teintée.
+    /// Désormais 709 EXPLICITE, et l'événement est COMPTÉ.
+    @Test func untaggedSourceFallsBackTo709AndIsCounted() throws {
+        let source = try makeBuffer()
+        let destination = try makeBuffer()
+        var untagged = 0
+        VideoRenderPipeline.tagInterpolatedBuffer(destination, from: source, untagged: &untagged)
+        let matrix = CVBufferCopyAttachment(destination, kCVImageBufferYCbCrMatrixKey, nil)
+        #expect((matrix as? String) == (kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String))
+        let primaries = CVBufferCopyAttachment(destination, kCVImageBufferColorPrimariesKey, nil)
+        #expect((primaries as? String) == (kCVImageBufferColorPrimaries_ITU_R_709_2 as String))
+        #expect(untagged == 1, "Un défaut d'étiquetage doit être compté, jamais silencieux")
+    }
 }
 
 struct ExportContentRegressionTests {
@@ -412,5 +449,96 @@ struct ExportContentRegressionTests {
         // deux pixels. Une régression pré-roll décalerait de dizaines de px
         // (une image clé antérieure = barre bien plus à gauche).
         #expect(abs(barX - 240) <= 12, "barre trouvée à x=\(barX), attendu ≈240")
+    }
+}
+
+/// TEST DE RECEVABILITÉ DU DÉTECTEUR (§D du paquet de correction).
+///
+/// Tant que le détecteur ne voit pas un flash localisé, AUCUNE mesure de taux
+/// d'artefact n'a de valeur — et c'est exactement ce qui a permis de livrer
+/// pendant des semaines des exports défectueux avec un « contrôle OK ».
+///
+/// Chiffres de l'ancien détecteur : moyenne de tuile, seuil 40 niveaux,
+/// 0,2 % des pixels lus. Un flash plein pot couvrant 5 % de l'image déplaçait
+/// la moyenne d'une tuile de ~13 niveaux : jamais déclenché.
+struct DetectorAcceptanceTests {
+
+    /// Image NV12 unie, avec optionnellement un carré « flash » couvrant
+    /// `coverage` de la surface.
+    private func makeFrame(base: UInt8, flash: UInt8? = nil,
+                           coverage: Double = 0, size: Int = 512) throws -> CVPixelBuffer {
+        var buffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault, size, size,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nil, &buffer
+        )
+        guard status == kCVReturnSuccess, let buffer else {
+            throw NSError(domain: "test", code: Int(status))
+        }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+
+        if let lumaBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 0) {
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+            let height = CVPixelBufferGetHeightOfPlane(buffer, 0)
+            memset(lumaBase, Int32(base), stride * height)
+            if let flash, coverage > 0 {
+                // Carré centré dont l'aire vaut `coverage` de l'image.
+                let side = max(Int((Double(size * size) * coverage).squareRoot().rounded()), 1)
+                let origin = (size - side) / 2
+                let pointer = lumaBase.assumingMemoryBound(to: UInt8.self)
+                for y in origin..<(origin + side) {
+                    memset(pointer + y * stride + origin, Int32(flash), side)
+                }
+            }
+        }
+        // Chrominance neutre : le test porte sur la luminance.
+        if let chromaBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 1) {
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)
+            let height = CVPixelBufferGetHeightOfPlane(buffer, 1)
+            memset(chromaBase, 128, stride * height)
+        }
+        return buffer
+    }
+
+    /// Le contrat : un flash blanc doit être détecté qu'il couvre toute
+    /// l'image ou un millième de sa surface.
+    @Test(arguments: [1.0, 0.25, 0.05, 0.01, 0.001])
+    func flashIsDetectedAtEveryCoverage(coverage: Double) throws {
+        let calm = try makeFrame(base: 90)
+        let flashed = try makeFrame(base: 90, flash: 250, coverage: coverage)
+
+        let reference = try #require(VideoRenderPipeline.frameSignature(of: calm))
+        let candidate = try #require(VideoRenderPipeline.frameSignature(of: flashed))
+
+        let score = VideoRenderPipeline.anomalyScore(
+            previous: reference, candidate: candidate, next: reference
+        )
+        #expect(score > VideoRenderPipeline.outputAnomalyThreshold,
+                "Flash couvrant \(coverage * 100) % non détecté (score \(score))")
+    }
+
+    /// Symétrique : un trou NOIR localisé, que seul le minimum par tuile voit.
+    @Test func localizedBlackHoleIsDetected() throws {
+        let calm = try makeFrame(base: 140)
+        let holed = try makeFrame(base: 140, flash: 4, coverage: 0.005)
+        let reference = try #require(VideoRenderPipeline.frameSignature(of: calm))
+        let candidate = try #require(VideoRenderPipeline.frameSignature(of: holed))
+        let score = VideoRenderPipeline.anomalyScore(
+            previous: reference, candidate: candidate, next: reference
+        )
+        #expect(score > VideoRenderPipeline.outputAnomalyThreshold)
+    }
+
+    /// Contre-épreuve indispensable : deux images IDENTIQUES ne déclenchent
+    /// rien. Un détecteur qui crie sur tout ne mesure pas davantage qu'un
+    /// détecteur aveugle — il déclencherait un repli sur chaque clip.
+    @Test func identicalFramesRaiseNothing() throws {
+        let calm = try makeFrame(base: 120)
+        let signature = try #require(VideoRenderPipeline.frameSignature(of: calm))
+        let score = VideoRenderPipeline.anomalyScore(
+            previous: signature, candidate: signature, next: signature
+        )
+        #expect(score == 0)
     }
 }

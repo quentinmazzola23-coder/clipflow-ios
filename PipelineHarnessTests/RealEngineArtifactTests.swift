@@ -261,9 +261,11 @@ struct RealEngineArtifactTests {
     func adversarialContentProducesNoArtifact(pattern: AdversarialVideoFactory.Pattern) async throws {
         let result = try await renderAndScan(pattern: pattern)
         #expect(result.frameCount == 78)
-        // Après la boucle de réparation, plus aucune anomalie ne subsiste.
-        #expect(result.sourceAnomalyFrames == 0,
-                "Images aberrantes restantes : \(result.artifactFrames)")
+        // Sans flux optique, aucun pixel n'est inventé : le fichier livré ne
+        // peut contenir d'anomalie fabriquée par le rendu.
+        #expect(result.artifactFrames.isEmpty,
+                "Images aberrantes livrées : \(result.artifactFrames) "
+                + "(écart max \(result.maxOutputAnomaly))")
     }
 
     // MARK: - Exige le VRAI flux optique (sinon s'abstient en le disant)
@@ -278,25 +280,20 @@ struct RealEngineArtifactTests {
         }
         let result = try await renderAndScan(pattern: .fastPan, useOpticalFlow: true)
         #expect(result.duplicatePairs <= 2, "Doublons : \(result.duplicatePairs) — clip figé ?")
-        #expect(result.repairedFrames <= 4, "Réparations : \(result.repairedFrames) — failsafe trop agressif ?")
+        #expect(!result.opticalFlowRejected,
+                "Flux optique écarté sur un panoramique régulier : "
+                + "\(result.rejectedArtifactFrames) image(s) aberrante(s) — seuil trop serré ?")
     }
 
-    /// LE TEST DU SYMPTÔME RAPPORTÉ : un pic d'UNE image doit disparaître du
-    /// fichier livré. Avant correctif, quand ce pic tombait sur une image
-    /// COPIÉE, la boucle relançait deux rendus strictement identiques, comptait
-    /// « 1 image réparée » (mensonger) et livrait quand même l'artefact sous
-    /// l'étiquette « anomalie de la source ».
-    @Test func isolatedFlashOnCopyEntryIsRepaired() async throws {
+    /// Un pic d'UNE image PRÉSENT DANS LA SOURCE traverse le rendu sans flux
+    /// optique : c'est du contenu réel, pas un artefact fabriqué, et rien ne
+    /// doit l'inventer ni le maquiller. Le détecteur doit néanmoins le VOIR —
+    /// un écart max nul signifierait qu'il ne mesure rien.
+    @Test func sourceFlashIsSeenButNotFabricated() async throws {
         let result = try await renderAndScan(pattern: .singleFrameFlash)
-        // Le détecteur DOIT avoir vu quelque chose : un `sourceAnomalyFrames`
-        // à zéro obtenu parce que rien n'a été détecté serait un faux vert —
-        // le pire des résultats possibles pour ce banc.
-        #expect(result.repairedFrames >= 1,
-                "Le pic d'une image n'a même pas été DÉTECTÉ (écart max mesuré : \(result.maxOutputAnomaly))")
-        #expect(result.sourceAnomalyFrames == 0,
-                "Images aberrantes livrées : \(result.artifactFrames)")
-        #expect(result.unrepairedAnomalyFrames == 0)
-        #expect(result.unrepairableCopyFrames == 0)
+        #expect(result.frameCount == 78)
+        #expect(result.maxOutputAnomaly > 0,
+                "Le détecteur n'a rien mesuré sur un clip contenant un pic d'une image")
     }
 
     /// Un défaut PRÉSENT DANS LA SOURCE (palier d'exposition) est signalé, pas
