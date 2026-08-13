@@ -1079,6 +1079,54 @@ final class VideoRenderPipeline {
         )
     }
 
+    /// Nombre d'images prises de chaque côté pour établir la référence
+    /// temporelle. Une MÉDIANE sur 5 images résiste à un flash de 1 ou 2
+    /// images — c'est tout l'enjeu (voir `medianEnvelopeScore`).
+    static let referenceRadius = 5
+
+    /// Médiane composante par composante, tuile par tuile.
+    static func medianSignature(of list: [FrameSignature]) -> FrameSignature? {
+        guard let first = list.first else { return nil }
+        func median(_ pick: (FrameSignature) -> [Double]) -> [Double] {
+            let count = pick(first).count
+            var result = [Double](repeating: 0, count: count)
+            var column = [Double](repeating: 0, count: list.count)
+            for tile in 0..<count {
+                for (index, signature) in list.enumerated() {
+                    let values = pick(signature)
+                    column[index] = tile < values.count ? values[tile] : 0
+                }
+                let sorted = column.sorted()
+                result[tile] = sorted[sorted.count / 2]
+            }
+            return result
+        }
+        return FrameSignature(
+            luma: median { $0.luma }, cb: median { $0.cb }, cr: median { $0.cr }
+        )
+    }
+
+    /// DÉTECTION D'ANOMALIE PAR MÉDIANES DE PART ET D'AUTRE.
+    ///
+    /// Le test contre les deux voisines IMMÉDIATES a un angle mort fatal en
+    /// ralenti : à 0,5×, un flash d'UNE image dans le rush devient 2 à 4 images
+    /// dans le fichier produit (copie + interpolations voisines). Chaque image
+    /// du flash a alors une voisine elle-même flashée, donc l'enveloppe
+    /// [min, max] des voisines CONTIENT le flash — invisible. C'est ce que le
+    /// banc d'essai a mesuré : `repairedFrames = 0` sur un pic d'une image.
+    ///
+    /// Ici, la référence de chaque côté est la MÉDIANE de 5 images : un flash
+    /// court ne la déplace pas. L'image est aberrante seulement si elle sort de
+    /// l'intervalle entre les deux médianes — ce qui préserve :
+    /// • le mouvement rapide (l'image est ENTRE les deux références) ;
+    /// • un vrai palier d'exposition (l'image est égale à la référence d'un
+    ///   côté), qui est du contenu source et ne doit pas être « corrigé ».
+    static func medianEnvelopeScore(left: FrameSignature,
+                                    right: FrameSignature,
+                                    candidate: FrameSignature) -> Double {
+        anomalyScore(previous: left, candidate: candidate, next: right)
+    }
+
     /// PREMIÈRE et DERNIÈRE image : sans voisine des deux côtés, l'enveloppe
     /// n'existe pas — elles échapperaient au contrôle, alors qu'un flash en
     /// tête de clip est le plus visible de tous. La valeur attendue est donc
@@ -1148,32 +1196,14 @@ final class VideoRenderPipeline {
         var count = 0
         var duplicatePairs = 0
         var previousTiles: [Double]?
-        // Fenêtre glissante de trois signatures pour le test d'enveloppe.
-        var window: [(index: Int, signature: FrameSignature?)] = []
-        var anomalies: [Int] = []
-        var maxAnomaly: Double = 0
-        // Les deux premières signatures sont conservées : la toute première
-        // image n'a pas de voisine à gauche et se contrôle par extrapolation.
-        var firstSignatures: [FrameSignature?] = []
-
-        func record(index: Int, score: Double) {
-            maxAnomaly = max(maxAnomaly, score)
-            if score > outputAnomalyThreshold, !anomalies.contains(index) {
-                anomalies.append(index)
-            }
-        }
-
-        func evaluateMiddle() {
-            guard window.count == 3,
-                  let p = window[0].signature,
-                  let c = window[1].signature,
-                  let n = window[2].signature else { return }
-            record(index: window[1].index, score: anomalyScore(previous: p, candidate: c, next: n))
-        }
+        // Toutes les signatures sont conservées : l'analyse a besoin d'un accès
+        // ALÉATOIRE (médianes de 5 images de part et d'autre), impossible avec
+        // une simple fenêtre glissante. Coût : ~64 tuiles × 3 composantes ×
+        // 78 images ≈ 150 Ko.
+        var signatures: [FrameSignature?] = []
 
         while let sample = output.copyNextSampleBuffer() {
             guard let image = CMSampleBufferGetImageBuffer(sample) else { continue }
-            let index = count
             count += 1
             if let tiles = tileLuma(of: image) {
                 if let previous = previousTiles, previous.count == tiles.count,
@@ -1184,31 +1214,40 @@ final class VideoRenderPipeline {
             } else {
                 previousTiles = nil
             }
-            let signature = frameSignature(of: image)
-            if firstSignatures.count < 3 { firstSignatures.append(signature) }
-            window.append((index, signature))
-            if window.count > 3 { window.removeFirst() }
-            evaluateMiddle()
+            signatures.append(frameSignature(of: image))
         }
         if reader.status == .failed {
             throw RenderError.writerFailed("vérification interrompue : \(reader.error?.localizedDescription ?? "?")")
         }
 
-        // BORDS DU CLIP : la première et la dernière image n'ont jamais été
-        // évaluées par la fenêtre glissante — contrôle par extrapolation.
-        if firstSignatures.count >= 3,
-           let first = firstSignatures[0], let second = firstSignatures[1], let third = firstSignatures[2] {
-            record(index: 0, score: edgeAnomalyScore(
-                neighbour: second, secondNeighbour: third, candidate: first
-            ))
+        var anomalies: [Int] = []
+        var maxAnomaly: Double = 0
+        let radius = referenceRadius
+
+        for index in 0..<signatures.count {
+            guard let candidate = signatures[index] else { continue }
+            // Références : médiane des `radius` images valides de chaque côté.
+            let left = (max(0, index - radius)..<index).compactMap { signatures[$0] }
+            let right = ((index + 1)..<min(signatures.count, index + 1 + radius)).compactMap { signatures[$0] }
+
+            let score: Double
+            if let leftMedian = medianSignature(of: left), let rightMedian = medianSignature(of: right) {
+                score = medianEnvelopeScore(left: leftMedian, right: rightMedian, candidate: candidate)
+            } else if right.count >= 2 {
+                // Tout début du clip : extrapolation depuis la suite.
+                score = edgeAnomalyScore(neighbour: right[0], secondNeighbour: right[1], candidate: candidate)
+            } else if left.count >= 2 {
+                // Toute fin du clip : extrapolation depuis ce qui précède.
+                score = edgeAnomalyScore(neighbour: left[left.count - 1],
+                                         secondNeighbour: left[left.count - 2],
+                                         candidate: candidate)
+            } else {
+                continue
+            }
+
+            maxAnomaly = max(maxAnomaly, score)
+            if score > outputAnomalyThreshold { anomalies.append(index) }
         }
-        if window.count == 3,
-           let last = window[2].signature, let before = window[1].signature, let beforeThat = window[0].signature {
-            record(index: window[2].index, score: edgeAnomalyScore(
-                neighbour: before, secondNeighbour: beforeThat, candidate: last
-            ))
-        }
-        anomalies.sort()
 
         return (duration.seconds, count, duplicatePairs, anomalies, maxAnomaly)
     }

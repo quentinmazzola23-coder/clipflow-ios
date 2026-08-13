@@ -210,6 +210,57 @@ struct OutputAnomalyDetectorTests {
         #expect(score == 0)
     }
 
+    /// ANGLE MORT HISTORIQUE, mesuré par le banc d'essai : en ralenti 0,5×, un
+    /// flash d'UNE image du rush devient 2 à 4 images dans le fichier produit.
+    /// Chaque image du flash a alors une voisine elle-même flashée, donc le
+    /// test contre les voisines IMMÉDIATES ne voit rien. La médiane de 5
+    /// images de chaque côté, elle, n'est pas déplacée par un flash court.
+    @Test func twoFrameFlashEscapesImmediateNeighboursButNotMedians() {
+        let normal = signature(luma: 100)
+        let flash = signature(luma: 250)
+        // Voisines immédiates : l'une est flashée → enveloppe [100, 250] →
+        // le flash est « dedans » → invisible.
+        #expect(VideoRenderPipeline.anomalyScore(previous: normal, candidate: flash, next: flash) == 0)
+        // Médianes de 5 images dont au plus 1 flashée → références saines.
+        let leftMedian = try! #require(VideoRenderPipeline.medianSignature(
+            of: [normal, normal, normal, normal, normal]
+        ))
+        let rightMedian = try! #require(VideoRenderPipeline.medianSignature(
+            of: [flash, normal, normal, normal, normal]
+        ))
+        let score = VideoRenderPipeline.medianEnvelopeScore(
+            left: leftMedian, right: rightMedian, candidate: flash
+        )
+        #expect(score > VideoRenderPipeline.outputAnomalyThreshold)
+    }
+
+    /// La médiane ignore un intrus isolé (c'est tout son intérêt ici).
+    @Test func medianIgnoresSingleOutlier() {
+        let normal = signature(luma: 100)
+        let flash = signature(luma: 250)
+        let median = try! #require(VideoRenderPipeline.medianSignature(
+            of: [normal, flash, normal, normal, normal]
+        ))
+        #expect(abs(median.luma[0] - 100) < 0.5)
+    }
+
+    /// Un PALIER d'exposition (contenu source réel, changement durable) ne doit
+    /// PAS être signalé : l'image est égale à la référence d'un des deux côtés.
+    @Test func lastingExposureStepIsNotFlagged() {
+        let before = signature(luma: 60)
+        let after = signature(luma: 190)
+        let leftMedian = try! #require(VideoRenderPipeline.medianSignature(
+            of: [before, before, before, before, before]
+        ))
+        let rightMedian = try! #require(VideoRenderPipeline.medianSignature(
+            of: [after, after, after, after, after]
+        ))
+        let score = VideoRenderPipeline.medianEnvelopeScore(
+            left: leftMedian, right: rightMedian, candidate: after
+        )
+        #expect(score == 0)
+    }
+
     /// Bruit de compression : sous le seuil, aucun faux positif (sinon chaque
     /// export déclencherait des re-rendus inutiles).
     @Test func compressionNoiseIsNotFlagged() {
