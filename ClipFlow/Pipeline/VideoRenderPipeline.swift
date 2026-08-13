@@ -142,30 +142,50 @@ final class VideoRenderPipeline {
     static func render(job: RenderJob,
                        onProgress: @escaping @Sendable (Double) -> Void) async throws -> RenderResult {
         var forcedCopies: Set<Int> = []
+        var detectedEver: Set<Int> = []
         var result = try await renderPass(job: job, forcedCopyOutputIndices: forcedCopies, onProgress: onProgress)
 
         for pass in 1...maxRepairPasses {
-            let suspects = result.artifactFrames
-            // Rien à réparer, ou toutes les images suspectes sont DÉJÀ des
-            // copies (donc du contenu source) : on s'arrête.
-            let repairable = suspects.filter { !forcedCopies.contains($0) }
+            detectedEver.formUnion(result.artifactFrames)
+            let repairable = result.artifactFrames.filter { !forcedCopies.contains($0) }
             if repairable.isEmpty { break }
-            forcedCopies.formUnion(repairable)
+
+            // DILATATION D'UNE IMAGE DE PART ET D'AUTRE.
+            // Un flash occupe PLUSIEURS images consécutives en ralenti, et le
+            // détecteur n'en signale parfois qu'une partie. Or la réparation
+            // recopie « la dernière image saine », c'est-à-dire la dernière
+            // image NON signalée : si une image du flash a échappé à la
+            // détection, elle devient la référence « saine » et le flash est
+            // réinjecté — raisonnement circulaire mesuré par le banc d'essai
+            // (0 image réparée alors que 2 étaient forcées). Élargir d'une
+            // image de chaque côté coûte quelques doublons imperceptibles et
+            // supprime cette possibilité.
+            let dilated = Set(repairable.flatMap { [$0 - 1, $0, $0 + 1] })
+                .filter { $0 >= 0 && $0 < result.frameCount }
+            // Plafond de sûreté : au-delà de 20 % du clip, le défaut n'est plus
+            // un artefact isolé — on cesse de réparer et on le DIT.
+            let candidate = forcedCopies.union(dilated)
+            if candidate.count > max(6, result.frameCount / 5) {
+                os_log("Réparation abandonnée : %d images visées sur %d",
+                       log: signpostLog, type: .error, candidate.count, result.frameCount)
+                break
+            }
+            forcedCopies = candidate
             os_log("Artefacts détectés (%d) — passe de réparation %d",
                    log: signpostLog, type: .info, repairable.count, pass)
             result = try await renderPass(
                 job: job, forcedCopyOutputIndices: forcedCopies, onProgress: onProgress
             )
         }
+        detectedEver.formUnion(result.artifactFrames)
 
-        // COMPTAGE HONNÊTE : « réparée » = image forcée en copie ET DISPARUE du
-        // fichier final. Une image forcée qui reste aberrante n'a rien réparé —
-        // compter `forcedCopies.count` affichait « 1 image réparée » alors que
-        // le second rendu pouvait être strictement identique.
+        // COMPTAGE HONNÊTE : « réparée » = image RÉELLEMENT signalée aberrante
+        // à un moment, et ABSENTE du fichier final. Les images ajoutées par
+        // dilatation ne comptent pas comme des réparations.
         let remaining = Set(result.artifactFrames)
-        result.repairedFrames = forcedCopies.subtracting(remaining).count
-        result.unrepairedAnomalyFrames = remaining.intersection(forcedCopies).count
-        result.sourceAnomalyFrames = result.artifactFrames.count
+        result.repairedFrames = detectedEver.subtracting(remaining).count
+        result.unrepairedAnomalyFrames = remaining.count
+        result.sourceAnomalyFrames = remaining.count
         return result
     }
 
