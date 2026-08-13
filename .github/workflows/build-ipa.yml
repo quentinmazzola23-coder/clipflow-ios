@@ -157,6 +157,10 @@ jobs:
           bash PipelineHarness/run-with-watchdog.sh 300 \
             swift test --package-path . --filter EngineProbeTests
 
+      # Rendus adversariaux de bout en bout. Sur une machine sans flux optique
+      # utilisable, ils s'exécutent avec le moteur de repli : plan, décodage,
+      # encodage, détecteur d'anomalies et boucle de réparation sont validés
+      # quand même — c'est là qu'était le défaut critique des images copiées.
       - name: Banc d'essai complet (rendus adversariaux)
         run: |
           bash PipelineHarness/run-with-watchdog.sh 600 \
