@@ -82,7 +82,8 @@ struct ProjectEditorView: View {
                 mediaURL: rush.localSourceRelativePath.map { StorageManager.url(forSourceRelativePath: $0) },
                 thumbKey: rush.localSourceRelativePath ?? rush.originalFilename,
                 startOffset: offset,
-                duration: rush.duration.seconds
+                duration: rush.duration.seconds,
+                frameRate: rush.nominalFrameRate
             )
             offset += rush.duration.seconds
             return segment
@@ -357,7 +358,10 @@ struct ProjectEditorView: View {
             }
             // Timecodes de la sélection courante (début → fin dans le rush).
             if let range = selectionRange {
-                Text(String(format: "✂︎ %.2f → %.2f s", range.start.seconds, range.end.seconds))
+                // Position au centième RETIRÉE : la règle graduée de la
+                // timeline situe la sélection bien mieux qu'un couple de
+                // nombres, et s'adapte au zoom.
+                Text("✂︎ \(project.finalDuration.label)")
                     .font(.footnote.monospacedDigit())
                     .foregroundStyle(Theme.accent)
             }
@@ -586,6 +590,13 @@ struct ProjectEditorView: View {
                     get: { project.opticalFlowEnabled },
                     set: { newValue in
                         project.opticalFlowEnabled = newValue
+                        touch()
+                    }
+                ))
+                Toggle("Album Photos par projet", isOn: Binding(
+                    get: { project.albumPerProject },
+                    set: { newValue in
+                        project.albumPerProject = newValue
                         touch()
                     }
                 ))

@@ -29,6 +29,9 @@ struct TimelineSegment: Equatable {
     var thumbKey: String
     var startOffset: Double   // secondes depuis le début de la timeline
     var duration: Double
+    /// Cadence du rush : sert la règle graduée quand le zoom devient trop fin
+    /// pour la seconde et bascule en numéros d'image. 0 = inconnue.
+    var frameRate: Double = 0
 }
 
 /// Plage à surligner (sélection courante ou passage validé).
@@ -67,6 +70,7 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
     private var separatorLayers: [CALayer] = []
     private var labelLayers: [CATextLayer] = []
     private var overlayLayers: [CALayer] = []
+    private var rulerLayers: [CALayer] = []
     private let playheadLayer = CALayer()
 
     private var totalDuration: Double { segments.last.map { $0.startOffset + $0.duration } ?? 0 }
@@ -134,6 +138,7 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
         playheadLayer.frame = CGRect(x: bounds.midX - 1, y: 0, width: 2, height: bounds.height)
         updateVisibleTiles()
         layoutSeparators()
+        layoutRuler()
         layoutOverlays()
     }
 
@@ -287,6 +292,144 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
         }
     }
 
+    // MARK: Règle graduée — lecture directe du niveau de zoom
+
+    /// Pas de graduation, exprimé soit en secondes, soit en IMAGES quand le
+    /// zoom devient plus fin que la seconde.
+    enum RulerStep: Equatable {
+        case seconds(Double)
+        /// Pas de `count` images, à la cadence `frameRate`.
+        case frames(count: Int, frameRate: Double)
+
+        /// Durée d'un pas, en secondes.
+        var interval: Double {
+            switch self {
+            case .seconds(let value): return value
+            case .frames(let count, let rate): return Double(count) / max(rate, 1)
+            }
+        }
+    }
+
+    /// Espacement minimal entre deux étiquettes, en points : en dessous, elles
+    /// se chevauchent et la règle devient illisible.
+    private static let minimumLabelSpacing: CGFloat = 64
+
+    /// Choisit le pas le plus FIN qui laisse au moins `minimumLabelSpacing`
+    /// entre deux graduations. Échelle « 1-2-5 » classique, prolongée en
+    /// images quand la seconde devient trop grossière pour le zoom courant.
+    static func rulerStep(pointsPerSecond: CGFloat, frameRate: Double) -> RulerStep {
+        let secondLadder: [Double] = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300]
+
+        // Le zoom permet-il de distinguer des images ? On ne bascule en
+        // numéros d'image que si la cadence est connue ET si une seconde
+        // occupe assez de place pour que plusieurs images soient lisibles.
+        if frameRate > 0 {
+            let pointsPerFrame = pointsPerSecond / CGFloat(frameRate)
+            let frameLadder = [1, 2, 5, 10, 15, 20]
+            for count in frameLadder {
+                if pointsPerFrame * CGFloat(count) >= minimumLabelSpacing {
+                    // Un pas qui atteindrait une seconde entière retombe dans
+                    // l'échelle des secondes : plus lisible.
+                    if Double(count) >= frameRate { break }
+                    return .frames(count: count, frameRate: frameRate)
+                }
+            }
+        }
+
+        for value in secondLadder where CGFloat(value) * pointsPerSecond >= Self.minimumLabelSpacing {
+            return .seconds(value)
+        }
+        return .seconds(secondLadder.last ?? 300)
+    }
+
+    /// Étiquette d'une graduation, exprimée DANS LE CLIP (le compteur repart à
+    /// zéro à chaque rush) : c'est la position utile pour juger un passage.
+    static func rulerLabel(offsetInSegment: Double, step: RulerStep) -> String {
+        switch step {
+        case .seconds(let value):
+            let total = offsetInSegment
+            let minutes = Int(total / 60)
+            let seconds = total - Double(minutes) * 60
+            if value < 1 {
+                return minutes > 0
+                    ? String(format: "%d:%04.1f", minutes, seconds)
+                    : String(format: "%.1f s", seconds)
+            }
+            return minutes > 0
+                ? String(format: "%d:%02d", minutes, Int(seconds.rounded()))
+                : String(format: "%d s", Int(seconds.rounded()))
+        case .frames(_, let frameRate):
+            // Numéro d'image DANS LA SECONDE courante : « 2 s +7 i » se lit
+            // sans calcul mental, contrairement à un numéro absolu.
+            let totalFrames = Int((offsetInSegment * frameRate).rounded())
+            let framesPerSecond = max(Int(frameRate.rounded()), 1)
+            let second = totalFrames / framesPerSecond
+            let frame = totalFrames % framesPerSecond
+            return frame == 0 ? "\(second) s" : "\(second)s +\(frame)i"
+        }
+    }
+
+    /// Trace les graduations visibles. Reconstruite au défilement comme au
+    /// zoom : seule la portion à l'écran est dessinée.
+    private func layoutRuler() {
+        rulerLayers.forEach { $0.removeFromSuperlayer() }
+        rulerLayers.removeAll()
+        guard bounds.width > 0, !segments.isEmpty else { return }
+
+        let visibleMinX = scrollView.contentOffset.x - 40
+        let visibleMaxX = scrollView.contentOffset.x + bounds.width + 40
+
+        for segment in segments {
+            let segmentMinX = x(forTime: segment.startOffset)
+            let segmentMaxX = x(forTime: segment.startOffset + segment.duration)
+            guard segmentMaxX > visibleMinX, segmentMinX < visibleMaxX else { continue }
+
+            let step = Self.rulerStep(pointsPerSecond: pointsPerSecond, frameRate: segment.frameRate)
+            let interval = step.interval
+            guard interval > 0 else { continue }
+
+            // Première graduation visible DANS ce segment.
+            let firstVisibleOffset = max(0, Double((visibleMinX - segmentMinX) / pointsPerSecond))
+            var tickIndex = Int(firstVisibleOffset / interval)
+
+            while true {
+                let offsetInSegment = Double(tickIndex) * interval
+                if offsetInSegment > segment.duration { break }
+                let tickX = segmentMinX + CGFloat(offsetInSegment) * pointsPerSecond
+                if tickX > visibleMaxX { break }
+                tickIndex += 1
+                guard tickX >= visibleMinX else { continue }
+
+                // Trait : plus marqué sur les secondes entières.
+                let isWholeSecond = abs(offsetInSegment.rounded() - offsetInSegment) < 0.001
+                let tick = CALayer()
+                tick.backgroundColor = UIColor.white
+                    .withAlphaComponent(isWholeSecond ? 0.5 : 0.28).cgColor
+                tick.frame = CGRect(x: tickX, y: 14, width: 1,
+                                    height: isWholeSecond ? 9 : 6)
+                contentView.layer.addSublayer(tick)
+                rulerLayers.append(tick)
+
+                // Fond sombre : les graduations passent par-dessus les
+                // vignettes, illisibles autrement sur une image claire.
+                let label = CATextLayer()
+                label.string = " " + Self.rulerLabel(offsetInSegment: offsetInSegment, step: step)
+                label.fontSize = 9
+                label.foregroundColor = UIColor.white.withAlphaComponent(0.9).cgColor
+                label.backgroundColor = UIColor.black.withAlphaComponent(0.5).cgColor
+                label.cornerRadius = 3
+                label.contentsScale = UIScreen.main.scale
+                let width: CGFloat = {
+                    if case .frames = step { return 52 }
+                    return 40
+                }()
+                label.frame = CGRect(x: tickX + 2, y: 15, width: width, height: 11)
+                contentView.layer.addSublayer(label)
+                rulerLayers.append(label)
+            }
+        }
+    }
+
     // MARK: Surlignages (sélection, passages validés)
 
     private func layoutOverlays() {
@@ -406,6 +549,7 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         updateVisibleTiles()
+        layoutRuler()
         let time = playheadTime
         // Haptique au franchissement d'une séparation de rush.
         if let segment = segments.last(where: { $0.startOffset <= time }) {

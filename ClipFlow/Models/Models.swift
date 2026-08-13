@@ -73,6 +73,10 @@ final class ClipProject {
     /// Aperçu léger (540p au lieu de 720p) — réserve du décodeur pour la
     /// fluidité sur les très longs projets.
     var previewLight: Bool = false
+    /// Enregistrer les exports dans un album Photos PROPRE AU PROJET
+    /// (« ClipFlow — <nom> ») plutôt que dans l'album commun « ClipFlow ».
+    /// L'album suit le nom du projet au moment de l'export.
+    var albumPerProject: Bool = true
     /// Interpolation par FLUX OPTIQUE (VideoToolbox) pour créer les images
     /// intermédiaires du ralenti.
     ///

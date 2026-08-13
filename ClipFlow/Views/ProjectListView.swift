@@ -31,6 +31,11 @@ struct ProjectListView: View {
                         Spacer(minLength: 8)
                         projectMenu(project)
                     }
+                    // Sonde placée DANS une ligne : ses vues parentes
+                    // contiennent forcément la zone de défilement de la liste
+                    // (ce ne serait pas garanti depuis un .background posé sur
+                    // la List elle-même).
+                    .background(ScrollBounceDisabler())
                 }
                 // Balayage gauche COMPLET = suppression directe (fichiers
                 // disque inclus), sans étape intermédiaire.
@@ -43,7 +48,9 @@ struct ProjectListView: View {
                 }
             }
         }
-        // Pas de rebond de défilement quand la liste tient à l'écran.
+        // Rebond supprimé quand la liste tient à l'écran. Au-delà, c'est
+        // ScrollBounceDisabler (ci-dessous) qui l'empêche : `.basedOnSize` ne
+        // couvre QUE le cas « contenu plus court que l'écran ».
         .scrollBounceBehavior(.basedOnSize)
         // Version + horodatage de build, discrets en bas de la page.
         .safeAreaInset(edge: .bottom) {
@@ -106,6 +113,7 @@ struct ProjectListView: View {
             Toggle("Aperçu léger (540p, + fluide)", isOn: settingBinding(project, \.previewLight))
             Toggle("Flux optique (fluide, peut créer des artefacts)",
                    isOn: settingBinding(project, \.opticalFlowEnabled))
+            Toggle("Album Photos par projet", isOn: settingBinding(project, \.albumPerProject))
             Button {
                 guard !RenderQueueController.shared.isBusy() else { return }
                 _ = MediaAvailabilityService.releaseSources(in: project)

@@ -20,6 +20,7 @@ enum AppSettings {
         static let autoExport = "settings.autoExportOnValidate"
         static let previewLight = "settings.previewLight"
         static let opticalFlow = "settings.opticalFlowEnabled"
+        static let albumPerProject = "settings.albumPerProject"
     }
 
     /// Applique les réglages globaux au projet (ouverture, création).
@@ -39,6 +40,9 @@ enum AppSettings {
         if let flow = defaults.object(forKey: Key.opticalFlow) as? Bool {
             project.opticalFlowEnabled = flow
         }
+        if let perProject = defaults.object(forKey: Key.albumPerProject) as? Bool {
+            project.albumPerProject = perProject
+        }
     }
 
     /// Capture les réglages du projet comme nouveaux réglages globaux
@@ -49,5 +53,6 @@ enum AppSettings {
         defaults.set(project.autoExportOnValidate, forKey: Key.autoExport)
         defaults.set(project.previewLight, forKey: Key.previewLight)
         defaults.set(project.opticalFlowEnabled, forKey: Key.opticalFlow)
+        defaults.set(project.albumPerProject, forKey: Key.albumPerProject)
     }
 }
