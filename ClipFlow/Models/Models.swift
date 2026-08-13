@@ -73,6 +73,17 @@ final class ClipProject {
     /// Aperçu léger (540p au lieu de 720p) — réserve du décodeur pour la
     /// fluidité sur les très longs projets.
     var previewLight: Bool = false
+    /// Interpolation par FLUX OPTIQUE (VideoToolbox) pour créer les images
+    /// intermédiaires du ralenti.
+    ///
+    /// DÉSACTIVÉ PAR DÉFAUT : le flux optique fabrique des images qui
+    /// n'existent pas, et fabrique donc aussi des artefacts visibles (flashs)
+    /// que ni le failsafe en ligne ni le contrôle du fichier produit n'ont
+    /// entièrement éliminés sur du contenu réel. Sans lui, chaque image du
+    /// ralenti est une VRAIE image du rush, répétée : le mouvement est plus
+    /// saccadé, mais aucun pixel n'est inventé — donc aucun artefact possible.
+    /// Réactivable à tout moment dans le menu ⋯.
+    var opticalFlowEnabled: Bool = false
     /// true = proxys légers 240p (économie d'espace) ; false (défaut) =
     /// proxys 720p tout-intra, prévisualisation nette et scrubbing instantané.
     var proxy240p: Bool = false

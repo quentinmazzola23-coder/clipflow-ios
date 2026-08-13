@@ -274,7 +274,12 @@ final class RenderQueueController {
                 outputFilename: filename,
                 // Colorimétrie figée sur le passage à la validation — jamais
                 // "sdr" par défaut quand le rush a été supprimé.
-                colorimetry: passage.colorimetry
+                colorimetry: passage.colorimetry,
+                // Flux optique DÉSACTIVÉ par défaut (réglage du projet) : sans
+                // lui, chaque image du ralenti est une VRAIE image du rush,
+                // répétée. Mouvement plus saccadé, mais aucun pixel inventé —
+                // donc aucun artefact possible.
+                forceFastEngine: !project.opticalFlowEnabled
             )
 
             passage.exportState = .rendering
@@ -321,7 +326,11 @@ final class RenderQueueController {
                 if result.failsafeOverrides > 0 {
                     corrected += ", \(result.failsafeOverrides) rejet(s) neutralisé(s) par le disjoncteur"
                 }
-                if result.duplicatePairs > 0 {
+                // Sans flux optique, les images répétées sont le principe même
+                // du rendu — les signaler comme un défaut serait un faux
+                // avertissement. Elles ne sont anormales qu'avec le flux
+                // optique actif (elles trahissent alors un clip figé).
+                if result.duplicatePairs > 0, project.opticalFlowEnabled {
                     corrected += ", ⚠️ \(result.duplicatePairs) paire(s) d'images identiques"
                 }
                 if result.repairedFrames > 0 {

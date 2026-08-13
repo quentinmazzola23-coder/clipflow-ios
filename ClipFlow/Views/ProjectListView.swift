@@ -104,6 +104,8 @@ struct ProjectListView: View {
             Toggle("Toucher = centre de la sélection", isOn: settingBinding(project, \.touchAnchorIsCenter))
             Toggle("Export automatique à la validation", isOn: settingBinding(project, \.autoExportOnValidate))
             Toggle("Aperçu léger (540p, + fluide)", isOn: settingBinding(project, \.previewLight))
+            Toggle("Flux optique (fluide, peut créer des artefacts)",
+                   isOn: settingBinding(project, \.opticalFlowEnabled))
             Button {
                 guard !RenderQueueController.shared.isBusy() else { return }
                 _ = MediaAvailabilityService.releaseSources(in: project)

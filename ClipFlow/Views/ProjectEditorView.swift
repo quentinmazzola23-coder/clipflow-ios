@@ -578,6 +578,17 @@ struct ProjectEditorView: View {
                         touch()
                     }
                 ))
+                // Flux optique : désactivé par défaut. Activé, il FABRIQUE les
+                // images intermédiaires (mouvement plus fluide) et peut donc
+                // fabriquer des artefacts ; désactivé, chaque image du ralenti
+                // est une vraie image du rush, répétée.
+                Toggle("Flux optique (fluide, peut créer des artefacts)", isOn: Binding(
+                    get: { project.opticalFlowEnabled },
+                    set: { newValue in
+                        project.opticalFlowEnabled = newValue
+                        touch()
+                    }
+                ))
                 Button {
                     showReleaseConfirm = true
                 } label: {

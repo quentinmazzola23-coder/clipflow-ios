@@ -19,6 +19,7 @@ enum AppSettings {
         static let touchCenter = "settings.touchAnchorIsCenter"
         static let autoExport = "settings.autoExportOnValidate"
         static let previewLight = "settings.previewLight"
+        static let opticalFlow = "settings.opticalFlowEnabled"
     }
 
     /// Applique les réglages globaux au projet (ouverture, création).
@@ -35,6 +36,9 @@ enum AppSettings {
         if let light = defaults.object(forKey: Key.previewLight) as? Bool {
             project.previewLight = light
         }
+        if let flow = defaults.object(forKey: Key.opticalFlow) as? Bool {
+            project.opticalFlowEnabled = flow
+        }
     }
 
     /// Capture les réglages du projet comme nouveaux réglages globaux
@@ -44,5 +48,6 @@ enum AppSettings {
         defaults.set(project.touchAnchorIsCenter, forKey: Key.touchCenter)
         defaults.set(project.autoExportOnValidate, forKey: Key.autoExport)
         defaults.set(project.previewLight, forKey: Key.previewLight)
+        defaults.set(project.opticalFlowEnabled, forKey: Key.opticalFlow)
     }
 }

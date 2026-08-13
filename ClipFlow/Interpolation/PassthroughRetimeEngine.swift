@@ -2,12 +2,13 @@
 //  PassthroughRetimeEngine.swift
 //  ClipFlow
 //
-//  Moteur de secours HONNÊTE : ne fait AUCUNE interpolation. Pour chaque phase,
-//  duplique l'image source la plus proche. Nommé explicitement pour que
-//  l'utilisateur sache qu'il n'obtient pas de flux optique.
+//  Moteur HONNÊTE : ne fait AUCUNE interpolation. Pour chaque phase, duplique
+//  l'image source la plus proche.
 //
-//  Utilisé uniquement quand VideoToolbox n'est pas disponible, ou choisi
-//  volontairement pour un aperçu rapide.
+//  C'est le mode PAR DÉFAUT depuis que le flux optique s'est révélé capable de
+//  fabriquer des artefacts visibles sur du contenu réel : aucun pixel n'est
+//  inventé ici, donc aucun artefact ne peut naître du rendu. Le mouvement est
+//  plus saccadé — compromis assumé, réversible dans le menu ⋯.
 //
 
 import Foundation
@@ -16,7 +17,7 @@ import CoreMedia
 
 final class PassthroughRetimeEngine: FrameInterpolationEngine {
 
-    let displayName = "Rapide — sans interpolation avancée"
+    let displayName = "Images réelles répétées (sans interpolation)"
 
     var sourcePixelBufferAttributes: [String: Any]? { nil }
 
