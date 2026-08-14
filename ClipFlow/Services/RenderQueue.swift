@@ -330,11 +330,13 @@ final class RenderQueueController {
                 if result.failsafeOverrides > 0 {
                     corrected += ", \(result.failsafeOverrides) rejet(s) neutralisé(s) par le disjoncteur"
                 }
-                // Sans flux optique, les images répétées sont le principe même
-                // du rendu — les signaler comme un défaut serait un faux
-                // avertissement. Elles ne sont anormales qu'avec le flux
-                // optique actif (elles trahissent alors un clip figé).
-                if result.duplicatePairs > 0, project.opticalFlowEnabled {
+                // Les images répétées sont le PRINCIPE du rendu sans
+                // interpolation : les signaler serait un faux avertissement.
+                // Elles ne sont anormales que si le clip livré a réellement
+                // été interpolé (elles trahissent alors un clip figé) — donc
+                // ni quand le flux optique est éteint, NI après un repli.
+                let interpolationDelivered = project.opticalFlowEnabled && !result.opticalFlowRejected
+                if result.duplicatePairs > 0, interpolationDelivered {
                     corrected += ", ⚠️ \(result.duplicatePairs) paire(s) d'images identiques"
                 }
                 // REJET DU FLUX OPTIQUE : donnée décisive pour savoir si ce
@@ -349,15 +351,19 @@ final class RenderQueueController {
                         + "attachement colorimétrique (étiquetées 709 par défaut)"
                 }
                 // Jamais « contrôle OK » quand des images aberrantes sont
-                // livrées : c'est la phrase qui transformerait un échec de
-                // réparation en preuve d'innocence.
+                // livrées. Mais sans interpolation, aucun pixel n'est
+                // inventé : ce qui reste vient de la SOURCE, et l'annoncer
+                // comme un artefact serait mensonger dans l'autre sens.
+                let measurement = String(format: " (écart max %.0f sur %d tuile(s))",
+                                         result.maxOutputAnomaly, result.maxDeviatingTiles)
                 if result.artifactFrames.isEmpty {
-                    corrected += String(format: ", contrôle image par image OK (écart max %.0f)",
-                                        result.maxOutputAnomaly)
+                    corrected += ", contrôle image par image OK" + measurement
                 } else {
                     let indices = result.artifactFrames.prefix(8).map(String.init).joined(separator: ", ")
-                    corrected += ", ⚠️ image(s) aberrante(s) LIVRÉE(S) aux indices \(indices)"
-                        + String(format: " (écart max %.0f)", result.maxOutputAnomaly)
+                    corrected += interpolationDelivered
+                        ? ", ⚠️ image(s) aberrante(s) LIVRÉE(S) aux indices \(indices)" + measurement
+                        : ", variation forte aux indices \(indices) — contenu source, rien d'inventé"
+                            + measurement
                 }
                 if result.uncheckedInterpolatedFrames > 0 {
                     corrected += ", \(result.uncheckedInterpolatedFrames) non contrôlée(s)"

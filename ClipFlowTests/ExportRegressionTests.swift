@@ -516,6 +516,16 @@ struct DetectorAcceptanceTests {
         )
         #expect(score > VideoRenderPipeline.outputAnomalyThreshold,
                 "Flash couvrant \(coverage * 100) % non détecté (score \(score))")
+
+        // Et il doit franchir le VERDICT complet, pas seulement le seuil par
+        // tuile : étendu (beaucoup de tuiles) ou extrême (saturation).
+        let detail = VideoRenderPipeline.anomalyDetail(
+            previous: reference, candidate: candidate, next: reference, spread: nil
+        )
+        #expect(VideoRenderPipeline.isAnomalous(score: detail.score,
+                                                deviatingTiles: detail.deviatingTiles),
+                "Flash de \(coverage * 100) % non retenu : score \(detail.score), "
+                + "\(detail.deviatingTiles) tuile(s)")
     }
 
     /// Symétrique : un trou NOIR localisé, que seul le minimum par tuile voit.
@@ -621,5 +631,70 @@ struct AdaptiveToleranceTests {
             left: uniform(100), right: uniform(105), candidate: uniform(250), spread: spread
         )
         #expect(score > VideoRenderPipeline.outputAnomalyThreshold)
+    }
+}
+
+/// VERDICT : étendu OU extrême — calibré sur rush réel, pas au jugé.
+///
+/// Le critère « une seule tuile dépasse le seuil » condamnait une image sur
+/// quatre d'un export SANS interpolation (mesuré le 14/08/2026 : indices 23,
+/// 24, 27, 28, 31, 32, 39, 40, écart max 68, espacement de 4 = frontières
+/// d'images source). Sans un pixel inventé, ces images ne pouvaient PAS être
+/// des artefacts : c'étaient des bords d'objets traversant des tuiles.
+struct AnomalyVerdictTests {
+
+    private func tiles(_ values: [Int: Double], base: Double) -> VideoRenderPipeline.FrameSignature {
+        let count = VideoRenderPipeline.outputGrid * VideoRenderPipeline.outputGrid
+        var array = Array(repeating: base, count: count)
+        for (index, value) in values where index < count { array[index] = value }
+        return VideoRenderPipeline.FrameSignature(
+            luma: array, lumaMax: array, lumaMin: array,
+            cb: Array(repeating: 128, count: count),
+            cbMax: Array(repeating: 128, count: count),
+            cbMin: Array(repeating: 128, count: count),
+            cr: Array(repeating: 128, count: count),
+            crMax: Array(repeating: 128, count: count),
+            crMin: Array(repeating: 128, count: count)
+        )
+    }
+
+    /// LE CAS MESURÉ : deux tuiles qui sautent de 68 niveaux — un bord en
+    /// mouvement. Ne doit PAS écarter le flux optique.
+    @Test func movingEdgeIsNotAnAnomaly() {
+        let calm = tiles([:], base: 100)
+        let edge = tiles([40: 176, 41: 176], base: 100)   // 176 - (100+8) = 68
+        let detail = VideoRenderPipeline.anomalyDetail(
+            previous: calm, candidate: edge, next: calm, spread: nil
+        )
+        #expect(detail.score > 60, "Le dépassement mesuré doit bien être vu…")
+        #expect(!VideoRenderPipeline.isAnomalous(score: detail.score,
+                                                 deviatingTiles: detail.deviatingTiles),
+                "…mais ne pas condamner l'image (score \(detail.score), \(detail.deviatingTiles) tuiles)")
+    }
+
+    /// Flash ÉTENDU d'amplitude pourtant modérée : condamné par le nombre.
+    @Test func widespreadDeviationIsAnAnomaly() {
+        let calm = tiles([:], base: 100)
+        var spread: [Int: Double] = [:]
+        for index in 0..<VideoRenderPipeline.outputMinDeviatingTiles { spread[index] = 150 }
+        let flashed = tiles(spread, base: 100)
+        let detail = VideoRenderPipeline.anomalyDetail(
+            previous: calm, candidate: flashed, next: calm, spread: nil
+        )
+        #expect(VideoRenderPipeline.isAnomalous(score: detail.score,
+                                                deviatingTiles: detail.deviatingTiles))
+    }
+
+    /// Flash MINUSCULE mais saturant : une seule tuile suffit si l'amplitude
+    /// est extrême. C'est ce qui préserve la détection d'un flash de 0,1 %.
+    @Test func singleExtremeTileIsAnAnomaly() {
+        let calm = tiles([:], base: 90)
+        let flashed = tiles([120: 250], base: 90)   // 250 - 98 = 152 > 120
+        let detail = VideoRenderPipeline.anomalyDetail(
+            previous: calm, candidate: flashed, next: calm, spread: nil
+        )
+        #expect(detail.deviatingTiles == 1)
+        #expect(VideoRenderPipeline.isAnomalous(score: detail.score,
+                                                deviatingTiles: detail.deviatingTiles))
     }
 }

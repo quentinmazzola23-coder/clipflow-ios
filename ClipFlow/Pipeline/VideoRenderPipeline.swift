@@ -78,6 +78,10 @@ struct RenderResult: Sendable {
     /// Écart maximal hors enveloppe mesuré sur le fichier produit (toutes
     /// composantes) — instrumentation du seuil sur contenu réel.
     var maxOutputAnomaly: Double
+    /// Plus grand nombre de TUILES déviantes sur une même image : c'est ce
+    /// chiffre qui sépare un artefact étendu d'un bord d'objet local.
+    /// Instrumentation indispensable au calibrage sur rush réel.
+    var maxDeviatingTiles: Int = 0
     /// Anomalies SUBSISTANTES = présentes dans la source (changement
     /// d'exposition brutal filmé par l'iPhone), pas fabriquées par le rendu.
     var sourceAnomalyFrames: Int = 0
@@ -644,7 +648,7 @@ final class VideoRenderPipeline {
         }
 
         // --- Vérification du fichier produit. ---
-        let (verifiedDuration, verifiedCount, duplicatePairs, anomalies, maxAnomaly) =
+        let (verifiedDuration, verifiedCount, duplicatePairs, anomalies, maxAnomaly, maxDeviatingTiles) =
             try await verify(outputURL: outputURL)
         guard verifiedCount == expectedFrames else {
             throw RenderError.verificationFailed(expected: expectedFrames, actual: verifiedCount)
@@ -676,6 +680,7 @@ final class VideoRenderPipeline {
             sourceIntervalInfo: sourceIntervalInfo,
             artifactFrames: anomalies,
             maxOutputAnomaly: maxAnomaly,
+            maxDeviatingTiles: maxDeviatingTiles,
             untaggedInterpolatedFrames: untaggedInterpolatedFrames
         )
     }
@@ -942,11 +947,24 @@ final class VideoRenderPipeline {
     /// Resserrée : elle s'applique désormais aux EXTRÊMES, beaucoup plus
     /// stables qu'une moyenne d'une image à l'autre.
     static let outputEnvelopeMargin: Double = 8
-    /// Dépassement au-delà duquel l'image est déclarée aberrante.
-    /// ⚠️ Valeur de DÉPART, à calibrer sur des clips connus sains (flux
-    /// optique éteint) : le seuil doit être posé au-dessus du bruit mesuré,
-    /// jamais au jugé.
+    /// Dépassement au-delà duquel une TUILE est comptée comme déviante.
     static let outputAnomalyThreshold: Double = 6
+    /// Amplitude qu'une SEULE tuile suffit à rendre coupable : un flash, même
+    /// minuscule, sature la tuile qu'il touche (150 niveaux et plus). Un bord
+    /// d'objet qui traverse une tuile, non — mesuré sur rush réel : 68.
+    static let outputExtremeThreshold: Double = 120
+    /// Nombre de tuiles déviantes à partir duquel l'anomalie est jugée
+    /// ÉTENDUE, donc réelle, quelle que soit son amplitude.
+    ///
+    /// CALIBRÉ SUR RUSH RÉEL (14/08/2026). Le critère « une seule tuile
+    /// dépasse » condamnait une image sur quatre d'un rendu SANS
+    /// interpolation — donc sans un pixel inventé : indices espacés de 4,
+    /// exactement les frontières d'images source. En mouvement, un bord qui
+    /// traverse une tuile la fait sauter de 60 à 80 niveaux ; aucune
+    /// statistique temporelle ne distingue cela d'un flash de même amplitude.
+    /// Ce qui les sépare vraiment : un flash est ÉTENDU (beaucoup de tuiles)
+    /// ou EXTRÊME (saturation) ; un bord est local et modéré.
+    static var outputMinDeviatingTiles: Int { max(4, outputGrid * outputGrid / 50) }
     /// Nombre minimal d'échantillons par plan et par axe. À 0,05 % des pixels,
     /// l'ancien échantillonnage pouvait manquer un artefact entier.
     static let signatureSamplesPerAxis = 1024
@@ -1091,6 +1109,51 @@ final class VideoRenderPipeline {
             worst(previous.crMax, candidate.crMax, next.crMax, spread?.crMax),
             worst(previous.crMin, candidate.crMin, next.crMin, spread?.crMin),
         ].max() ?? 0
+    }
+
+    /// Verdict complet : amplitude du pire dépassement ET nombre de TUILES
+    /// déviantes. C'est le second chiffre qui sépare un artefact d'un simple
+    /// bord d'objet en mouvement (voir `outputMinDeviatingTiles`).
+    static func anomalyDetail(previous: FrameSignature,
+                              candidate: FrameSignature,
+                              next: FrameSignature,
+                              spread: FrameSignature?) -> (score: Double, deviatingTiles: Int) {
+        var worstScore: Double = 0
+        // Une tuile compte UNE fois, même si plusieurs composantes dévient.
+        var deviating = Set<Int>()
+
+        func scan(_ p: [Double], _ c: [Double], _ n: [Double], _ s: [Double]?) {
+            guard p.count == c.count, n.count == c.count else { return }
+            for index in 0..<c.count {
+                let tolerance = outputEnvelopeMargin + ((s?.count == c.count) ? s![index] : 0)
+                let low = min(p[index], n[index]) - tolerance
+                let high = max(p[index], n[index]) + tolerance
+                var overshoot: Double = 0
+                if c[index] < low { overshoot = low - c[index] }
+                else if c[index] > high { overshoot = c[index] - high }
+                guard overshoot > 0 else { continue }
+                worstScore = max(worstScore, overshoot)
+                if overshoot > outputAnomalyThreshold { deviating.insert(index) }
+            }
+        }
+
+        scan(previous.luma, candidate.luma, next.luma, spread?.luma)
+        scan(previous.lumaMax, candidate.lumaMax, next.lumaMax, spread?.lumaMax)
+        scan(previous.lumaMin, candidate.lumaMin, next.lumaMin, spread?.lumaMin)
+        scan(previous.cb, candidate.cb, next.cb, spread?.cb)
+        scan(previous.cbMax, candidate.cbMax, next.cbMax, spread?.cbMax)
+        scan(previous.cbMin, candidate.cbMin, next.cbMin, spread?.cbMin)
+        scan(previous.cr, candidate.cr, next.cr, spread?.cr)
+        scan(previous.crMax, candidate.crMax, next.crMax, spread?.crMax)
+        scan(previous.crMin, candidate.crMin, next.crMin, spread?.crMin)
+
+        return (worstScore, deviating.count)
+    }
+
+    /// L'image est-elle ABERRANTE ? Étendue OU extrême — jamais « une tuile a
+    /// bougé un peu plus que ses voisines ».
+    static func isAnomalous(score: Double, deviatingTiles: Int) -> Bool {
+        score > outputExtremeThreshold || deviatingTiles >= outputMinDeviatingTiles
     }
 
     /// Amplitude de variation des images de RÉFÉRENCE, tuile par tuile et
@@ -1249,7 +1312,8 @@ final class VideoRenderPipeline {
     /// qui voit ce que l'encodeur a réellement écrit — images interpolées ET
     /// copiées, flashs blancs ET colorés.
     static func verify(outputURL: URL) async throws
-        -> (duration: Double, frameCount: Int, duplicatePairs: Int, anomalies: [Int], maxAnomaly: Double) {
+        -> (duration: Double, frameCount: Int, duplicatePairs: Int,
+            anomalies: [Int], maxAnomaly: Double, maxDeviatingTiles: Int) {
         let asset = AVURLAsset(url: outputURL)
         let duration = try await asset.load(.duration)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
@@ -1296,6 +1360,7 @@ final class VideoRenderPipeline {
 
         var anomalies: [Int] = []
         var maxAnomaly: Double = 0
+        var maxDeviatingTiles = 0
         let radius = referenceRadius
 
         for index in 0..<signatures.count {
@@ -1305,27 +1370,37 @@ final class VideoRenderPipeline {
             let right = ((index + 1)..<min(signatures.count, index + 1 + radius)).compactMap { signatures[$0] }
 
             let score: Double
+            let deviatingTiles: Int
             if let leftMedian = medianSignature(of: left), let rightMedian = medianSignature(of: right) {
                 // Tolérance adaptée à l'agitation RÉELLE du voisinage.
                 let spread = spreadSignature(of: left + right)
-                score = medianEnvelopeScore(left: leftMedian, right: rightMedian,
-                                            candidate: candidate, spread: spread)
+                let detail = anomalyDetail(previous: leftMedian, candidate: candidate,
+                                           next: rightMedian, spread: spread)
+                score = detail.score
+                deviatingTiles = detail.deviatingTiles
             } else if right.count >= 2 {
                 // Tout début du clip : extrapolation depuis la suite.
                 score = edgeAnomalyScore(neighbour: right[0], secondNeighbour: right[1], candidate: candidate)
+                deviatingTiles = 0
             } else if left.count >= 2 {
                 // Toute fin du clip : extrapolation depuis ce qui précède.
                 score = edgeAnomalyScore(neighbour: left[left.count - 1],
                                          secondNeighbour: left[left.count - 2],
                                          candidate: candidate)
+                deviatingTiles = 0
             } else {
                 continue
             }
 
             maxAnomaly = max(maxAnomaly, score)
-            if score > outputAnomalyThreshold { anomalies.append(index) }
+            maxDeviatingTiles = max(maxDeviatingTiles, deviatingTiles)
+            // Les bords du clip n'ont pas de compte de tuiles fiable
+            // (extrapolation) : seule l'amplitude extrême les condamne.
+            if isAnomalous(score: score, deviatingTiles: deviatingTiles) {
+                anomalies.append(index)
+            }
         }
 
-        return (duration.seconds, count, duplicatePairs, anomalies, maxAnomaly)
+        return (duration.seconds, count, duplicatePairs, anomalies, maxAnomaly, maxDeviatingTiles)
     }
 }
