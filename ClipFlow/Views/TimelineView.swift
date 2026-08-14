@@ -49,6 +49,8 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
     // Configuration.
     var segments: [TimelineSegment] = [] { didSet { if segments != oldValue { rebuild() } } }
     var overlays: [TimelineOverlay] = [] { didSet { if overlays != oldValue { layoutOverlays() } } }
+    /// Moments forts repérés, en temps GLOBAL de la timeline.
+    var markers: [Double] = [] { didSet { if markers != oldValue { layoutMarkers() } } }
 
     // Rappels vers SwiftUI.
     var onScrub: ((Double) -> Void)?
@@ -70,6 +72,7 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
     private var separatorLayers: [CALayer] = []
     private var labelLayers: [CATextLayer] = []
     private var overlayLayers: [CALayer] = []
+    private var markerLayers: [CALayer] = []
     private var rulerLayers: [CALayer] = []
     private let playheadLayer = CALayer()
 
@@ -139,6 +142,7 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
         updateVisibleTiles()
         layoutSeparators()
         layoutRuler()
+        layoutMarkers()
         layoutOverlays()
     }
 
@@ -430,6 +434,31 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
         }
     }
 
+    // MARK: Moments forts repérés
+
+    /// Repère discret : une pastille en haut de la piste. Volontairement
+    /// distinct des surlignages de sélection (jaune) et de passage validé
+    /// (vert) — c'est une PROPOSITION, pas un état du montage.
+    private func layoutMarkers() {
+        markerLayers.forEach { $0.removeFromSuperlayer() }
+        markerLayers.removeAll()
+        guard bounds.width > 0 else { return }
+        for time in markers {
+            let dot = CALayer()
+            dot.backgroundColor = UIColor.systemOrange.cgColor
+            dot.frame = CGRect(x: x(forTime: time) - 3, y: 16, width: 6, height: 6)
+            dot.cornerRadius = 3
+            contentView.layer.addSublayer(dot)
+            markerLayers.append(dot)
+
+            let stem = CALayer()
+            stem.backgroundColor = UIColor.systemOrange.withAlphaComponent(0.35).cgColor
+            stem.frame = CGRect(x: x(forTime: time) - 0.5, y: 22, width: 1, height: max(bounds.height - 22, 0))
+            contentView.layer.addSublayer(stem)
+            markerLayers.append(stem)
+        }
+    }
+
     // MARK: Surlignages (sélection, passages validés)
 
     private func layoutOverlays() {
@@ -578,6 +607,8 @@ struct ProgrammaticSeek: Equatable {
 struct TimelineView: UIViewRepresentable {
     var segments: [TimelineSegment]
     var overlays: [TimelineOverlay]
+    /// Moments forts repérés, en temps global.
+    var markers: [Double] = []
     /// Positionnement demandé de l'extérieur (boutons rush précédent/suivant...).
     var seek: ProgrammaticSeek?
 
@@ -604,6 +635,7 @@ struct TimelineView: UIViewRepresentable {
     func updateUIView(_ view: TimelineUIView, context: Context) {
         view.segments = segments
         view.overlays = overlays
+        view.markers = markers
         view.onScrub = onScrub
         view.onTap = onTap
         view.onSelectionDrag = onSelectionDrag

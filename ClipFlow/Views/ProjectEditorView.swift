@@ -19,6 +19,11 @@ struct ProjectEditorView: View {
 
     // Importation — service partagé (survit à la navigation).
     @State private var pickerItems: [PhotosPickerItem] = []
+    /// Moments forts repérés, par identité de rush (clé du cache disque).
+    @State private var motionPeaks: [String: [MotionPeak]] = [:]
+    /// Rush en cours d'analyse — l'interface doit le dire, l'analyse dure.
+    @State private var analyzingRushKey: String?
+    @State private var analysisTask: Task<Void, Never>?
     /// Présentation programmatique du sélecteur Photos (bouton +, illustration
     /// centrale, et ouverture AUTOMATIQUE à l'arrivée dans un projet vide).
     @State private var showPicker = false
@@ -94,6 +99,102 @@ struct ProjectEditorView: View {
         segments.first(where: { $0.rushIndex == rushIndex })?.startOffset ?? 0
     }
 
+    // MARK: - Moments forts
+
+    /// Identité stable d'un rush pour le cache d'analyse — la même que celle
+    /// du cache de vignettes (jamais l'index : un réordonnancement mélangerait
+    /// les résultats entre rushes).
+    private func motionKey(for rush: Rush) -> String {
+        rush.localSourceRelativePath ?? rush.originalFilename
+    }
+
+    /// Marqueurs de TOUS les rushes analysés, convertis en temps global.
+    private var globalMarkers: [Double] {
+        var result: [Double] = []
+        for (index, rush) in project.orderedRushes.enumerated() {
+            guard let peaks = motionPeaks[motionKey(for: rush)] else { continue }
+            let start = segmentStart(rushIndex: index)
+            result.append(contentsOf: peaks.map { start + $0.time })
+        }
+        return result
+    }
+
+    /// Charge les moments déjà calculés (cache disque) sans rien analyser.
+    private func loadCachedPeaks() {
+        let spacing = fixedSourceDuration.seconds
+        for rush in project.orderedRushes {
+            let key = motionKey(for: rush)
+            guard motionPeaks[key] == nil,
+                  let cached = MotionPeakStore.peaks(key: key, spacing: spacing) else { continue }
+            motionPeaks[key] = cached
+        }
+    }
+
+    /// Analyse le rush sous la tête de lecture.
+    ///
+    /// Un rush à la fois, volontairement : l'analyse décode la vidéo et se
+    /// dispute le décodeur avec la lecture. En analyser plusieurs en parallèle
+    /// les priverait mutuellement — leçon déjà payée sur le banc d'essai.
+    private func analyzeCurrentRush() {
+        guard let rush = currentRush,
+              let path = rush.localSourceRelativePath else {
+            errorMessage = "Ce rush n'a plus sa copie locale — analyse impossible."
+            return
+        }
+        let key = motionKey(for: rush)
+        guard analyzingRushKey == nil else { return }
+
+        let url = StorageManager.url(forSourceRelativePath: path)
+        let spacing = fixedSourceDuration.seconds
+        analyzingRushKey = key
+        analysisTask = Task {
+            defer { analyzingRushKey = nil }
+            do {
+                let samples = try await Task.detached(priority: .userInitiated) {
+                    try await MotionAnalyzer.samples(for: url)
+                }.value
+                let peaks = MotionAnalyzer.peaks(from: samples, minimumSpacing: spacing)
+                guard !Task.isCancelled else { return }
+                motionPeaks[key] = peaks
+                MotionPeakStore.save(peaks, key: key, spacing: spacing)
+                if peaks.isEmpty {
+                    errorMessage = "Aucun moment ne se détache nettement dans ce rush : le mouvement y est régulier."
+                }
+            } catch is CancellationError {
+                // Abandon volontaire : rien à signaler.
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Efface les repères du projet (mémoire ET cache disque).
+    private func clearMotionPeaks() {
+        for rush in project.orderedRushes {
+            MotionPeakStore.clear(key: motionKey(for: rush))
+        }
+        motionPeaks.removeAll()
+    }
+
+    /// Amène la tête de lecture au prochain moment fort (tous rushes confondus).
+    private func jumpToNextPeak() {
+        let markers = globalMarkers.sorted()
+        guard !markers.isEmpty else { return }
+        // Bouclage : après le dernier, on revient au premier.
+        let target = markers.first(where: { $0 > playhead + 0.05 }) ?? markers[0]
+        playhead = target
+        seekCounter += 1
+        seek = ProgrammaticSeek(token: seekCounter, time: target)
+        if let index = rushIndex(atGlobalTime: target) {
+            let rushes = project.orderedRushes
+            if index < rushes.count {
+                playback.load(rush: rushes[index])
+                playback.seek(to: CMTime(seconds: target - segmentStart(rushIndex: index),
+                                         preferredTimescale: 600))
+            }
+        }
+    }
+
     private func rushIndex(atGlobalTime time: Double) -> Int? {
         segments.last(where: { $0.startOffset <= time })?.rushIndex
     }
@@ -147,6 +248,7 @@ struct ProjectEditorView: View {
                 TimelineView(
                     segments: segments,
                     overlays: overlays,
+                    markers: globalMarkers,
                     seek: seek,
                     onScrub: handleScrub,
                     onTap: handleTap,
@@ -278,14 +380,19 @@ struct ProjectEditorView: View {
             // s'ouvre de lui-même — zéro tap entre « Nouveau projet » et le
             // choix des rushes. Une seule fois par apparition, jamais pendant
             // une importation en cours.
+            // Repères déjà calculés : rétablis sans rien réanalyser.
+            loadCachedPeaks()
             if !autoPickerLaunched && project.rushes.isEmpty && importer.progress == nil {
                 autoPickerLaunched = true
                 showPicker = true
             }
         }
         .onDisappear {
-            // Retour à la liste des projets : la lecture s'arrête toujours.
+            // Retour à la liste des projets : la lecture s'arrête toujours,
+            // et une analyse en cours n'a plus de destinataire.
             playback.pause()
+            analysisTask?.cancel()
+            analysisTask = nil
         }
     }
 
@@ -602,6 +709,27 @@ struct ProjectEditorView: View {
                         touch()
                     }
                 ))
+                // MOMENTS FORTS — proposition, jamais décision : l'app repère
+                // où ça bouge plus que d'habitude, le choix reste à l'œil.
+                Button {
+                    analyzeCurrentRush()
+                } label: {
+                    Label(analyzingRushKey == nil ? "Repérer les moments forts (ce rush)" : "Analyse en cours…",
+                          systemImage: "waveform.badge.magnifyingglass")
+                }
+                .disabled(analyzingRushKey != nil || currentRush == nil)
+                if !globalMarkers.isEmpty {
+                    Button {
+                        jumpToNextPeak()
+                    } label: {
+                        Label("Aller au moment suivant (\(globalMarkers.count))", systemImage: "forward.end.alt")
+                    }
+                    Button(role: .destructive) {
+                        clearMotionPeaks()
+                    } label: {
+                        Label("Effacer les repères", systemImage: "xmark.circle")
+                    }
+                }
                 Button {
                     showReleaseConfirm = true
                 } label: {
