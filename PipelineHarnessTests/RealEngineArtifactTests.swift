@@ -313,21 +313,31 @@ struct RealEngineArtifactTests {
                 "Flux optique écarté sur un panoramique régulier : \(result.rejectedArtifactFrames) image(s) aberrante(s) — seuil trop serré ?")
     }
 
-    /// LIMITE LEVÉE — mesurée, puis corrigée.
+    /// LIMITE CONNUE ET ASSUMÉE — mesurée, pas supposée.
     ///
-    /// Une texture périodique qui s'aliase (damier se ré-alignant toutes les
-    /// deux images source) inverse RÉELLEMENT d'une image à l'autre. Avec une
-    /// tolérance fixe, le détecteur y voyait des flashs et signalait une image
-    /// sur huit — soit exactement la période du motif — sur un rendu sans un
-    /// seul pixel inventé.
+    /// Un damier plein cadre qui s'aliase (ré-alignement toutes les deux
+    /// images source) inverse RÉELLEMENT d'une image à l'autre, sur TOUTES les
+    /// tuiles à la fois. Il coche donc le critère « anomalie étendue », et
+    /// aucune statistique temporelle ne peut l'en distinguer : de son point de
+    /// vue, l'image entière a changé sans que ses voisines l'annoncent — la
+    /// définition même d'un flash.
     ///
-    /// La tolérance adaptée à l'agitation locale a supprimé cette confusion :
-    /// un voisinage qui oscille de 175 niveaux rend une oscillation de 175
-    /// niveaux ordinaire. Ce test verrouille l'acquis.
-    @Test func aliasingIsNoLongerConfusedWithFlash() async throws {
+    /// Historique honnête : une tolérance fondée sur l'AMPLITUDE TOTALE des
+    /// références absorbait ce cas, mais rendait aussi le détecteur aveugle au
+    /// vrai flash (celui-ci occupe jusqu'à 30 % de la fenêtre et gonflait sa
+    /// propre tolérance). L'écart médian robuste a rétabli la détection du
+    /// flash et ramené cette confusion. Choix assumé : mieux vaut un repli
+    /// injustifié sur une mire qu'un flash livré sur un vrai rush.
+    ///
+    /// Conséquence pour l'utilisateur : sur un contenu périodique plein cadre
+    /// et très rapide (grillage, rayures, mire), le flux optique peut être
+    /// écarté sans artefact réel. Le clip reste correct, simplement rendu sans
+    /// interpolation. Le mouvement réel filmé (bords d'objets, texture) ne
+    /// déclenche PLUS ce rejet — c'est ce que valide `fastPan`.
+    @Test func aliasingRemainsAKnownLimitation() async throws {
         let result = try await renderAndScan(pattern: .aliasingCheckerboard)
-        #expect(result.artifactFrames.isEmpty,
-                "Texture périodique de nouveau prise pour des flashs : \(result.artifactFrames)")
+        #expect(!result.artifactFrames.isEmpty,
+                "Le détecteur distingue enfin aliasing et flash — limite levée, mettre ce test à jour")
     }
 
     /// Un pic d'UNE image PRÉSENT DANS LA SOURCE traverse le rendu sans flux
