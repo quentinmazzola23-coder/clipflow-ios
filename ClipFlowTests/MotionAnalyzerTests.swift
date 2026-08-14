@@ -52,10 +52,24 @@ struct MotionPeakPickingTests {
         let agitated = MotionAnalyzer.peaks(
             from: samples(count: 120, base: 45, noise: 12, peaks: [60: 95]), minimumSpacing: 0.65
         )
+        // Aucune proposition parasite de part et d'autre : c'est ce que le
+        // seuil de 0,6 laissait passer (un frisson de bruit obtenait 1,1).
+        #expect(calm.count == 1, "Propositions parasites (calme) : \(calm.map(\.time))")
+        #expect(agitated.count == 1, "Propositions parasites (agité) : \(agitated.map(\.time))")
+
         let calmScore = calm.first?.score ?? 0
         let agitatedScore = agitated.first?.score ?? 0
         #expect(calmScore > agitatedScore,
                 "Écart identique (+50) : score calme \(calmScore), agité \(agitatedScore)")
+    }
+
+    /// Du bruit SEUL, sans aucun événement : rien ne doit être proposé.
+    /// C'est la contre-épreuve directe du défaut mesuré par la CI.
+    @Test func noiseAloneYieldsNoPeak() {
+        let found = MotionAnalyzer.peaks(
+            from: samples(count: 200, base: 30, noise: 6), minimumSpacing: 0.65
+        )
+        #expect(found.isEmpty, "Le bruit seul produit des moments : \(found.map(\.score))")
     }
 
     /// Deux propositions ne doivent JAMAIS se chevaucher : elles produiraient

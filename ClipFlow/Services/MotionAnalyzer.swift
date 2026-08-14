@@ -70,9 +70,15 @@ enum MotionAnalyzer {
     /// Nombre d'échantillons de chaque côté formant la référence « régime
     /// habituel ». À 12 images/s, 18 couvrent 1,5 s de part et d'autre.
     static let referenceRadius = 18
-    /// Score minimal pour proposer un moment. 0,6 = « nettement plus agité que
-    /// d'ordinaire » sans exiger un pic spectaculaire.
-    static let minimumScore: Double = 0.6
+    /// Score minimal pour proposer un moment, en multiples de l'agitation
+    /// ORDINAIRE du voisinage.
+    ///
+    /// ⚠️ Calibré après échec du banc de tests : à 0,6, un simple frisson de
+    /// bruit (excédent 1,1 pour une agitation habituelle de 1,0) obtenait 1,1
+    /// et franchissait le seuil. Le vrai pic était bien vu — noyé parmi des
+    /// dizaines de propositions vides. Un moment doit sortir NETTEMENT du lot :
+    /// 3× l'agitation ordinaire, l'équivalent d'un écart à 3 sigma.
+    static let minimumScore: Double = 3.0
 
     // MARK: - Détection de pics (logique PURE, testable sans média)
 
@@ -109,11 +115,18 @@ enum MotionAnalyzer {
 
             let excess = samples[index].energy - baseline
             guard excess > 0 else { continue }
+
+            // MAXIMUM LOCAL STRICT. Sur une montée continue, tous les points
+            // dépassent la référence — mais un seul est le moment. Sans cette
+            // condition, un même événement produisait une grappe de candidats
+            // que seul l'espacement minimal élaguait ensuite, au hasard du
+            // classement.
+            if index > 0, samples[index].energy <= samples[index - 1].energy { continue }
+            if index + 1 < samples.count, samples[index].energy < samples[index + 1].energy { continue }
+
             scored.append(MotionPeak(time: samples[index].time, score: excess / scale))
         }
 
-        // Maxima locaux seulement : sur une montée continue, tous les points
-        // dépassent la référence, mais un seul est le moment.
         let strong = scored.filter { $0.score >= minimumScore }
         let sorted = strong.sorted { $0.score > $1.score }
 
