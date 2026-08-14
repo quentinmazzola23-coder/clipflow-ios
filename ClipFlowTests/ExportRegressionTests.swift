@@ -524,8 +524,7 @@ struct DetectorAcceptanceTests {
         )
         #expect(VideoRenderPipeline.isAnomalous(score: detail.score,
                                                 deviatingTiles: detail.deviatingTiles),
-                "Flash de \(coverage * 100) % non retenu : score \(detail.score), "
-                + "\(detail.deviatingTiles) tuile(s)")
+                "Flash de \(coverage * 100) % non retenu : score \(detail.score), \(detail.deviatingTiles) tuile(s)")
     }
 
     /// Symétrique : un trou NOIR localisé, que seul le minimum par tuile voit.
