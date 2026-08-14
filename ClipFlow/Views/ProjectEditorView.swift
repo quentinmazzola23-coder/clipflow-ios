@@ -464,13 +464,15 @@ struct ProjectEditorView: View {
             Button("Suppr. clip", role: .destructive) { deleteEditingPassage() }
                 .buttonStyle(.glass)
         } else {
-            Button("Rejeter", role: .destructive) {
-                playback.pause()
-                selectionRange = nil
-                selectionRushIndex = nil
+            // Écarter le RUSH sous le curseur, pas seulement la sélection :
+            // c'est le geste utile du triage — un rush inintéressant sort de
+            // la timeline en un appui. Ses passages déjà validés survivent
+            // (relation .nullify) et s'exportent via leurs plages cachées.
+            Button("Suppr. rush", role: .destructive) {
+                deleteRushUnderPlayhead()
             }
             .buttonStyle(.glass)
-            .disabled(selectionRange == nil)
+            .disabled(currentRush == nil)
 
             // Valide le clip PUIS purge le rush de la timeline (le clip
             // s'exporte via sa plage cachée).
@@ -932,6 +934,24 @@ struct ProjectEditorView: View {
                 RenderQueueController.shared.enqueue(passageIDs: [passage.persistentModelID])
             }
         }
+    }
+
+    /// Écarte le rush sous la tête de lecture (bouton « Suppr. rush »).
+    ///
+    /// Une sélection en cours sur ce rush n'aurait plus de support : elle est
+    /// abandonnée en même temps. Un rush dont un passage validé n'a PAS encore
+    /// sa plage cachée est conservé — sinon l'export de ce passage deviendrait
+    /// impossible, le fichier source ayant disparu.
+    private func deleteRushUnderPlayhead() {
+        guard let rush = currentRush else { return }
+        let pending = project.passages.filter { $0.rush === rush && $0.cachedRangeRelativePath == nil }
+        guard pending.isEmpty else {
+            errorMessage = "\(pending.count) passage(s) de ce rush n'ont pas encore leur plage cachée — rush conservé (leur export deviendrait impossible)."
+            return
+        }
+        selectionRange = nil
+        selectionRushIndex = nil
+        deleteRush(rush)
     }
 
     /// Purge un rush de la timeline : fichier source supprimé, entité effacée.
