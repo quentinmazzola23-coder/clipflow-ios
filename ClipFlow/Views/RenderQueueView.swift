@@ -49,6 +49,19 @@ struct RenderQueueView: View {
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
+                    // Des passages attendent, rien ne tourne, aucune pause :
+                    // état anormal. Le dire et offrir la sortie, plutôt que
+                    // laisser un « 0/N » figé sans explication.
+                    if queue.isStalled {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("File à l'arrêt alors que des passages attendent.",
+                                  systemImage: "exclamationmark.triangle")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                            Button("Relancer la file") { queue.restartIfIdle() }
+                                .font(.caption.bold())
+                        }
+                    }
                     if let summary = snapshot.lastResultSummary {
                         Text(summary).font(.caption2).foregroundStyle(.secondary)
                     }

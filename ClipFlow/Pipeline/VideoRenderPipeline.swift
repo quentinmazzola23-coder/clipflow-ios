@@ -141,6 +141,9 @@ final class VideoRenderPipeline {
                        onProgress: @escaping @Sendable (Double) -> Void) async throws -> RenderResult {
         var result = try await renderPass(job: job, onProgress: onProgress)
         guard !result.artifactFrames.isEmpty, !job.forceFastEngine else { return result }
+        // Point d'annulation AVANT la seconde passe : sans lui, « Tout annuler »
+        // devait attendre DEUX rendus complets, et la file paraissait figée.
+        try Task.checkCancellation()
 
         os_log("Repli total : %d image(s) aberrante(s) mesurée(s) sur le fichier produit",
                log: signpostLog, type: .error, result.artifactFrames.count)
@@ -1341,6 +1344,9 @@ final class VideoRenderPipeline {
         var signatures: [FrameSignature?] = []
 
         while let sample = output.copyNextSampleBuffer() {
+            // La vérification décode et analyse TOUT le fichier : sans point
+            // d'annulation, une annulation devait l'attendre en entier.
+            try Task.checkCancellation()
             guard let image = CMSampleBufferGetImageBuffer(sample) else { continue }
             count += 1
             if let tiles = tileLuma(of: image) {

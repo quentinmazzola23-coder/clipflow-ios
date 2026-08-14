@@ -87,10 +87,33 @@ final class PhotoImporter {
     /// cours, et la re-sélection est dédupliquée par identifiant PhotoKit.
     static func importSingle(_ item: PhotosPickerItem, pickOrder: Int) async throws -> ImportedRushInfo {
         let displayName = item.itemIdentifier ?? "vidéo \(pickOrder + 1)"
-        guard let transfer = try await item.loadTransferable(type: VideoFileTransfer.self) else {
+
+        // VOIE PRINCIPALE : transfert par fichier via PhotosPicker.
+        var transferredURL: URL?
+        do {
+            transferredURL = try await item.loadTransferable(type: VideoFileTransfer.self)?.url
+        } catch {
+            // `CoreTransferable.TransferableSupportError` : le picker n'a pas su
+            // fournir la vidéo (type non conforme à `.movie`, ou original
+            // absent de l'appareil). Ce n'est PAS un échec définitif — voir la
+            // voie de secours ci-dessous.
+            transferredURL = nil
+        }
+
+        // VOIE DE SECOURS : PhotoKit directement.
+        //
+        // Constaté sur une importation réelle : 9 vidéos sur 24 échouaient avec
+        // `TransferableSupportError erreur 0`, sans motif exploitable. PhotoKit
+        // accède aux mêmes fichiers avec, en plus, le TÉLÉCHARGEMENT iCloud
+        // (`isNetworkAccessAllowed`) que le picker ne déclenche pas toujours.
+        if transferredURL == nil, let identifier = item.itemIdentifier {
+            transferredURL = try? await copyViaPhotoKit(assetIdentifier: identifier)
+        }
+
+        guard let sourceURL = transferredURL else {
             throw ImportError.transferFailed(displayName)
         }
-        var info = try await extractMetadata(from: transfer.url, pickOrder: pickOrder)
+        var info = try await extractMetadata(from: sourceURL, pickOrder: pickOrder)
         info.assetIdentifier = item.itemIdentifier
         // Date de capture PHAsset si l'accès Photos en lecture est accordé.
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -101,6 +124,49 @@ final class PhotoImporter {
             }
         }
         return info
+    }
+
+    /// Copie la vidéo depuis PhotoKit vers un emplacement contrôlé par l'app,
+    /// en autorisant le téléchargement iCloud. Voie de secours quand
+    /// `loadTransferable` échoue.
+    ///
+    /// `PHAssetResourceManager.writeData` écrit l'ORIGINAL sans réencodage —
+    /// même garantie que le transfert par fichier du picker.
+    private static func copyViaPhotoKit(assetIdentifier: String) async throws -> URL {
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [assetIdentifier], options: nil)
+        guard let asset = fetch.firstObject else {
+            throw ImportError.transferFailed(assetIdentifier)
+        }
+        let resources = PHAssetResource.assetResources(for: asset)
+        // La ressource ÉDITÉE prime : c'est ce que l'utilisateur voit dans
+        // Photos (recadrage, ralenti appliqué…). L'originale sert de repli.
+        guard let resource = resources.first(where: { $0.type == .fullSizeVideo })
+                ?? resources.first(where: { $0.type == .video }) else {
+            throw ImportError.noVideoTrack
+        }
+
+        let ext = (resource.originalFilename as NSString).pathExtension
+        let destination = StorageManager.sourcesDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(ext.isEmpty ? "mov" : ext)
+
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true   // télécharge depuis iCloud si besoin
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            PHAssetResourceManager.default().writeData(
+                for: resource, toFile: destination, options: options
+            ) { error in
+                if let error {
+                    try? FileManager.default.removeItem(at: destination)
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
+        StorageManager.excludeFromBackup(destination)
+        return destination
     }
 
     /// Extraction asynchrone des métadonnées — API `load(...)` moderne d'AVFoundation.

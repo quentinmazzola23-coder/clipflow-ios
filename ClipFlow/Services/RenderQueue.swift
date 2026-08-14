@@ -184,13 +184,41 @@ final class RenderQueueController {
         Task { await activity.end(content, dismissalPolicy: .immediate) }
     }
 
+    /// Un rendu est-il RÉELLEMENT en vol ? `worker != nil` ne suffit pas :
+    /// `cancelAll` réinitialise le snapshot alors que la tâche vit encore.
+    private var workerIsAlive = false
+
     private func startIfNeeded() {
-        guard worker == nil, !userPaused, !pendingPassageIDs.isEmpty else { return }
+        guard !workerIsAlive, !userPaused, !pendingPassageIDs.isEmpty else { return }
+        workerIsAlive = true
         worker = Task { await runLoop() }
     }
 
+    /// Relance manuelle : filet quand la file affiche des passages en attente
+    /// sans rien traiter. Ne fait rien si un rendu tourne déjà.
+    func restartIfIdle() {
+        guard !workerIsAlive else { return }
+        userPaused = false
+        snapshot.isPaused = false
+        snapshot.pauseReason = nil
+        startIfNeeded()
+    }
+
+    /// La file a des passages en attente mais rien ne tourne — état anormal
+    /// que l'interface doit rendre visible plutôt que d'afficher un « 0/N »
+    /// figé sans explication.
+    var isStalled: Bool {
+        !workerIsAlive && !userPaused && !pendingPassageIDs.isEmpty
+    }
+
     private func runLoop() async {
-        guard let container else { return }
+        // Sortie AVANT le defer : le drapeau doit être rendu ici, sinon la
+        // file se croirait occupée à jamais.
+        guard let container else {
+            workerIsAlive = false
+            worker = nil
+            return
+        }
         snapshot.isRunning = true
         ThermalMonitor.shared.setRenderingActive(true)
         startActivityIfNeeded()
@@ -200,6 +228,7 @@ final class RenderQueueController {
             snapshot.currentClipNumber = 0
             ThermalMonitor.shared.setRenderingActive(false)
             worker = nil
+            workerIsAlive = false
             endActivity()
             if pendingPassageIDs.isEmpty {
                 // Rien à drainer : chaque passe de rendu ferme sa propre
