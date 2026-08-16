@@ -60,7 +60,7 @@ struct ProjectEditorView: View {
     /// Son de la prévisualisation coupé (mémorisé entre sessions).
     @AppStorage("previewMuted") private var previewMuted = false
     @State private var slowPreview = false
-    @State private var showReleaseConfirm = false
+    @State private var showCustomDuration = false
 
     private let validateHaptic = UINotificationFeedbackGenerator()
 
@@ -228,6 +228,18 @@ struct ProjectEditorView: View {
         return result
     }
 
+    /// Libellé de la durée COURANTE, quel que soit le mode.
+    private var durationLabel: String {
+        project.durationToRushEnd ? "fin du rush" : project.finalDuration.label
+    }
+
+    /// Durée source minimale exploitable : deux images du rush. En dessous,
+    /// il n'y a pas de mouvement à ralentir, juste une image figée.
+    private func minimumSourceDuration(for rush: Rush) -> CMTime {
+        let fps = rush.nominalFrameRate > 1 ? rush.nominalFrameRate : 30
+        return CMTime(value: 2, timescale: CMTimeScale(fps.rounded()))
+    }
+
     /// Durée SOURCE fixe de la sélection = durée finale × vitesse.
     private var fixedSourceDuration: CMTime {
         TimeMath.sourceDuration(
@@ -313,6 +325,19 @@ struct ProjectEditorView: View {
         .sheet(isPresented: $showExports) {
             NavigationStack { RenderQueueView(project: project) }
         }
+        .sheet(isPresented: $showCustomDuration) {
+            CustomDurationSheet(
+                initial: project.finalDuration,
+                speed: RationalSpeed(numerator: project.speedNumerator,
+                                     denominator: project.speedDenominator)
+            ) { duration in
+                // Choisir une durée exacte, c'est choisir une durée FIXE :
+                // le mode « fin du rush » ne peut pas rester actif à côté.
+                project.durationToRushEnd = false
+                project.finalDurationCentiseconds = duration.centiseconds
+                touch()
+            }
+        }
         // Sélecteur Photos unique, présentable depuis le bouton +,
         // l'illustration centrale, ou automatiquement (projet vide).
         .photosPicker(
@@ -329,25 +354,6 @@ struct ProjectEditorView: View {
             Button("OK") { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
-        }
-        .confirmationDialog(
-            "Libérer les copies sources ?",
-            isPresented: $showReleaseConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Libérer l'espace", role: .destructive) {
-                guard !RenderQueueController.shared.isBusy() else {
-                    errorMessage = "Export en cours — libération possible une fois la file terminée (un fichier en cours de lecture ne doit pas être supprimé)."
-                    return
-                }
-                let freed = MediaAvailabilityService.releaseSources(in: project)
-                try? modelContext.save()
-                rebuildSegments()
-                errorMessage = "Espace libéré : \(StorageManager.formatBytes(freed)). Les originaux restent intacts dans Photos."
-            }
-            Button("Annuler", role: .cancel) {}
-        } message: {
-            Text("Supprime les copies locales des rushes dont tous les passages sont déjà mis en cache pour l'export. Les originaux dans Photos ne sont jamais touchés. Une nouvelle sélection dans un rush libéré ne pourra plus être exportée sans réimporter la vidéo.")
         }
         .task { await retryMissingCaches() }
         .onChange(of: importer.progress?.completed) { _, _ in
@@ -459,7 +465,7 @@ struct ProjectEditorView: View {
                     .foregroundStyle(.secondary)
                 availabilityBadge(rush.availability)
             } else {
-                Text("Touchez la timeline pour créer une sélection de \(project.finalDuration.label)")
+                Text("Touchez la timeline pour créer une sélection de \(durationLabel)")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -468,7 +474,10 @@ struct ProjectEditorView: View {
                 // Position au centième RETIRÉE : la règle graduée de la
                 // timeline situe la sélection bien mieux qu'un couple de
                 // nombres, et s'adapte au zoom.
-                Text("✂︎ \(project.finalDuration.label)")
+                // En mode « fin du rush » la longueur varie d'une sélection à
+                // l'autre : afficher le réglage n'apprendrait rien, c'est la
+                // durée finale RÉELLE de ce clip qui compte.
+                Text("✂︎ \(clipDurationLabel(for: range))")
                     .font(.footnote.monospacedDigit())
                     .foregroundStyle(Theme.accent)
             }
@@ -597,30 +606,8 @@ struct ProjectEditorView: View {
         .keyboardShortcut(.return, modifiers: [])
     }
 
-    /// Pastille « clip courant / total + % » affichée dans la barre flottante
-    /// pendant que la file d'export tourne (miroir de la Live Activity).
-    @ViewBuilder
     private var exportProgressChip: some View {
-        let queue = RenderQueueController.shared.snapshot
-        if queue.isRunning {
-            HStack(spacing: 6) {
-                ZStack {
-                    Circle()
-                        .stroke(Theme.accent.opacity(0.25), lineWidth: 3)
-                    Circle()
-                        .trim(from: 0, to: max(0.02, queue.currentProgress))
-                        .stroke(Theme.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                }
-                .frame(width: 16, height: 16)
-                Text("\(queue.currentClipNumber)/\(queue.totalJobs) · \(Int(queue.currentProgress * 100)) %")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .glassEffect(.regular, in: Capsule())
-        }
+        ExportProgressChip { showExports = true }
     }
 
     private func controlBar(isLandscape: Bool) -> some View {
@@ -731,7 +718,7 @@ struct ProjectEditorView: View {
                     }
                 }
                 Button {
-                    showReleaseConfirm = true
+                    releaseSourcesNow()
                 } label: {
                     let releasable = MediaAvailabilityService.releasableSources(in: project)
                         .reduce(Int64(0)) { $0 + $1.bytes }
@@ -760,23 +747,62 @@ struct ProjectEditorView: View {
     }
 
     private var durationMenu: some View {
-        Menu("Durée finale : \(project.finalDuration.label)") {
-            ForEach(ExactDuration.presets, id: \.centiseconds) { preset in
-                Button(preset.label) {
-                    project.finalDurationCentiseconds = preset.centiseconds
-                    touch()
+        Menu("Durée finale : \(durationLabel)") {
+            // Une seule liste de modes, cochée : « jusqu'à la fin du rush » est
+            // un choix de durée comme les autres, pas une action à part.
+            Picker("Durée", selection: durationModeBinding) {
+                ForEach(ExactDuration.presets, id: \.centiseconds) { preset in
+                    Text(preset.label).tag(DurationMode.fixed(preset.centiseconds))
                 }
-            }
-            // Valeur personnalisée au centième : quelques pas rapides.
-            Menu("Personnalisée") {
-                ForEach([110, 120, 140, 160, 175, 250], id: \.self) { centiseconds in
-                    Button(ExactDuration(centiseconds: centiseconds).label) {
-                        project.finalDurationCentiseconds = centiseconds
-                        touch()
-                    }
+                // La durée personnalisée courante reste visible et cochée quand
+                // elle ne fait pas partie des valeurs types.
+                if !project.durationToRushEnd,
+                   !ExactDuration.presets.contains(where: {
+                       $0.centiseconds == project.finalDurationCentiseconds
+                   }) {
+                    Text(project.finalDuration.label)
+                        .tag(DurationMode.fixed(project.finalDurationCentiseconds))
                 }
+                Text("Jusqu'à la fin du rush").tag(DurationMode.toRushEnd)
             }
+            // Options présentées À PLAT dans le menu de durée : un Picker
+            // laissé au style par défaut ouvrirait un sous-menu de plus, soit
+            // un tap supplémentaire pour un choix fait en permanence.
+            .pickerStyle(.inline)
+            Divider()
+            Button("Durée personnalisée…") { showCustomDuration = true }
         }
+    }
+
+    /// Mode de durée courant, écrit dans les deux champs du projet.
+    private var durationModeBinding: Binding<DurationMode> {
+        Binding(
+            get: {
+                project.durationToRushEnd
+                    ? .toRushEnd
+                    : .fixed(project.finalDurationCentiseconds)
+            },
+            set: { mode in
+                switch mode {
+                case .toRushEnd:
+                    project.durationToRushEnd = true
+                case .fixed(let centiseconds):
+                    project.durationToRushEnd = false
+                    project.finalDurationCentiseconds = centiseconds
+                }
+                touch()
+            }
+        )
+    }
+
+    /// Durée finale réelle d'une plage sélectionnée, telle qu'elle sera figée
+    /// dans le passage à la validation.
+    private func clipDurationLabel(for range: CMTimeRange) -> String {
+        TimeMath.finalDuration(
+            source: range.duration,
+            speed: RationalSpeed(numerator: project.speedNumerator,
+                                 denominator: project.speedDenominator)
+        ).label
     }
 
     // MARK: - Actions timeline
@@ -870,12 +896,21 @@ struct ProjectEditorView: View {
 
         editingPassageID = nil
         do {
-            let range = try SelectionEngine.makeSelection(
-                touchTime: local,
-                sourceDuration: fixedSourceDuration,
-                rushDuration: rush.duration,
-                anchorCenter: project.touchAnchorIsCenter
-            )
+            let range: CMTimeRange
+            if project.durationToRushEnd {
+                range = try SelectionEngine.makeSelectionToEnd(
+                    touchTime: local,
+                    rushDuration: rush.duration,
+                    minimumDuration: minimumSourceDuration(for: rush)
+                )
+            } else {
+                range = try SelectionEngine.makeSelection(
+                    touchTime: local,
+                    sourceDuration: fixedSourceDuration,
+                    rushDuration: rush.duration,
+                    anchorCenter: project.touchAnchorIsCenter
+                )
+            }
             selectionRushIndex = index
             selectionRange = range
             // La sélection posée se rejoue immédiatement en boucle, jusqu'à
@@ -919,7 +954,15 @@ struct ProjectEditorView: View {
         guard let index = selectionRushIndex, let range = selectionRange else { return }
         let rush = project.orderedRushes[index]
         let delta = CMTime(seconds: deltaSeconds, preferredTimescale: 600)
-        let moved = SelectionEngine.move(range, by: delta, rushDuration: rush.duration)
+        // En mode « fin du rush », déplacer le début RACCOURCIT ou RALLONGE la
+        // sélection : sa fin reste collée au bout du rush. La déplacer à
+        // longueur constante la décollerait de la fin, ce qui contredirait le
+        // mode choisi.
+        let moved = project.durationToRushEnd
+            ? SelectionEngine.moveOpenEnd(range, by: delta,
+                                          rushDuration: rush.duration,
+                                          minimumDuration: minimumSourceDuration(for: rush))
+            : SelectionEngine.move(range, by: delta, rushDuration: rush.duration)
         selectionRange = moved
         // La boucle SUIT le doigt : relance depuis le nouveau début à chaque
         // mouvement (seeks coalescés dans le moteur — fluide, pas de tempête).
@@ -940,9 +983,18 @@ struct ProjectEditorView: View {
         let rush = project.orderedRushes[index]
         let fps = rush.nominalFrameRate > 1 ? rush.nominalFrameRate : 30
         let frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps.rounded()))
-        selectionRange = SelectionEngine.nudge(
-            range, frames: frames, frameDuration: frameDuration, rushDuration: rush.duration
-        )
+        if project.durationToRushEnd {
+            selectionRange = SelectionEngine.moveOpenEnd(
+                range,
+                by: CMTimeMultiply(frameDuration, multiplier: Int32(frames)),
+                rushDuration: rush.duration,
+                minimumDuration: minimumSourceDuration(for: rush)
+            )
+        } else {
+            selectionRange = SelectionEngine.nudge(
+                range, frames: frames, frameDuration: frameDuration, rushDuration: rush.duration
+            )
+        }
         // La boucle repart de l'emplacement ajusté, timeline recentrée.
         playSelectionLoop()
         recenterOnSelection()
@@ -970,7 +1022,15 @@ struct ProjectEditorView: View {
         passage.setStart(range.start)
         passage.sourceDurationValue = range.duration.value
         passage.sourceDurationTimescale = range.duration.timescale
-        passage.finalDurationCentiseconds = project.finalDurationCentiseconds
+        // Durée finale DÉDUITE de la plage réellement prélevée, jamais recopiée
+        // du projet : une sélection étendue « jusqu'à la fin du rush » serait
+        // sinon exportée à la durée fixe du projet, donc tronquée. Pour une
+        // sélection normale le calcul redonne exactement la valeur du projet.
+        passage.finalDurationCentiseconds = TimeMath.finalDuration(
+            source: range.duration,
+            speed: RationalSpeed(numerator: project.speedNumerator,
+                                 denominator: project.speedDenominator)
+        ).centiseconds
         passage.speedNumerator = project.speedNumerator
         passage.speedDenominator = project.speedDenominator
         // Caractéristiques source FIGÉES : le rush peut être supprimé ensuite,
@@ -998,6 +1058,17 @@ struct ProjectEditorView: View {
                   let range = selectionRange else { return }
             playback.pause()
             passage.setStart(range.start)
+            // La LONGUEUR suit elle aussi : depuis « jusqu'à la fin du rush »,
+            // rééditer un clip peut changer sa durée, pas seulement sa
+            // position. Ne recopier que le début laisserait un clip dont la
+            // boucle affichée et le fichier exporté divergent.
+            passage.sourceDurationValue = range.duration.value
+            passage.sourceDurationTimescale = range.duration.timescale
+            passage.finalDurationCentiseconds = TimeMath.finalDuration(
+                source: range.duration,
+                speed: RationalSpeed(numerator: passage.speedNumerator,
+                                     denominator: passage.speedDenominator)
+            ).centiseconds
             if let old = passage.cachedRangeRelativePath {
                 try? FileManager.default.removeItem(
                     at: StorageManager.url(forCachedRangeRelativePath: old)
@@ -1220,6 +1291,25 @@ struct ProjectEditorView: View {
         }
     }
 
+    // MARK: - Espace disque
+
+    /// Libère les copies sources SANS confirmation : l'action est explicite
+    /// (le bouton annonce déjà le nombre d'octets libérables), et les originaux
+    /// dans Photos ne sont jamais touchés — rien d'irréversible à protéger.
+    ///
+    /// Le seul garde-fou conservé est technique : supprimer un fichier pendant
+    /// qu'un rendu le lit casserait l'export en cours.
+    private func releaseSourcesNow() {
+        guard !RenderQueueController.shared.isBusy() else {
+            errorMessage = "Export en cours — libération possible une fois la file terminée (un fichier en cours de lecture ne doit pas être supprimé)."
+            return
+        }
+        let freed = MediaAvailabilityService.releaseSources(in: project)
+        try? modelContext.save()
+        rebuildSegments()
+        errorMessage = "Espace libéré : \(StorageManager.formatBytes(freed)). Les originaux restent intacts dans Photos."
+    }
+
     // MARK: - Importation
 
     /// Délégué au service partagé ImportController — la tâche survit à la
@@ -1325,4 +1415,17 @@ private struct ImportProgressBanner: View {
         .glassEffect(in: Capsule())
         .padding(.top, 8)
     }
+}
+
+// MARK: - Mode de durée
+
+/// Choix de durée d'une sélection : longueur fixe, ou « jusqu'à la fin du
+/// rush ».
+///
+/// Modélisé comme un vrai choix unique (et non un booléen à côté d'un entier)
+/// pour que le menu puisse le présenter en liste cochée : les deux options
+/// s'excluent, l'interface doit le montrer.
+enum DurationMode: Hashable {
+    case fixed(Int)     // centièmes de seconde
+    case toRushEnd
 }
