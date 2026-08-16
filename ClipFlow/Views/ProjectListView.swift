@@ -10,7 +10,12 @@ import SwiftData
 
 struct ProjectListView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \ClipProject.updatedAt, order: .reverse) private var projects: [ClipProject]
+    /// Ordre CROISSANT : le projet le plus récent se retrouve EN BAS de la
+    /// liste, là où le pouce arrive sans effort. C'est l'inverse de la
+    /// convention habituelle, et c'est délibéré — sur un iPhone 16 Pro tenu à
+    /// une main, le haut de l'écran est la zone la plus coûteuse à atteindre,
+    /// or c'est le dernier projet qu'on rouvre neuf fois sur dix.
+    @Query(sort: \ClipProject.updatedAt, order: .forward) private var projects: [ClipProject]
     @State private var showStorage = false
     /// Chemin de navigation possédé ici : « Nouveau projet » pousse
     /// directement l'éditeur du projet créé (zéro tap intermédiaire).
@@ -24,6 +29,15 @@ struct ProjectListView: View {
 
     private var listContent: some View {
         List {
+            // Informations de build : reléguées EN HAUT, la zone désormais la
+            // moins accessible — rien d'actionnable n'y reste.
+            Text("v\(BuildInfo.version) (\(BuildInfo.build)) · \(BuildInfo.stamp)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+
             ForEach(projects) { project in
                 NavigationLink(value: project.persistentModelID) {
                     HStack {
@@ -52,13 +66,12 @@ struct ProjectListView: View {
         // ScrollBounceDisabler (ci-dessous) qui l'empêche : `.basedOnSize` ne
         // couvre QUE le cas « contenu plus court que l'écran ».
         .scrollBounceBehavior(.basedOnSize)
-        // Version + horodatage de build, discrets en bas de la page.
-        .safeAreaInset(edge: .bottom) {
-            Text("v\(BuildInfo.version) (\(BuildInfo.build)) · \(BuildInfo.stamp)")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .padding(.bottom, 4)
-        }
+        // Ouverture directement en bas : le dernier projet est sous le pouce
+        // sans un seul geste de défilement.
+        .defaultScrollAnchor(.bottom)
+        // Barre d'actions BASSE : « Stockage » à gauche, « Nouveau projet » à
+        // droite — les deux boutons qui occupaient les coins hauts.
+        .safeAreaInset(edge: .bottom) { bottomActionBar }
         .overlay {
             if projects.isEmpty {
                 ContentUnavailableView(
@@ -74,39 +87,64 @@ struct ProjectListView: View {
                 ProjectEditorView(project: project)
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button {
-                    showStorage = true
-                } label: {
-                    Label("Stockage", systemImage: "internaldrive")
-                }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    createProject()
-                } label: {
-                    Label("Nouveau projet", systemImage: "plus")
-                }
-            }
-        }
         .sheet(isPresented: $showStorage) {
             NavigationStack { StorageView() }
         }
+    }
+
+    /// Les deux actions de l'écran, à portée de pouce.
+    private var bottomActionBar: some View {
+        HStack {
+            Button {
+                showStorage = true
+            } label: {
+                Image(systemName: "internaldrive")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 46, height: 46)
+                    .glassEffect(.regular.interactive(), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Stockage")
+
+            Spacer()
+
+            Button {
+                createProject()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 58, height: 58)
+                    .glassEffect(.regular.interactive(), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Nouveau projet")
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 8)
     }
 
     /// Menu ⋯ par projet — mêmes options que dans l'éditeur, accessibles
     /// sans ouvrir le projet.
     private func projectMenu(_ project: ClipProject) -> some View {
         Menu {
-            Menu("Durée finale : \(project.finalDuration.label)") {
-                ForEach(ExactDuration.presets, id: \.centiseconds) { preset in
-                    Button(preset.label) {
-                        project.finalDurationCentiseconds = preset.centiseconds
-                        try? modelContext.save()
-                        AppSettings.capture(from: project)
+            Menu("Durée finale : \(durationLabel(project))") {
+                Picker("Durée", selection: durationModeBinding(project)) {
+                    ForEach(ExactDuration.presets, id: \.centiseconds) { preset in
+                        Text(preset.label).tag(DurationMode.fixed(preset.centiseconds))
                     }
+                    if !project.durationToRushEnd,
+                       !ExactDuration.presets.contains(where: {
+                           $0.centiseconds == project.finalDurationCentiseconds
+                       }) {
+                        Text(project.finalDuration.label)
+                            .tag(DurationMode.fixed(project.finalDurationCentiseconds))
+                    }
+                    Text("Jusqu'à la fin du rush").tag(DurationMode.toRushEnd)
                 }
+                // Options à plat : pas de sous-menu supplémentaire.
+                .pickerStyle(.inline)
             }
             Toggle("Toucher = centre de la sélection", isOn: settingBinding(project, \.touchAnchorIsCenter))
             Toggle("Export automatique à la validation", isOn: settingBinding(project, \.autoExportOnValidate))
@@ -129,6 +167,33 @@ struct ProjectListView: View {
                 .foregroundStyle(.secondary)
         }
         .buttonStyle(.borderless)
+    }
+
+    private func durationLabel(_ project: ClipProject) -> String {
+        project.durationToRushEnd ? "fin du rush" : project.finalDuration.label
+    }
+
+    /// Même choix unique que dans l'éditeur : durée fixe OU fin du rush.
+    /// Le réglage est global, donc il suit le prochain projet créé.
+    private func durationModeBinding(_ project: ClipProject) -> Binding<DurationMode> {
+        Binding(
+            get: {
+                project.durationToRushEnd
+                    ? .toRushEnd
+                    : .fixed(project.finalDurationCentiseconds)
+            },
+            set: { mode in
+                switch mode {
+                case .toRushEnd:
+                    project.durationToRushEnd = true
+                case .fixed(let centiseconds):
+                    project.durationToRushEnd = false
+                    project.finalDurationCentiseconds = centiseconds
+                }
+                try? modelContext.save()
+                AppSettings.capture(from: project)
+            }
+        )
     }
 
     /// Liaison de réglage : écrit le projet ET les réglages globaux.
