@@ -57,6 +57,15 @@ final class ClipProject {
     // Paramètres de sélection / export.
     /// Durée FINALE (après ralentissement), en centièmes de seconde. 130 = 1,30 s.
     var finalDurationCentiseconds: Int = 130
+    /// Mode de durée « JUSQU'À LA FIN DU RUSH » : la sélection va du toucher
+    /// au bout du rush, sa longueur n'est plus imposée.
+    ///
+    /// C'est un choix de durée au même titre que 1,3 s, pas une action
+    /// ponctuelle : il reste actif jusqu'à ce qu'une durée fixe soit
+    /// rechoisie, et se maintient d'un projet à l'autre (AppSettings).
+    /// `finalDurationCentiseconds` conserve la dernière durée fixe retenue —
+    /// revenir en arrière ne fait rien perdre.
+    var durationToRushEnd: Bool = false
     /// Vitesse rationnelle : num/den. 1/2 = 0,5×.
     var speedNumerator: Int = 1
     var speedDenominator: Int = 2

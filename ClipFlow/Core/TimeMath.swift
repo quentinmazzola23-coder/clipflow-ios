@@ -24,8 +24,15 @@ struct ExactDuration: Hashable, Codable, Sendable {
         ExactDuration(centiseconds: 200),  // 2,0 s
     ]
 
+    /// Écriture COURTE : « 1 s », « 1,3 s », « 1,25 s ». Les zéros de fin ne
+    /// portent aucune information et allongeaient inutilement chaque entrée du
+    /// menu (« 1,00 s » pour une seconde ronde).
     var label: String {
-        String(format: "%d,%02d s", centiseconds / 100, centiseconds % 100)
+        let whole = centiseconds / 100
+        let fraction = centiseconds % 100
+        if fraction == 0 { return "\(whole) s" }
+        if fraction % 10 == 0 { return "\(whole),\(fraction / 10) s" }
+        return String(format: "%d,%02d s", whole, fraction)
     }
 }
 
@@ -54,6 +61,22 @@ enum TimeMath {
         let value = CMTimeValue(final.centiseconds * speed.numerator)
         let timescale = CMTimeScale(100 * speed.denominator)
         return reduce(CMTime(value: value, timescale: timescale))
+    }
+
+    /// Opération INVERSE de `sourceDuration` : durée finale obtenue en
+    /// ralentissant `source` à `speed`.
+    ///
+    /// Nécessaire depuis « jusqu'à la fin du rush » : la sélection n'est plus
+    /// dérivée d'une durée finale choisie, c'est la durée finale qui découle de
+    /// la longueur réellement prélevée. Calcul entier, arrondi au centième le
+    /// plus proche — exact pour toute durée produite par `sourceDuration`.
+    static func finalDuration(source: CMTime, speed: RationalSpeed) -> ExactDuration {
+        let reduced = reduce(source)
+        let denominator = Int64(reduced.timescale) * Int64(speed.numerator)
+        guard denominator > 0, reduced.value > 0 else { return ExactDuration(centiseconds: 0) }
+        let numerator = Int64(reduced.value) * Int64(speed.denominator) * 100
+        let centiseconds = (numerator + denominator / 2) / denominator
+        return ExactDuration(centiseconds: Int(max(centiseconds, 1)))
     }
 
     /// Nombre d'images de sortie pour `final` à `fps`.

@@ -14,6 +14,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="$ROOT/PipelineHarness/Sources/ClipFlowPipeline"
 
 SOURCES=(
+  "ClipFlow/Core/SelectionEngine.swift"
   "ClipFlow/Core/TimeMath.swift"
   "ClipFlow/Interpolation/FrameInterpolationEngine.swift"
   "ClipFlow/Interpolation/PassthroughRetimeEngine.swift"

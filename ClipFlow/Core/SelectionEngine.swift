@@ -51,6 +51,44 @@ enum SelectionEngine {
         return clamp(CMTimeRange(start: start, duration: sourceDuration), rushDuration: rushDuration)
     }
 
+    /// Crée une sélection allant du toucher JUSQU'À LA FIN DU RUSH.
+    ///
+    /// Mode de durée à part entière, au même titre que « 1,3 s » : ici la durée
+    /// n'est pas imposée, c'est le rush restant qui la donne. Le toucher est
+    /// toujours le DÉBUT — ancrer au centre n'aurait pas de sens pour une
+    /// sélection dont la fin est fixée d'avance.
+    ///
+    /// - Parameter minimumDuration: en dessous, il ne reste pas assez de rush
+    ///   pour produire un clip (typiquement deux images source).
+    static func makeSelectionToEnd(touchTime: CMTime,
+                                   rushDuration: CMTime,
+                                   minimumDuration: CMTime) throws -> CMTimeRange {
+        var start = touchTime
+        if CMTimeCompare(start, .zero) < 0 { start = .zero }
+        let remaining = CMTimeSubtract(rushDuration, start)
+        guard CMTimeCompare(remaining, minimumDuration) >= 0 else {
+            throw SelectionError.rushTooShort(rushDuration: remaining, required: minimumDuration)
+        }
+        return CMTimeRange(start: start, duration: remaining)
+    }
+
+    /// Déplace le DÉBUT d'une sélection « jusqu'à la fin du rush » : la fin
+    /// reste collée au bout du rush, donc la durée change avec le déplacement.
+    ///
+    /// `move` ne convient pas ici — elle conserve la durée et se contente de
+    /// glisser la fenêtre, ce qui décollerait la sélection de la fin du rush.
+    static func moveOpenEnd(_ range: CMTimeRange,
+                            by delta: CMTime,
+                            rushDuration: CMTime,
+                            minimumDuration: CMTime) -> CMTimeRange {
+        var start = CMTimeAdd(range.start, delta)
+        if CMTimeCompare(start, .zero) < 0 { start = .zero }
+        let latest = CMTimeSubtract(rushDuration, minimumDuration)
+        if CMTimeCompare(start, latest) > 0 { start = latest }
+        if CMTimeCompare(start, .zero) < 0 { start = .zero }
+        return CMTimeRange(start: start, duration: CMTimeSubtract(rushDuration, start))
+    }
+
     /// Déplace la sélection de `delta` sans changer sa durée, recalée aux bornes.
     static func move(_ range: CMTimeRange,
                      by delta: CMTime,

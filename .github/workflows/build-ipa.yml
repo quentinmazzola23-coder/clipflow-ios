@@ -148,6 +148,13 @@ jobs:
           set -o pipefail
           swift build --build-tests --package-path . 2>&1 | tail -40
 
+      # LOGIQUE PURE d'abord : durées et modes de sélection ne décodent rien,
+      # s'exécutent en une seconde, et cassent avant tout le reste si un calcul
+      # de durée a dérivé. Aucun chien de garde nécessaire.
+      - name: Logique pure (durées, modes de sélection)
+        run: |
+          swift test --package-path . --no-parallel --filter 'DurationConversionTests|OpenEndSelectionTests'
+
       # SONDE D'ABORD : elle seule répond à « le flux optique existe-t-il ici,
       # et si oui, à quelle étape ça bloque ». Sortie EN DIRECT (surtout pas de
       # redirection vers `tail`, qui masquait tout jusqu'à la fin), chien de

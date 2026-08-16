@@ -16,6 +16,7 @@ enum AppSettings {
 
     private enum Key {
         static let finalDuration = "settings.finalDurationCentiseconds"
+        static let durationToRushEnd = "settings.durationToRushEnd"
         static let touchCenter = "settings.touchAnchorIsCenter"
         static let autoExport = "settings.autoExportOnValidate"
         static let previewLight = "settings.previewLight"
@@ -27,6 +28,9 @@ enum AppSettings {
     static func apply(to project: ClipProject) {
         if let duration = defaults.object(forKey: Key.finalDuration) as? Int {
             project.finalDurationCentiseconds = duration
+        }
+        if let toEnd = defaults.object(forKey: Key.durationToRushEnd) as? Bool {
+            project.durationToRushEnd = toEnd
         }
         if let center = defaults.object(forKey: Key.touchCenter) as? Bool {
             project.touchAnchorIsCenter = center
@@ -49,6 +53,7 @@ enum AppSettings {
     /// (appelé après toute modification).
     static func capture(from project: ClipProject) {
         defaults.set(project.finalDurationCentiseconds, forKey: Key.finalDuration)
+        defaults.set(project.durationToRushEnd, forKey: Key.durationToRushEnd)
         defaults.set(project.touchAnchorIsCenter, forKey: Key.touchCenter)
         defaults.set(project.autoExportOnValidate, forKey: Key.autoExport)
         defaults.set(project.previewLight, forKey: Key.previewLight)
