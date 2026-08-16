@@ -130,6 +130,50 @@ struct ProjectListView: View {
         .padding(.bottom, 8)
     }
 
+    /// Menu ⋯ par projet — mêmes options que dans l'éditeur, accessibles
+    /// sans ouvrir le projet.
+    private func projectMenu(_ project: ClipProject) -> some View {
+        Menu {
+            Menu("Durée finale : \(durationLabel(project))") {
+                Picker("Durée", selection: durationModeBinding(project)) {
+                    ForEach(ExactDuration.presets, id: \.centiseconds) { preset in
+                        Text(preset.label).tag(DurationMode.fixed(preset.centiseconds))
+                    }
+                    if !project.durationToRushEnd,
+                       !ExactDuration.presets.contains(where: {
+                           $0.centiseconds == project.finalDurationCentiseconds
+                       }) {
+                        Text(project.finalDuration.label)
+                            .tag(DurationMode.fixed(project.finalDurationCentiseconds))
+                    }
+                    Text("Jusqu'à la fin du rush").tag(DurationMode.toRushEnd)
+                }
+                // Options à plat : pas de sous-menu supplémentaire.
+                .pickerStyle(.inline)
+            }
+            Toggle("Toucher = centre de la sélection", isOn: settingBinding(project, \.touchAnchorIsCenter))
+            Toggle("Export automatique à la validation", isOn: settingBinding(project, \.autoExportOnValidate))
+            Toggle("Aperçu léger (540p, + fluide)", isOn: settingBinding(project, \.previewLight))
+            Toggle("Flux optique (fluide, peut créer des artefacts)",
+                   isOn: settingBinding(project, \.opticalFlowEnabled))
+            Toggle("Album Photos par projet", isOn: settingBinding(project, \.albumPerProject))
+            Button {
+                guard !RenderQueueController.shared.isBusy() else { return }
+                _ = MediaAvailabilityService.releaseSources(in: project)
+                try? modelContext.save()
+            } label: {
+                let releasable = MediaAvailabilityService.releasableSources(in: project)
+                    .reduce(Int64(0)) { $0 + $1.bytes }
+                Label("Libérer l'espace (\(StorageManager.formatBytes(releasable)))",
+                      systemImage: "internaldrive")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.borderless)
+    }
+
     private func durationLabel(_ project: ClipProject) -> String {
         project.durationToRushEnd ? "fin du rush" : project.finalDuration.label
     }
