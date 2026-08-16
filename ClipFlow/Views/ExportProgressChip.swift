@@ -49,6 +49,10 @@ struct ExportProgressChip: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .glassEffect(.regular.interactive(), in: Capsule())
+            // Sans zone tactile explicite, un bouton `.plain` ne réagit que sur
+            // les glyphes eux-mêmes : ni la marge, ni le fond de verre ne sont
+            // touchables. La pastille aurait été à viser au chiffre près.
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Exports : \(queue.currentClipNumber) sur \(queue.totalJobs)")

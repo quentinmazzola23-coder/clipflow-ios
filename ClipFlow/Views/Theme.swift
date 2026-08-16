@@ -21,11 +21,14 @@ enum Theme {
 struct GlassIconButtonStyle: ButtonStyle {
     var tint: Color = .primary
     var diameter: CGFloat = 44
+    /// Taille du glyphe. Par défaut celle des boutons de transport ; un bouton
+    /// d'action principale plus large mérite un symbole à l'avenant.
+    var glyphSize: CGFloat = 17
     @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 17, weight: .medium))
+            .font(.system(size: glyphSize, weight: .medium))
             .foregroundStyle(tint)
             .frame(width: diameter, height: diameter)
             .contentShape(Circle())

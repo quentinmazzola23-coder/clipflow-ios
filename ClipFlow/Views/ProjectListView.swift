@@ -69,9 +69,9 @@ struct ProjectListView: View {
         // Ouverture directement en bas : le dernier projet est sous le pouce
         // sans un seul geste de défilement.
         .defaultScrollAnchor(.bottom)
-        // Barre d'actions BASSE : « Stockage » à gauche, « Nouveau projet » à
-        // droite — les deux boutons qui occupaient les coins hauts.
-        .safeAreaInset(edge: .bottom) { bottomActionBar }
+        // Placée AVANT la barre : posée après, cette vue se serait superposée
+        // à la barre d'actions et aurait avalé le tap sur « + » — le seul
+        // bouton utile quand justement il n'y a aucun projet.
         .overlay {
             if projects.isEmpty {
                 ContentUnavailableView(
@@ -79,8 +79,13 @@ struct ProjectListView: View {
                     systemImage: "film.stack",
                     description: Text("Créez un projet puis importez vos rushes depuis Photos.")
                 )
+                // Purement informative : elle ne doit intercepter aucun geste.
+                .allowsHitTesting(false)
             }
         }
+        // Barre d'actions BASSE : « Stockage » à gauche, « Nouveau projet » à
+        // droite — les deux boutons qui occupaient les coins hauts.
+        .safeAreaInset(edge: .bottom) { bottomActionBar }
         .navigationTitle("ClipFlow")
         .navigationDestination(for: PersistentIdentifier.self) { id in
             if let project = modelContext.model(for: id) as? ClipProject {
@@ -93,18 +98,22 @@ struct ProjectListView: View {
     }
 
     /// Les deux actions de l'écran, à portée de pouce.
+    ///
+    /// Boutons montés avec `GlassIconButtonStyle`, le style DÉJÀ utilisé
+    /// partout dans l'éditeur, et non un empilement refait à la main : c'est
+    /// lui qui pose la zone tactile (`contentShape`) en plus du verre. Sans
+    /// elle, un bouton `.plain` ne réagit que sur les traits de son glyphe —
+    /// le « + » n'était touchable que sur la croix elle-même, au milieu d'un
+    /// disque de 58 points. En barre d'outils, le système fournissait cette
+    /// zone ; en la descendant ici, il fallait la fournir soi-même.
     private var bottomActionBar: some View {
         HStack {
             Button {
                 showStorage = true
             } label: {
                 Image(systemName: "internaldrive")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 46, height: 46)
-                    .glassEffect(.regular.interactive(), in: Circle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 46))
             .accessibilityLabel("Stockage")
 
             Spacer()
@@ -113,60 +122,12 @@ struct ProjectListView: View {
                 createProject()
             } label: {
                 Image(systemName: "plus")
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(Theme.accent)
-                    .frame(width: 58, height: 58)
-                    .glassEffect(.regular.interactive(), in: Circle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(GlassIconButtonStyle(tint: Theme.accent, diameter: 58, glyphSize: 24))
             .accessibilityLabel("Nouveau projet")
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 8)
-    }
-
-    /// Menu ⋯ par projet — mêmes options que dans l'éditeur, accessibles
-    /// sans ouvrir le projet.
-    private func projectMenu(_ project: ClipProject) -> some View {
-        Menu {
-            Menu("Durée finale : \(durationLabel(project))") {
-                Picker("Durée", selection: durationModeBinding(project)) {
-                    ForEach(ExactDuration.presets, id: \.centiseconds) { preset in
-                        Text(preset.label).tag(DurationMode.fixed(preset.centiseconds))
-                    }
-                    if !project.durationToRushEnd,
-                       !ExactDuration.presets.contains(where: {
-                           $0.centiseconds == project.finalDurationCentiseconds
-                       }) {
-                        Text(project.finalDuration.label)
-                            .tag(DurationMode.fixed(project.finalDurationCentiseconds))
-                    }
-                    Text("Jusqu'à la fin du rush").tag(DurationMode.toRushEnd)
-                }
-                // Options à plat : pas de sous-menu supplémentaire.
-                .pickerStyle(.inline)
-            }
-            Toggle("Toucher = centre de la sélection", isOn: settingBinding(project, \.touchAnchorIsCenter))
-            Toggle("Export automatique à la validation", isOn: settingBinding(project, \.autoExportOnValidate))
-            Toggle("Aperçu léger (540p, + fluide)", isOn: settingBinding(project, \.previewLight))
-            Toggle("Flux optique (fluide, peut créer des artefacts)",
-                   isOn: settingBinding(project, \.opticalFlowEnabled))
-            Toggle("Album Photos par projet", isOn: settingBinding(project, \.albumPerProject))
-            Button {
-                guard !RenderQueueController.shared.isBusy() else { return }
-                _ = MediaAvailabilityService.releaseSources(in: project)
-                try? modelContext.save()
-            } label: {
-                let releasable = MediaAvailabilityService.releasableSources(in: project)
-                    .reduce(Int64(0)) { $0 + $1.bytes }
-                Label("Libérer l'espace (\(StorageManager.formatBytes(releasable)))",
-                      systemImage: "internaldrive")
-            }
-        } label: {
-            Image(systemName: "ellipsis.circle")
-                .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.borderless)
     }
 
     private func durationLabel(_ project: ClipProject) -> String {
