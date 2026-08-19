@@ -110,6 +110,36 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             test
 
+  # LOGIQUE PURE : durées, modes de sélection, colorimétrie. Rien n'est
+  # décodé, tout s'exécute en quelques secondes.
+  #
+  # JOB SÉPARÉ ET BLOQUANT, délibérément. Ces tests vivaient dans le job
+  # « moteur-reel », qui est en continue-on-error parce que la disponibilité du
+  # flux optique sur un runner n'est pas garantie — ils ne protégeaient donc
+  # rien : une régression de calcul serait passée en vert. Ici un échec arrête
+  # la chaîne.
+  logique-pure:
+    runs-on: macos-26
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sélectionner Xcode 26 si présent
+        run: |
+          XCODE_26=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$XCODE_26" ]; then
+            sudo xcode-select -s "$XCODE_26"
+          fi
+          swift --version
+
+      - name: Synchroniser les sources du pipeline vers le banc d'essai
+        run: bash PipelineHarness/sync-sources.sh
+
+      - name: Tests de logique pure
+        run: |
+          swift test --package-path . --no-parallel --filter 'DurationConversionTests|OpenEndSelectionTests|ColorProfileTests'
+
   # BANC D'ESSAI DU VRAI MOTEUR (flux optique VideoToolbox).
   # Le simulateur n'embarque pas VTFrameProcessor et la variante « Designed
   # for iPad » exige une identité de signature qu'un runner n'a pas. Le paquet
@@ -147,13 +177,6 @@ jobs:
         run: |
           set -o pipefail
           swift build --build-tests --package-path . 2>&1 | tail -40
-
-      # LOGIQUE PURE d'abord : durées et modes de sélection ne décodent rien,
-      # s'exécutent en une seconde, et cassent avant tout le reste si un calcul
-      # de durée a dérivé. Aucun chien de garde nécessaire.
-      - name: Logique pure (durées, modes de sélection)
-        run: |
-          swift test --package-path . --no-parallel --filter 'DurationConversionTests|OpenEndSelectionTests'
 
       # SONDE D'ABORD : elle seule répond à « le flux optique existe-t-il ici,
       # et si oui, à quelle étape ça bloque ». Sortie EN DIRECT (surtout pas de
