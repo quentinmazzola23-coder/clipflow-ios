@@ -36,6 +36,115 @@ struct RenderJob: Sendable {
     var forceFastEngine: Bool = false
 }
 
+/// Profil colorimétrique d'un rendu : ce qu'on demande au décodeur, ce qu'on
+/// annonce à l'encodeur, et de quoi étiqueter une image sortie nue du moteur.
+///
+/// POURQUOI CE TYPE EXISTE. La chaîne était figée en BGRA 8 bits étiquetée
+/// BT.709, quelle que soit la source. Sur un rush HLG (le mode HDR de
+/// l'iPhone), `AVAssetReaderTrackOutput` fait une conversion MATRICIELLE, pas
+/// une conversion de plage dynamique : les valeurs restaient codées en HLG
+/// dans les octets BGRA, puis étaient déclarées 709 à l'encodeur. Un lecteur
+/// applique alors la mauvaise courbe de transfert — hautes lumières écrasées,
+/// couleurs ternes. C'est exactement la perte constatée à l'export.
+///
+/// La correction n'est pas un réglage mais une CONSERVATION : on décode dans
+/// le format natif de la source (10 bits), on écrit du HEVC Main10, et on
+/// annonce BT.2020 avec la vraie courbe. Aucun pixel n'est retouché, aucun
+/// tone mapping n'est appliqué — la plage dynamique traverse le rendu intacte.
+///
+/// Logique PURE : aucune dépendance à un média, donc vérifiable sans appareil.
+struct RenderColorProfile: Equatable, Sendable {
+    /// Format demandé au décodeur.
+    var readerPixelFormat: OSType
+    /// Valeurs de `AVVideoColorPropertiesKey`.
+    var primaries: String
+    var transferFunction: String
+    var yCbCrMatrix: String
+    /// Profil HEVC exigé. Le HDR impose Main10 : en 8 bits, quantifier une
+    /// courbe HLG produit des bandes visibles dans les ciels et les dégradés.
+    var hevcProfileLevel: String?
+    /// Codec RÉELLEMENT écrit — peut différer du réglage du projet.
+    var codec: String
+    /// Vrai quand la plage dynamique de la source est conservée telle quelle.
+    var isHDR: Bool
+    /// Colorimétrie du fichier produit, pour le bilan.
+    var label: String
+
+    /// Étiquettes CoreVideo équivalentes, pour combler une image sortie du
+    /// moteur d'interpolation sans attachement (repli).
+    ///
+    /// Stockées en `String` et non en `CFString` : les constantes CoreVideo
+    /// sont des types référence CoreFoundation, qui ne se synthétisent ni en
+    /// `Equatable` ni en `Sendable`. Le pont vers `CFString` est fait au
+    /// moment de poser l'attachement.
+    var bufferPrimaries: String
+    var bufferTransferFunction: String
+    var bufferYCbCrMatrix: String
+
+    /// SDR : chaîne BGRA historique, inchangée.
+    ///
+    /// Le tout-RGB avait été choisi pour une raison précise — les images
+    /// interpolées sortaient du moteur VideoToolbox avec la CHROMINANCE
+    /// INVERSÉE, et en RGB il n'existe ni matrice YCbCr ni ordre de plans à
+    /// confondre. Ce chemin n'est donc pas touché.
+    static let sdr = RenderColorProfile(
+        readerPixelFormat: kCVPixelFormatType_32BGRA,
+        primaries: AVVideoColorPrimaries_ITU_R_709_2,
+        transferFunction: AVVideoTransferFunction_ITU_R_709_2,
+        yCbCrMatrix: AVVideoYCbCrMatrix_ITU_R_709_2,
+        hevcProfileLevel: nil,
+        codec: "hevc",
+        isHDR: false,
+        label: "sdr",
+        bufferPrimaries: kCVImageBufferColorPrimaries_ITU_R_709_2 as String,
+        bufferTransferFunction: kCVImageBufferTransferFunction_ITU_R_709_2 as String,
+        bufferYCbCrMatrix: kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String
+    )
+
+    /// Choisit le profil d'après la colorimétrie figée sur le passage.
+    ///
+    /// - `requestedCodec` : réglage du projet. En HDR il est IGNORÉ au profit
+    ///   du HEVC — l'encodeur H.264 d'Apple ne produit pas de flux 10 bits
+    ///   BT.2020 exploitable, et livrer un fichier étiqueté HDR mais encodé
+    ///   en 8 bits serait précisément le mensonge qu'on corrige ici.
+    static func resolve(colorimetry: String, requestedCodec: String) -> RenderColorProfile {
+        switch colorimetry {
+        case "hlg":
+            return hdr(transferFunction: AVVideoTransferFunction_ITU_R_2100_HLG,
+                       bufferTransferFunction: kCVImageBufferTransferFunction_ITU_R_2100_HLG as String,
+                       label: "hlg")
+        case "pq":
+            return hdr(transferFunction: AVVideoTransferFunction_SMPTE_ST_2084_PQ,
+                       bufferTransferFunction: kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String,
+                       label: "pq")
+        default:
+            var profile = sdr
+            profile.codec = (requestedCodec == "h264") ? "h264" : "hevc"
+            return profile
+        }
+    }
+
+    private static func hdr(transferFunction: String,
+                            bufferTransferFunction: String,
+                            label: String) -> RenderColorProfile {
+        RenderColorProfile(
+            // 10 bits bi-planaire : le format natif d'un rush HDR iPhone.
+            // Le décodeur ne convertit alors rien du tout.
+            readerPixelFormat: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+            primaries: AVVideoColorPrimaries_ITU_R_2020,
+            transferFunction: transferFunction,
+            yCbCrMatrix: AVVideoYCbCrMatrix_ITU_R_2020,
+            hevcProfileLevel: kVTProfileLevel_HEVC_Main10_AutoLevel as String,
+            codec: "hevc",
+            isHDR: true,
+            label: label,
+            bufferPrimaries: kCVImageBufferColorPrimaries_ITU_R_2020 as String,
+            bufferTransferFunction: bufferTransferFunction,
+            bufferYCbCrMatrix: kCVImageBufferYCbCrMatrix_ITU_R_2020 as String
+        )
+    }
+}
+
 struct RenderResult: Sendable {
     var outputURL: URL
     var durationSeconds: Double
@@ -90,9 +199,15 @@ struct RenderResult: Sendable {
     /// Nombre d'images aberrantes qui ont motivé le rejet.
     var rejectedArtifactFrames: Int = 0
     /// Images interpolées sorties du moteur SANS attachement colorimétrique
-    /// propageable : étiquetées BT.709 explicitement. Un compteur non nul est
-    /// un défaut à corriger, pas une statistique.
+    /// propageable : étiquetées explicitement dans la colorimétrie du rendu.
+    /// Un compteur non nul est un défaut à corriger, pas une statistique.
     var untaggedInterpolatedFrames: Int = 0
+    /// Colorimétrie du fichier produit : "sdr", "hlg" ou "pq".
+    var exportedColorimetry: String = "sdr"
+    /// Le flux optique a été mis de côté parce que la source est HDR (voir
+    /// `renderPass`). Distinct d'un REJET après artefacts : ici rien n'a été
+    /// tenté, et l'utilisateur doit pouvoir faire la différence.
+    var opticalFlowSkippedForHDR: Bool = false
 }
 
 enum RenderError: Error, LocalizedError {
@@ -106,7 +221,7 @@ enum RenderError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .hdrFormatUnsupported(let format):
-            return "Format \(format) non pris en charge par le moteur d'interpolation. Export bloqué pour éviter un rendu délavé — une conversion SDR tone-mappée sera proposée dans une version future."
+            return "Format \(format) non pris en charge : sa plage dynamique ne peut être transportée sans perte (métadonnées dynamiques Dolby Vision, ou table de conversion Apple Log absente). Export bloqué plutôt que livré délavé. HLG et PQ, eux, sont exportés en HDR."
         case .readerFailed(let details):
             return "Échec de lecture de la source : \(details)"
         case .writerFailed(let details):
@@ -140,7 +255,12 @@ final class VideoRenderPipeline {
     static func render(job: RenderJob,
                        onProgress: @escaping @Sendable (Double) -> Void) async throws -> RenderResult {
         var result = try await renderPass(job: job, onProgress: onProgress)
-        guard !result.artifactFrames.isEmpty, !job.forceFastEngine else { return result }
+        // Le repli total n'a de sens que si des pixels ont pu être INVENTÉS.
+        // Sans interpolation — moteur rapide demandé, ou source HDR rendue
+        // sans flux optique — refaire la passe donnerait le même fichier au
+        // bit près : ce serait doubler le temps d'export pour rien.
+        let inventedPixels = !job.forceFastEngine && !result.opticalFlowSkippedForHDR
+        guard !result.artifactFrames.isEmpty, inventedPixels else { return result }
         // Point d'annulation AVANT la seconde passe : sans lui, « Tout annuler »
         // devait attendre DEUX rendus complets, et la file paraissait figée.
         try Task.checkCancellation()
@@ -168,15 +288,33 @@ final class VideoRenderPipeline {
 
         let startedAt = ContinuousClock.now
 
-        // Politique HDR : PQ / Dolby Vision / Apple Log refusés explicitement
-        // (jamais d'export silencieusement délavé). SDR et HLG pris en charge.
+        // Politique colorimétrique. HLG et PQ sont désormais CONSERVÉS de bout
+        // en bout (décodage 10 bits, HEVC Main10, BT.2020) au lieu d'être
+        // aplatis en 709 — voir RenderColorProfile pour le détail de la perte
+        // que cela corrige. Dolby Vision et Apple Log restent refusés : le
+        // premier porte une couche de métadonnées dynamiques que ce pipeline
+        // ne sait pas transporter, le second demande une table de conversion
+        // qu'on n'a pas. Les livrer en les étiquetant autrement produirait
+        // justement l'export délavé qu'on cherche à éliminer.
         switch job.colorimetry {
-        case "pq", "dolbyVision", "appleLog":
+        case "dolbyVision", "appleLog":
             throw RenderError.hdrFormatUnsupported(job.colorimetry)
         default:
             break
         }
-        let isHDRContent = (job.colorimetry == "hlg")
+        let color = RenderColorProfile.resolve(colorimetry: job.colorimetry,
+                                               requestedCodec: job.codec)
+
+        // HDR ⇒ AUCUNE interpolation, et c'est délibéré.
+        //
+        // Le moteur VideoToolbox n'a jamais été validé sur des images 10 bits
+        // BT.2020 sur appareil, et la dernière fois qu'un format non validé
+        // lui a été confié, il a rendu des images à la chrominance inversée
+        // livrées telles quelles à l'utilisateur. Entre un ralenti un peu plus
+        // saccadé et un risque de couleurs fausses sur la totalité d'un clip,
+        // le choix n'est pas discutable. Signalé dans le bilan, pas silencieux.
+        let skipFlowForHDR = color.isHDR && !job.forceFastEngine
+        let useFastEngine = job.forceFastEngine || color.isHDR
 
         let asset = AVURLAsset(url: job.sourceURL)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
@@ -201,14 +339,14 @@ final class VideoRenderPipeline {
         // eux-mêmes, pas les étiquettes. En RGB, il n'existe ni matrice YCbCr
         // ni ordre de plans à confondre : la classe entière du bug disparaît.
         //
-        // ⚠️ AUCUN TONE MAPPING ICI, contrairement à ce que ce commentaire
-        // affirmait : `AVAssetReaderTrackOutput` avec un simple format de pixel
-        // fait une conversion MATRICIELLE, pas une conversion de plage
-        // dynamique. Du HLG reste encodé HLG dans les octets BGRA, puis est
-        // étiqueté 709 par AVVideoColorPropertiesKey — donc délavé. Voir la
-        // politique HDR ci-dessus : HLG devra être refusé comme PQ, ou
-        // réellement tone-mappé.
-        let readerPixelFormat: OSType = kCVPixelFormatType_32BGRA
+        // ⚠️ AUCUN TONE MAPPING ICI : `AVAssetReaderTrackOutput` avec un simple
+        // format de pixel fait une conversion MATRICIELLE, pas une conversion
+        // de plage dynamique. C'était le défaut : du HLG restait encodé HLG
+        // dans les octets BGRA, puis était étiqueté 709 à l'encodage — donc
+        // délavé. La réponse n'est pas de tone-mapper mais de NE RIEN
+        // CONVERTIR : en HDR on décode dans le format natif 10 bits et on
+        // annonce la vraie courbe. Le SDR garde la chaîne BGRA.
+        let readerPixelFormat: OSType = color.readerPixelFormat
 
         // --- Moteur : préchauffé PENDANT la passe 1. ---
         // Le démarrage d'une session VideoToolbox (processeur + pools) coûte
@@ -218,7 +356,7 @@ final class VideoRenderPipeline {
         // Démarrage optimiste : si le plan ne demande finalement aucune
         // interpolation, la session repart simplement dans le cache.
         let warmupTask: Task<Result<FrameInterpolationEngine, Error>, Never>? = {
-            guard !job.forceFastEngine else { return nil }
+            guard !useFastEngine else { return nil }
             // AUCUNE réutilisation de session entre clips : en mode de
             // soumission séquentiel, le premier couple du clip N+1 héritait de
             // l'état temporel du clip N — contenu totalement différent. Le gain
@@ -310,7 +448,7 @@ final class VideoRenderPipeline {
                 guard !needsInterpolation else { throw error }
                 engine = PassthroughRetimeEngine()
             }
-        } else if job.forceFastEngine {
+        } else if useFastEngine {
             engine = PassthroughRetimeEngine()
         } else if needsInterpolation {
             throw RenderError.interpolationUnavailable
@@ -356,8 +494,6 @@ final class VideoRenderPipeline {
         try? FileManager.default.removeItem(at: outputURL)
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
 
-        _ = isHDRContent // politique d'acceptation seulement — la chaîne BGRA
-                         // livre du display-referred, tagué 709 ci-dessous.
         var compression: [String: Any] = [
             AVVideoExpectedSourceFrameRateKey: job.fps,
             AVVideoAllowFrameReorderingKey: true,
@@ -366,23 +502,27 @@ final class VideoRenderPipeline {
             AVVideoWidthKey: encodeWidth,
             AVVideoHeightKey: encodeHeight,
         ]
-        if job.codec == "h264" {
+        if color.codec == "h264" {
             writerSettings[AVVideoCodecKey] = AVVideoCodecType.h264
             compression[AVVideoAverageBitRateKey] = 50_000_000
         } else {
             writerSettings[AVVideoCodecKey] = AVVideoCodecType.hevc
             compression[AVVideoQualityKey] = 0.85
-            // Pas de Main10 tant que la chaîne 10 bits n'est pas validée de
-            // bout en bout sur appareil (source du flash bleu).
+        }
+        // Main10 en HDR. Quantifier une courbe HLG sur 8 bits produit des
+        // bandes franches dans les ciels et les dégradés : la plage serait
+        // conservée sur le papier, et abîmée à l'œil.
+        if let profileLevel = color.hevcProfileLevel {
+            compression[AVVideoProfileLevelKey] = profileLevel
         }
         writerSettings[AVVideoCompressionPropertiesKey] = compression
-        // Chaîne BGRA : le décodeur a produit du RGB display-referred (HDR
-        // tone-mappé) — l'encodeur reconvertit en YUV avec des tags BT.709
-        // UNIFORMES pour toutes les images, copies comme interpolées.
+        // Étiquetage UNIFORME de toutes les images du fichier, copies comme
+        // interpolées : c'est ce que le lecteur utilisera pour appliquer la
+        // bonne courbe de transfert.
         writerSettings[AVVideoColorPropertiesKey] = [
-            AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-            AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-            AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+            AVVideoColorPrimariesKey: color.primaries,
+            AVVideoTransferFunctionKey: color.transferFunction,
+            AVVideoYCbCrMatrixKey: color.yCbCrMatrix,
         ]
 
         let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: writerSettings)
@@ -557,6 +697,7 @@ final class VideoRenderPipeline {
                     // VideoToolbox lit encore pour le groupe suivant.
                     if outputBuffer === buffer {
                         Self.tagInterpolatedBuffer(outputBuffer, from: group.prev,
+                                                   color: color,
                                                    untagged: &untaggedInterpolatedFrames)
                     }
                     try await appendOutput(outputBuffer)
@@ -667,7 +808,7 @@ final class VideoRenderPipeline {
             expectedFrameCount: expectedFrames,
             width: encodeWidth,
             height: encodeHeight,
-            codec: job.codec,
+            codec: color.codec,
             fileSizeBytes: fileSize,
             engineName: engine.displayName,
             processingSeconds: Double(elapsed.components.seconds)
@@ -684,7 +825,9 @@ final class VideoRenderPipeline {
             artifactFrames: anomalies,
             maxOutputAnomaly: maxAnomaly,
             maxDeviatingTiles: maxDeviatingTiles,
-            untaggedInterpolatedFrames: untaggedInterpolatedFrames
+            untaggedInterpolatedFrames: untaggedInterpolatedFrames,
+            exportedColorimetry: color.label,
+            opticalFlowSkippedForHDR: skipFlowForHDR
         )
     }
 
@@ -705,7 +848,7 @@ final class VideoRenderPipeline {
     }
 
     /// Étiquette une image interpolée : attachements de la source si
-    /// disponibles, sinon BT.709 EXPLICITE.
+    /// disponibles, sinon les étiquettes EXPLICITES du profil de rendu.
     ///
     /// L'ancienne version était un `if let` SANS branche `else` : quand la
     /// source ne portait aucun attachement propageable, l'image interpolée
@@ -714,6 +857,7 @@ final class VideoRenderPipeline {
     /// Un défaut d'étiquetage doit être COMPTÉ, jamais silencieux.
     static func tagInterpolatedBuffer(_ destination: CVPixelBuffer,
                                       from source: CVPixelBuffer,
+                                      color: RenderColorProfile = .sdr,
                                       untagged: inout Int) {
         guard source !== destination else { return }
         if let attachments = CVBufferCopyAttachments(source, .shouldPropagate) {
@@ -734,12 +878,15 @@ final class VideoRenderPipeline {
         // l'absence TOTALE est comblée — et comptée.
         guard !hasAnyColorTag else { return }
         untagged += 1
+        // Les étiquettes du PROFIL DE RENDU, pas 709 en dur : sur un rendu
+        // HDR, combler avec du 709 réintroduirait une image délavée au milieu
+        // d'un clip correct — le défaut d'origine, en pire car isolé.
         CVBufferSetAttachment(destination, kCVImageBufferColorPrimariesKey,
-                              kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+                              color.bufferPrimaries as CFString, .shouldPropagate)
         CVBufferSetAttachment(destination, kCVImageBufferTransferFunctionKey,
-                              kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
+                              color.bufferTransferFunction as CFString, .shouldPropagate)
         CVBufferSetAttachment(destination, kCVImageBufferYCbCrMatrixKey,
-                              kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+                              color.bufferYCbCrMatrix as CFString, .shouldPropagate)
     }
 
     // MARK: - Failsafe anti-artefact

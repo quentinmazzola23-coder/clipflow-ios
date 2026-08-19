@@ -364,9 +364,25 @@ final class RenderQueueController {
                 // Elles ne sont anormales que si le clip livré a réellement
                 // été interpolé (elles trahissent alors un clip figé) — donc
                 // ni quand le flux optique est éteint, NI après un repli.
-                let interpolationDelivered = project.opticalFlowEnabled && !result.opticalFlowRejected
+                // Un rendu HDR n'interpole jamais : compter ses images
+                // répétées comme suspectes serait un faux avertissement, au
+                // même titre qu'après un repli.
+                let interpolationDelivered = project.opticalFlowEnabled
+                    && !result.opticalFlowRejected
+                    && !result.opticalFlowSkippedForHDR
                 if result.duplicatePairs > 0, interpolationDelivered {
                     corrected += ", ⚠️ \(result.duplicatePairs) paire(s) d'images identiques"
+                }
+                // PLAGE DYNAMIQUE CONSERVÉE : l'export HDR est la raison
+                // d'être du chemin 10 bits, il doit se constater sur le bilan
+                // et pas seulement à l'œil sur le clip livré.
+                if result.exportedColorimetry != "sdr" {
+                    corrected += ", HDR conservé (\(result.exportedColorimetry.uppercased()), "
+                        + "BT.2020 10 bits)"
+                }
+                if result.opticalFlowSkippedForHDR {
+                    corrected += ", flux optique non appliqué sur ce clip HDR "
+                        + "(moteur non validé en 10 bits BT.2020)"
                 }
                 // REJET DU FLUX OPTIQUE : donnée décisive pour savoir si ce
                 // moteur mérite d'être rallumé — elle doit être VISIBLE.
@@ -377,7 +393,7 @@ final class RenderQueueController {
                 }
                 if result.untaggedInterpolatedFrames > 0 {
                     corrected += ", ⛔️ \(result.untaggedInterpolatedFrames) image(s) sans "
-                        + "attachement colorimétrique (étiquetées 709 par défaut)"
+                        + "attachement colorimétrique (étiquetées d'après le profil de rendu)"
                 }
                 // Jamais « contrôle OK » quand des images aberrantes sont
                 // livrées. Mais sans interpolation, aucun pixel n'est
