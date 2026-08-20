@@ -61,7 +61,21 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build
+            build 2>&1 | tee build.log
+
+      # Le depot est developpe SANS Mac : les logs de job exigent des droits
+      # d'admin via l'API — les ERREURS sont donc publiees en release, seul
+      # canal de diagnostic lisible depuis le poste Windows.
+      - name: Publier les erreurs de compilation (echec uniquement)
+        if: failure()
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          grep -E "error:" build.log | head -120 > errors.txt || true
+          [ -s errors.txt ] || tail -80 build.log > errors.txt
+          TAG="diag-build-${{ github.run_number }}"
+          gh release create "$TAG" errors.txt --title "$TAG" --notes "Erreurs de compilation du build ${{ github.run_number }}" -R "${{ github.repository }}" || gh release upload "$TAG" errors.txt -R "${{ github.repository }}"
 
       - name: Empaqueter l'IPA
         working-directory: src
@@ -138,7 +152,18 @@ jobs:
 
       - name: Tests de logique pure
         run: |
-          swift test --package-path . --no-parallel --filter 'DurationConversionTests|OpenEndSelectionTests|ColorProfileTests|TempoTests|SectionClassificationTests|SlotGenerationTests|SuggestedWindowTests|MontagePlanTests'
+          set -o pipefail
+          swift test --package-path . --no-parallel --filter 'DurationConversionTests|OpenEndSelectionTests|ColorProfileTests|TempoTests|SectionClassificationTests|SlotGenerationTests|SuggestedWindowTests|MontagePlanTests' 2>&1 | tee pure.log
+
+      - name: Publier les echecs de logique pure (echec uniquement)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          grep -E "error:|Expectation failed|recorded an issue|failed" pure.log | head -150 > pure-errors.txt || true
+          [ -s pure-errors.txt ] || tail -100 pure.log > pure-errors.txt
+          TAG="diag-pure-${{ github.run_number }}"
+          gh release create "$TAG" pure-errors.txt --title "$TAG" --notes "Echecs logique pure du build ${{ github.run_number }}" -R "${{ github.repository }}" || gh release upload "$TAG" pure-errors.txt -R "${{ github.repository }}"
 
   # BANC D'ESSAI DU VRAI MOTEUR (flux optique VideoToolbox).
   # Le simulateur n'embarque pas VTFrameProcessor et la variante « Designed
