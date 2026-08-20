@@ -53,6 +53,7 @@ struct ProjectEditorView: View {
     // UI.
     @State private var playback = ProxyPlaybackEngine()
     @State private var showReview = false
+    @State private var showMontage = false
     @State private var showExports = false
     @State private var errorMessage: String?
     @State private var exportToast: String?
@@ -324,6 +325,23 @@ struct ProjectEditorView: View {
         }
         .sheet(isPresented: $showExports) {
             NavigationStack { RenderQueueView(project: project) }
+        }
+        // Montage : plein écran — c'est une étape de travail entière, pas un
+        // panneau d'appoint.
+        .fullScreenCover(isPresented: $showMontage) {
+            NavigationStack {
+                MontageView(project: project)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button {
+                                showMontage = false
+                            } label: {
+                                Image(systemName: "chevron.down")
+                            }
+                            .accessibilityLabel("Fermer le montage")
+                        }
+                    }
+            }
         }
         .sheet(isPresented: $showCustomDuration) {
             CustomDurationSheet(
@@ -657,6 +675,15 @@ struct ProjectEditorView: View {
                 Image(systemName: "square.grid.3x3")
             }
             .disabled(project.rushes.isEmpty)
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            // ÉTAPE SUIVANTE du flux : dérushage → montage sur la musique.
+            Button {
+                showMontage = true
+            } label: {
+                Image(systemName: "music.note")
+            }
+            .disabled(project.passages.isEmpty)
         }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {

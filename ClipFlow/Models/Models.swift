@@ -112,6 +112,18 @@ final class ClipProject {
     /// Compteur de numérotation des exports (001, 002...).
     var nextExportNumber: Int = 1
 
+    // MARK: Montage musical
+
+    /// Fichier musical du projet (nom dans Application Support/Music), nil
+    /// tant qu'aucune musique n'a été choisie.
+    var musicFilename: String?
+    /// Nom d'origine du fichier choisi — le seul nom parlant pour l'utilisateur.
+    var musicTitle: String?
+    /// Départ de la fenêtre de montage dans la musique, en centisecondes.
+    /// nil = utiliser le départ SUGGÉRÉ par l'analyse (cluster de drops).
+    /// Persisté : déplacer la fenêtre puis revenir au projet ne perd rien.
+    var montageStartCentiseconds: Int?
+
     @Relationship(deleteRule: .cascade, inverse: \Rush.project)
     var rushes: [Rush] = []
 

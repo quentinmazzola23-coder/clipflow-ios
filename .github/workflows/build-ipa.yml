@@ -138,7 +138,7 @@ jobs:
 
       - name: Tests de logique pure
         run: |
-          swift test --package-path . --no-parallel --filter 'DurationConversionTests|OpenEndSelectionTests|ColorProfileTests'
+          swift test --package-path . --no-parallel --filter 'DurationConversionTests|OpenEndSelectionTests|ColorProfileTests|TempoTests|SectionClassificationTests|SlotGenerationTests|SuggestedWindowTests|MontagePlanTests'
 
   # BANC D'ESSAI DU VRAI MOTEUR (flux optique VideoToolbox).
   # Le simulateur n'embarque pas VTFrameProcessor et la variante « Designed
