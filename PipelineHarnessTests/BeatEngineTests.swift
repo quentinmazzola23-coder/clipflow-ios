@@ -334,6 +334,49 @@ struct MusicLicenseFilterTests {
         #expect(!MusicLibraryAPI.isCommercialLicense(""))
     }
 
+    /// archive.org livre les durées dans DEUX formats selon les entrées :
+    /// secondes décimales ou « mm:ss ». N'en lire qu'un affichait des durées
+    /// nulles au hasard des titres.
+    @Test func archiveLengthAcceptsBothFormats() {
+        #expect(abs(MusicLibraryAPI.parseArchiveLength("157.62") - 157.62) < 0.001)
+        #expect(abs(MusicLibraryAPI.parseArchiveLength("01:05") - 65) < 0.001)
+        #expect(abs(MusicLibraryAPI.parseArchiveLength("1:02:03") - 3723) < 0.001)
+        #expect(MusicLibraryAPI.parseArchiveLength(nil) == 0)
+        #expect(MusicLibraryAPI.parseArchiveLength("") == 0)
+        #expect(MusicLibraryAPI.parseArchiveLength("inconnu") == 0)
+    }
+
+    /// La requête archive.org doit écarter NC et ND CÔTÉ SERVEUR : mesuré sur
+    /// le catalogue réel, les 20 premiers résultats d'une recherche ordinaire
+    /// sont tous non commerciaux, et un filtrage après réception ne laissait
+    /// aucun titre.
+    @Test func archiveQueryExcludesNonCommercialAtSource() throws {
+        let url = try #require(MusicLibraryAPI.archiveSearchURL(query: "electronic beat"))
+        let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let query = (components.queryItems ?? [])
+            .first { $0.name == "q" }?.value ?? ""
+        #expect(query.contains("NOT licenseurl:*-nc*"))
+        #expect(query.contains("NOT licenseurl:*-nd*"))
+        #expect(query.contains("licenseurl:*creativecommons*"))
+        #expect(components.host == "archive.org")
+    }
+
+    /// Les caractères de syntaxe Lucene sont retirés : un titre avec « : »
+    /// ne doit pas casser la recherche entière.
+    @Test func archiveQuerySanitizesLuceneSyntax() throws {
+        let url = try #require(MusicLibraryAPI.archiveSearchURL(query: "dark:techno (remix)"))
+        let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let query = (components.queryItems ?? []).first { $0.name == "q" }?.value ?? ""
+        #expect(!query.contains("dark:techno"))
+        #expect(query.contains("dark"))
+        #expect(query.contains("techno"))
+    }
+
+    /// Une recherche vide de sens après nettoyage ne part pas.
+    @Test func archiveQueryRefusesEmptyAfterSanitizing() {
+        #expect(MusicLibraryAPI.archiveSearchURL(query: "(((")  == nil)
+    }
+
     @Test func licenseLabelsAreShort() {
         #expect(MusicLibraryAPI.licenseLabel("https://creativecommons.org/publicdomain/zero/1.0/") == "cc0")
         #expect(MusicLibraryAPI.licenseLabel("http://creativecommons.org/licenses/by/4.0/") == "by")

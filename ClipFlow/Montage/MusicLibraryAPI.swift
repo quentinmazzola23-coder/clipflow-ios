@@ -161,18 +161,40 @@ enum MusicLibraryAPI {
         }
         let sanitized = String(cleaned).trimmingCharacters(in: .whitespaces)
         guard !sanitized.isEmpty else { return nil }
-        let q = "(\(sanitized)) AND mediatype:(audio) AND format:(MP3) AND licenseurl:*"
+        // FILTRE DE LICENCE DANS LA REQUÊTE, pas après coup.
+        //
+        // Mesuré sur le catalogue réel : les 20 premiers résultats d'une
+        // recherche ordinaire sont TOUS en by-nc-nd ou by-nc-sa. Filtrer
+        // après réception ne laissait donc rien — la bibliothèque affichait
+        // « aucun titre » alors que 545 titres utilisables existaient. En
+        // écartant NC et ND côté serveur, chaque ligne rendue est exploitable.
+        let q = "(\(sanitized)) AND mediatype:(audio) AND format:(MP3)"
+            + " AND licenseurl:*creativecommons*"
+            + " AND NOT licenseurl:*-nc*"
+            + " AND NOT licenseurl:*-nd*"
         components?.queryItems = [
             URLQueryItem(name: "q", value: q),
             URLQueryItem(name: "fl[]", value: "identifier"),
             URLQueryItem(name: "fl[]", value: "title"),
             URLQueryItem(name: "fl[]", value: "creator"),
             URLQueryItem(name: "fl[]", value: "licenseurl"),
-            URLQueryItem(name: "rows", value: "20"),
+            URLQueryItem(name: "rows", value: "30"),
             URLQueryItem(name: "page", value: "1"),
             URLQueryItem(name: "output", value: "json"),
         ]
         return components?.url
+    }
+
+    /// Durée d'un fichier archive.org : tantôt des secondes (« 157.62 »),
+    /// tantôt « mm:ss » (« 01:05 »), tantôt absente. Les deux formes se
+    /// rencontrent dans le MÊME catalogue — n'en lire qu'une affichait des
+    /// durées nulles au hasard des titres.
+    static func parseArchiveLength(_ raw: String?) -> Double {
+        guard let raw, !raw.isEmpty else { return 0 }
+        if let seconds = Double(raw) { return seconds }
+        let parts = raw.split(separator: ":").compactMap { Double($0) }
+        guard !parts.isEmpty else { return 0 }
+        return parts.reduce(0) { $0 * 60 + $1 }
     }
 
     /// Une licence est COMMERCIALE si elle est domaine public / CC0 / BY /
@@ -247,7 +269,7 @@ enum MusicLibraryAPI {
         // Résolution du FICHIER mp3 de chaque entrée (l'index ne le donne
         // pas) : appels métadonnées en parallèle, entrées sans mp3 écartées.
         return await withTaskGroup(of: MusicSearchResult?.self) { group in
-            for doc in candidates.prefix(12) {
+            for doc in candidates.prefix(18) {
                 group.addTask {
                     await resolveArchiveItem(doc: doc)
                 }
@@ -285,7 +307,7 @@ enum MusicLibraryAPI {
             title: title,
             creator: creator,
             fileURL: fileURL,
-            durationSeconds: Double(mp3.length ?? "") ?? 0,
+            durationSeconds: parseArchiveLength(mp3.length),
             license: licenseLabel(licenseURL),
             attribution: "\(title) — \(creator) (\(licenseLabel(licenseURL).uppercased()), via Internet Archive, \(licenseURL))"
         )
