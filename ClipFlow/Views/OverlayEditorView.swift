@@ -9,10 +9,10 @@
 //  n'a pas encore construite. L'écran s'ouvre depuis le montage, une fois les
 //  clips placés.
 //
-//  Placement PAR GLISSEMENT direct sur l'aperçu, taille PAR PINCEMENT — pas
-//  de curseurs, pas de champs de coordonnées : on pose son logo là où on le
-//  veut, comme sur une photo. La vignette de fond est une vraie image du
-//  montage, donc le cadrage est jugé sur le contenu réel.
+//  Placement PAR ANCRAGE (neuf points) ou par glissement direct sur l'aperçu,
+//  taille AU CURSEUR. Le pincement a été retiré : il se disputait le geste
+//  avec le glissement. La vignette de fond est une vraie image du montage,
+//  donc le cadrage est jugé sur le contenu réel.
 //
 
 import SwiftUI
@@ -31,13 +31,17 @@ struct OverlayEditorView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
 
-    @State private var selectedID: PersistentIdentifier?
+    /// Calque sélectionné, retenu PAR RÉFÉRENCE.
+    ///
+    /// Un `PersistentIdentifier` relevé juste après un `insert` est
+    /// TEMPORAIRE : SwiftData le remplace à l'enregistrement, et la sélection
+    /// devenait introuvable — les réglages disparaissaient tout seuls après
+    /// l'ajout. La vue vit sur l'acteur principal, garder l'objet est sûr.
+    @State private var selectedLayer: OverlayLayer?
     @State private var photoItem: PhotosPickerItem?
     @State private var showTextField = false
     @State private var draftText = ""
     @State private var message: String?
-    /// Échelle en cours de pincement, appliquée par-dessus la taille figée.
-    @State private var pinchScale: CGFloat = 1
     /// Position au DÉBUT du glissement, en fractions. Le déplacement se
     /// calcule par rapport à elle.
     @State private var dragOrigin: (x: Double, y: Double)?
@@ -49,8 +53,11 @@ struct OverlayEditorView: View {
         project.overlays.sorted { $0.stackOrder < $1.stackOrder }
     }
 
+    /// Sélection encore valide ? Un calque supprimé ne doit plus piloter les
+    /// réglages.
     private var selected: OverlayLayer? {
-        layers.first { $0.persistentModelID == selectedID }
+        guard let selectedLayer, selectedLayer.modelContext != nil else { return nil }
+        return selectedLayer
     }
 
     var body: some View {
@@ -76,13 +83,6 @@ struct OverlayEditorView: View {
             Button("OK") { message = nil }
         } message: {
             Text(message ?? "")
-        }
-        .alert("Texte", isPresented: $showTextField) {
-            TextField("Votre texte", text: $draftText)
-            Button("Ajouter") { addText() }
-            Button("Annuler", role: .cancel) { draftText = "" }
-        } message: {
-            Text("Le texte s'affiche en blanc, sans effet ni contour.")
         }
     }
 
@@ -119,14 +119,13 @@ struct OverlayEditorView: View {
             .contentShape(Rectangle())
             // Taper à côté désélectionne : sinon un réglage s'appliquerait au
             // dernier calque touché, sans qu'on sache lequel.
-            .onTapGesture { selectedID = nil }
+            .onTapGesture { selectedLayer = nil }
         }
     }
 
     private func overlayHandle(_ layer: OverlayLayer, canvasSize: CGSize) -> some View {
-        let isSelected = layer.persistentModelID == selectedID
-        let scale = isSelected ? pinchScale : 1
-        let width = canvasSize.width * layer.relativeWidth * scale
+        let isSelected = selected === layer
+        let width = canvasSize.width * layer.relativeWidth
 
         return Group {
             if layer.kind == .image, let image = cachedImage(for: layer) {
@@ -155,17 +154,21 @@ struct OverlayEditorView: View {
         .position(x: canvasSize.width * layer.centerX,
                   y: canvasSize.height * layer.centerY)
         .gesture(
-            // TRANSLATION depuis la position de départ, jamais la position
-            // absolue du doigt. Avec `location`, un pincement — dont SwiftUI
-            // rapporte le point MILIEU des deux doigts — téléportait
-            // l'incrustation sous la main au moment du redimensionnement.
+            // GLISSEMENT PAR TRANSLATION depuis la position de départ. Le
+            // pincement a été retiré : il se disputait ce geste — SwiftUI
+            // rapporte le point milieu des deux doigts et l'incrustation
+            // sautait sous la main. La taille se règle au curseur.
             DragGesture()
                 .onChanged { value in
-                    selectedID = layer.persistentModelID
+                    selectedLayer = layer
                     if dragOrigin == nil {
                         dragOrigin = (layer.centerX, layer.centerY)
                     }
                     guard let origin = dragOrigin else { return }
+                    // Poser au doigt annule l'ancrage : sinon le prochain
+                    // changement de taille ramènerait l'incrustation dans son
+                    // coin, effaçant le placement qu'on vient de faire.
+                    layer.anchorIndex = -1
                     // Position en FRACTIONS, bornée au cadre : une
                     // incrustation posée hors champ serait invisible à
                     // l'export sans que rien ne le dise.
@@ -179,23 +182,7 @@ struct OverlayEditorView: View {
                     try? modelContext.save()
                 }
         )
-        .simultaneousGesture(
-            MagnifyGesture()
-                .onChanged { value in
-                    selectedID = layer.persistentModelID
-                    pinchScale = value.magnification
-                }
-                .onEnded { value in
-                    // Bornes : sous 3 % l'incrustation devient un point, au
-                    // delà de 100 % elle déborde du cadre.
-                    layer.relativeWidth = min(max(0.03,
-                        layer.relativeWidth * value.magnification), 1.0)
-                    pinchScale = 1
-                    dragOrigin = nil // le pincement a pu déclencher un glissement
-                    try? modelContext.save()
-                }
-        )
-        .onTapGesture { selectedID = layer.persistentModelID }
+        .onTapGesture { selectedLayer = layer }
     }
 
     // MARK: - Commandes
@@ -203,9 +190,18 @@ struct OverlayEditorView: View {
     private var controls: some View {
         VStack(spacing: 10) {
             if let selected {
-                scopeControls(selected)
+                OverlayInspector(
+                    layer: selected,
+                    clipCount: plan.placements.count,
+                    relativeHeight: relativeHeight(of: selected),
+                    // Fermeture, pas une chaîne déjà calculée : le libellé
+                    // demande la résolution des portées, inutile de la refaire
+                    // à chaque image d'un glissement.
+                    durationLabel: { durationLabel(selected) },
+                    onChange: { try? modelContext.save() }
+                )
             } else if !layers.isEmpty {
-                Text("Touchez une incrustation pour régler sa durée.")
+                Text("Touchez une incrustation pour régler sa position, sa taille et sa durée.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -254,62 +250,33 @@ struct OverlayEditorView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-    }
-
-    /// Portée temporelle : toute la vidéo, ou une plage de clips.
-    private func scopeControls(_ layer: OverlayLayer) -> some View {
-        let clipCount = plan.placements.count
-        return VStack(spacing: 8) {
-            Picker("Durée", selection: Binding(
-                get: { layer.spansWholeMontage },
-                set: { whole in
-                    layer.spansWholeMontage = whole
-                    if !whole, layer.lastClipIndex <= layer.firstClipIndex {
-                        // Première limitation : une plage d'un clip, à étendre.
-                        layer.lastClipIndex = layer.firstClipIndex
-                    }
-                    try? modelContext.save()
-                }
-            )) {
-                Text("Toute la vidéo").tag(true)
-                Text("Certains clips").tag(false)
-            }
-            .pickerStyle(.segmented)
-
-            if !layer.spansWholeMontage, clipCount > 0 {
-                HStack(spacing: 12) {
-                    clipStepper("Du clip", value: Binding(
-                        get: { layer.firstClipIndex },
-                        set: { newValue in
-                            layer.firstClipIndex = min(max(0, newValue), clipCount - 1)
-                            if layer.lastClipIndex < layer.firstClipIndex {
-                                layer.lastClipIndex = layer.firstClipIndex
-                            }
-                            try? modelContext.save()
-                        }
-                    ), bound: clipCount)
-                    clipStepper("au clip", value: Binding(
-                        get: { layer.lastClipIndex },
-                        set: { newValue in
-                            layer.lastClipIndex = min(max(layer.firstClipIndex, newValue),
-                                                      clipCount - 1)
-                            try? modelContext.save()
-                        }
-                    ), bound: clipCount)
-                }
-                // La durée réelle, en clair : des rangs de clips ne parlent
-                // pas d'eux-mêmes.
-                Text(durationLabel(layer))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
+        // Posée ICI et non à côté de l'alerte des erreurs : deux `.alert` sur
+        // la même vue se disputent la présentation, une seule s'affiche.
+        .alert("Texte", isPresented: $showTextField) {
+            TextField("Votre texte", text: $draftText)
+            Button("Ajouter") { addText() }
+            Button("Annuler", role: .cancel) { draftText = "" }
+        } message: {
+            Text("Le texte s'affiche en blanc, sans effet ni contour.")
         }
     }
 
-    private func clipStepper(_ title: String, value: Binding<Int>, bound: Int) -> some View {
-        Stepper(value: value, in: 0...(max(bound, 1) - 1)) {
-            Text("\(title) \(value.wrappedValue + 1)")
-                .font(.caption.monospacedDigit())
+    /// Hauteur de l'incrustation en fraction de la HAUTEUR de l'image.
+    ///
+    /// Sert aux marges d'ancrage : une marge verticale fixe coupait le haut
+    /// d'un logo carré posé en haut d'un montage 16:9 — à 30 % de largeur, sa
+    /// demi-hauteur vaut 0,27, bien plus que la marge de 0,12 d'alors.
+    private func relativeHeight(of layer: OverlayLayer) -> Double {
+        let ratio = Double(backdropRatio) // largeur / hauteur de l'image
+        switch layer.kind {
+        case .image:
+            guard let image = cachedImage(for: layer), image.size.width > 0 else {
+                return layer.relativeWidth * ratio
+            }
+            return layer.relativeWidth * Double(image.size.height / image.size.width) * ratio
+        case .text:
+            // Même formule que le rendu : corps = largeur × 0,22, interligne 1,2.
+            return layer.relativeWidth * 0.22 * 1.2 * ratio
         }
     }
 
@@ -327,9 +294,16 @@ struct OverlayEditorView: View {
     /// Image du calque, lue une seule fois du disque.
     private func cachedImage(for layer: OverlayLayer) -> UIImage? {
         guard let filename = layer.imageFilename else { return nil }
-        if let cached = imageCache[filename] { return cached }
+        if let cached = imageCache[filename] { return cached.size.width > 0 ? cached : nil }
         guard let url = layer.imageURL,
-              let image = UIImage(contentsOfFile: url.path) else { return nil }
+              let image = UIImage(contentsOfFile: url.path) else {
+            // Fichier manquant ou illisible : on note l'échec avec une image
+            // vide, sinon chaque passage de la vue retente une lecture disque.
+            Task { @MainActor in
+                if imageCache[filename] == nil { imageCache[filename] = UIImage() }
+            }
+            return nil
+        }
         // Mutation d'état pendant l'évaluation de la vue : différée au tour
         // suivant, sinon SwiftUI s'en plaint (et boucle).
         Task { @MainActor in imageCache[filename] = image }
@@ -351,14 +325,17 @@ struct OverlayEditorView: View {
             layer.kind = .image
             layer.imageFilename = filename
             // Coin bas-droit par défaut : la place d'un filigrane.
-            layer.centerX = 0.80
-            layer.centerY = 0.86
             layer.relativeWidth = 0.22
+            layer.anchorIndex = 8 // bas droite
+            layer.centerX = 1 - (layer.relativeWidth / 2 + 0.03)
+            layer.centerY = 0.86
             layer.stackOrder = (layers.map(\.stackOrder).max() ?? -1) + 1
-            layer.project = project
+            // insert AVANT le rattachement : relier un objet non suivi à un
+            // projet suivi laisse SwiftData réconcilier après coup.
             modelContext.insert(layer)
+            layer.project = project
             try? modelContext.save()
-            selectedID = layer.persistentModelID
+            selectedLayer = layer
         } catch {
             message = error.localizedDescription
         }
@@ -371,14 +348,15 @@ struct OverlayEditorView: View {
         let layer = OverlayLayer()
         layer.kind = .text
         layer.text = trimmed
-        layer.centerX = 0.5
-        layer.centerY = 0.18 // haut de l'image : la place d'un titre
         layer.relativeWidth = 0.5
+        layer.anchorIndex = 1 // haut centre : la place d'un titre
+        layer.centerX = 0.5
+        layer.centerY = 0.18
         layer.stackOrder = (layers.map(\.stackOrder).max() ?? -1) + 1
-        layer.project = project
         modelContext.insert(layer)
+        layer.project = project
         try? modelContext.save()
-        selectedID = layer.persistentModelID
+        selectedLayer = layer
     }
 
     private func remove(_ layer: OverlayLayer) {
@@ -387,7 +365,7 @@ struct OverlayEditorView: View {
         }
         modelContext.delete(layer)
         try? modelContext.save()
-        selectedID = nil
+        selectedLayer = nil
     }
 
     // MARK: - Géométrie

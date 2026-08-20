@@ -111,7 +111,7 @@ struct MontageView: View {
         }
         // INCRUSTATIONS : étape POSTÉRIEURE au montage — on ne décore pas une
         // vidéo qu'on n'a pas encore construite.
-        .sheet(isPresented: $showOverlays) {
+        .sheet(isPresented: $showOverlays, onDismiss: refreshOverlays) {
             NavigationStack {
                 if let plan {
                     OverlayEditorView(project: project, plan: plan,
@@ -137,12 +137,7 @@ struct MontageView: View {
                 NotificationCenter.default.removeObserver(endObserver)
                 self.endObserver = nil
             }
-            // Observateur de temps : accroché AU LECTEUR, il doit partir avec
-            // lui — sinon il survit à chaque aperçu et s'accumule.
-            if let timeObserver {
-                player?.removeTimeObserver(timeObserver)
-                self.timeObserver = nil
-            }
+            releaseTimeObserver()
         }
         // Résultat d'un export terminé pendant l'absence : annoncé au retour.
         .onChange(of: MontageExportController.shared.lastOutcomeToken) { _, _ in
@@ -389,11 +384,29 @@ struct MontageView: View {
 
     /// Incrustations résolues en temps absolu, prêtes pour le rendu.
     /// Aperçu et export consomment la MÊME liste.
-    private var resolvedOverlays: [ResolvedOverlay] {
-        guard let plan else { return [] }
-        return OverlayStore.resolve(project.overlays,
-                                    placements: plan.placements,
-                                    totalDuration: plan.totalDuration)
+    ///
+    /// MÉMORISÉES dans un état, pas recalculées dans le corps : les lire ici
+    /// ferait dépendre TOUT l'écran de montage des propriétés de chaque
+    /// calque, donc reconstruire la feuille d'incrustations à chaque réglage
+    /// qu'on y fait — un candidat sérieux au défaut « le sélecteur revient en
+    /// arrière tout seul ». La liste est refaite aux moments qui comptent :
+    /// changement de plan, et fermeture de l'écran d'incrustations.
+    @State private var resolvedOverlays: [ResolvedOverlay] = []
+
+    private func refreshOverlays() {
+        guard let plan else { resolvedOverlays = []; return }
+        // Rangs REMIS DANS LES BORNES du montage courant, dans le modèle :
+        // un calque posé « du clip 150 » sur un montage qui n'en a plus que
+        // 40 faisait planter les réglages (plage de compteur inversée).
+        let lastIndex = max(0, plan.placements.count - 1)
+        for layer in project.overlays where !layer.spansWholeMontage {
+            layer.firstClipIndex = min(max(0, layer.firstClipIndex), lastIndex)
+            layer.lastClipIndex = min(max(layer.firstClipIndex, layer.lastClipIndex), lastIndex)
+        }
+        try? modelContext.save()
+        resolvedOverlays = OverlayStore.resolve(project.overlays,
+                                                placements: plan.placements,
+                                                totalDuration: plan.totalDuration)
     }
 
     /// Extrait une image du montage : on juge le placement d'un logo sur du
@@ -486,6 +499,10 @@ struct MontageView: View {
                 .accessibilityLabel("Annuler l'export")
             } else {
                 Button {
+                    // La lecture continuait DERRIÈRE la feuille : on posait
+                    // son logo avec la bande-son du montage dans les oreilles.
+                    stopPreview()
+                    stopAudition()
                     prepareOverlayBackdrop()
                     showOverlays = true
                 } label: {
@@ -737,6 +754,7 @@ struct MontageView: View {
         stopPreview()
         // La composition affichée ne correspond plus au plan : la garder
         // rejouerait l'ANCIEN montage — pire qu'un écran de veille.
+        releaseTimeObserver() // avant de lâcher le lecteur, jamais après
         player = nil
 
         var candidates: [MontageClipCandidate] = []
@@ -776,6 +794,7 @@ struct MontageView: View {
         let slots = map.slots(from: windowStart, density: density)
         plan = MontagePlanner.plan(slots: slots, clips: candidates, windowStart: windowStart)
         clipSources = sources
+        refreshOverlays() // rangs recalés sur le nouveau découpage
     }
 
     // MARK: - Aperçu
@@ -797,6 +816,12 @@ struct MontageView: View {
                 )
                 let item = AVPlayerItem(asset: montage.composition)
                 item.videoComposition = montage.videoComposition
+                // L'ANCIEN observateur se retire de SON lecteur, jamais du
+                // nouveau : `removeTimeObserver` avec un jeton d'une autre
+                // instance lève une exception non rattrapée et ferme l'app.
+                // Le chemin est banal — lire, ouvrir les incrustations
+                // (qui coupe la lecture), revenir, relire.
+                releaseTimeObserver()
                 let newPlayer = AVPlayer(playerItem: item)
                 previewRenderSize = montage.renderSize
                 player = newPlayer
@@ -804,7 +829,6 @@ struct MontageView: View {
                 // leur plage. 20 relevés par seconde suffisent — l'œil ne
                 // distingue pas mieux, et c'est autant de reconstructions
                 // de vue en moins.
-                if let timeObserver { newPlayer.removeTimeObserver(timeObserver) }
                 timeObserver = newPlayer.addPeriodicTimeObserver(
                     forInterval: CMTime(value: 1, timescale: 20), queue: .main
                 ) { time in
@@ -829,6 +853,14 @@ struct MontageView: View {
     private func stopPreview() {
         player?.pause()
         isPreviewing = false
+    }
+
+    /// Détache l'observateur de temps DE SON lecteur. Passer par ici partout
+    /// évite l'exception « observateur ajouté par une autre instance ».
+    private func releaseTimeObserver() {
+        guard let timeObserver else { return }
+        player?.removeTimeObserver(timeObserver)
+        self.timeObserver = nil
     }
 
     // MARK: - Export

@@ -52,6 +52,13 @@ final class OverlayLayer {
     var firstClipIndex: Int = 0
     var lastClipIndex: Int = 0
 
+    /// Ancrage choisi, 0-8 (ligne × 3 + colonne) ; -1 = posé librement.
+    ///
+    /// Mémorisé pour que l'incrustation RESTE collée à son coin quand on
+    /// change sa taille : sans lui, agrandir un logo ancré en bas à gauche le
+    /// faisait déborder du cadre, la marge dépendant de la largeur.
+    var anchorIndex: Int = -1
+
     /// Ordre d'empilement : les derniers ajoutés passent devant.
     var stackOrder: Int = 0
 
@@ -68,22 +75,6 @@ final class OverlayLayer {
         imageFilename.map { OverlayStore.url(forImageNamed: $0) }
     }
 
-    /// Nom lisible pour la liste.
-    var displayName: String {
-        switch kind {
-        case .text: return text.isEmpty ? "Texte vide" : text
-        case .image: return "Image"
-        }
-    }
-
-    /// Portée en toutes lettres — l'utilisateur doit lire sa propre décision.
-    var scopeLabel: String {
-        guard !spansWholeMontage else { return "Toute la vidéo" }
-        let first = firstClipIndex + 1
-        let last = lastClipIndex + 1
-        if first == last { return "Clip \(first)" }
-        return "Clips \(first) à \(last)"
-    }
 }
 
 enum OverlayKind: String, Codable, Sendable, CaseIterable {

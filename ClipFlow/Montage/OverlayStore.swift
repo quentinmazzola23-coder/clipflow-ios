@@ -35,12 +35,17 @@ enum OverlayStoreError: Error, LocalizedError {
 
 enum OverlayStore {
 
-    static var overlaysDirectory: URL {
+    /// Dossier des images, créé UNE FOIS.
+    ///
+    /// C'était une propriété calculée qui créait le dossier à chaque accès :
+    /// pendant un glissement, la résolution des portées le touchait des
+    /// centaines de fois par seconde sur le fil principal.
+    static let overlaysDirectory: URL = {
         let url = StorageManager.applicationSupportDirectory
             .appendingPathComponent("Overlays", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
-    }
+    }()
 
     static func url(forImageNamed filename: String) -> URL {
         overlaysDirectory.appendingPathComponent(filename)
