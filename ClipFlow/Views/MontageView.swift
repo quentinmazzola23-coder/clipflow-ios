@@ -41,6 +41,19 @@ struct MontageView: View {
     @State private var showFileImporter = false
     @State private var showLibrary = false
     @State private var showOverlays = false
+    /// Motif de fermeture forcée de l'écran d'incrustations, remis à
+    /// l'utilisateur UNE FOIS LA FEUILLE REFERMÉE.
+    ///
+    /// Poser l'alerte au moment où l'on ferme la feuille la fait avaler :
+    /// UIKit refuse de présenter par-dessus une vue en cours de disparition.
+    /// Et comme rien ne remettait alors `errorMessage` à nil — le seul chemin
+    /// de remise à zéro est le bouton OK d'une alerte qui ne s'est jamais
+    /// affichée — la liaison restait bloquée à « vrai » et TOUTES les alertes
+    /// suivantes de l'écran devenaient muettes : échec d'export, échec
+    /// d'import de musique, bilan de rendu. Un défaut silencieux qui survivait
+    /// à toute la session.
+    @State private var pendingOverlayMessage: String?
+
     /// Image extraite du montage, fond de la pose d'incrustations.
     @State private var overlayBackdrop: UIImage?
     /// Clip d'où vient la vignette. La taille de rendu du montage est celle du
@@ -154,7 +167,14 @@ struct MontageView: View {
         .onChange(of: showFileImporter) { _, presented in if presented { silence() } }
         // INCRUSTATIONS : étape POSTÉRIEURE au montage — on ne décore pas une
         // vidéo qu'on n'a pas encore construite.
-        .sheet(isPresented: $showOverlays, onDismiss: refreshOverlays) {
+        .sheet(isPresented: $showOverlays, onDismiss: {
+            refreshOverlays()
+            // La feuille est REFERMÉE : l'alerte peut enfin se présenter.
+            if let pendingOverlayMessage {
+                errorMessage = pendingOverlayMessage
+                self.pendingOverlayMessage = nil
+            }
+        }) {
             NavigationStack {
                 if let plan {
                     OverlayEditorView(project: project, plan: plan,
@@ -477,10 +497,10 @@ struct MontageView: View {
             // attendre, le bouton d'incrustations — le plan encore affiché
             // n'est pas vide, donc rien ne bloque l'ouverture.
             if showOverlays {
-                showOverlays = false
-                errorMessage = "Ce cran de densité ne place aucun clip : "
+                pendingOverlayMessage = "Ce cran de densité ne place aucun clip : "
                     + "il n'y a rien à décorer. Choisissez un cran plus rapide, "
                     + "puis rouvrez les incrustations."
+                showOverlays = false
             }
             return
         }
@@ -533,10 +553,10 @@ struct MontageView: View {
             // ouverte sur un écran de préparation qui n'aboutira jamais.
             guard !Task.isCancelled, generation == planGeneration else { return }
             if overlayVideoRatio == nil, overlayBackdrop == nil, showOverlays {
-                showOverlays = false
-                errorMessage = "Le premier clip du montage n'a pas pu être lu : "
+                pendingOverlayMessage = "Le premier clip du montage n'a pas pu être lu : "
                     + "son fichier a peut-être été déplacé ou supprimé. "
                     + "Reconstruisez le montage avant d'ajouter une incrustation."
+                showOverlays = false
             }
         }
     }

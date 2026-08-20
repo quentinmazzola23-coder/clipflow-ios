@@ -559,15 +559,26 @@ struct OverlayEditorView: View {
         }
         if let target, target.modelContext != nil {
             target.text = trimmed
-            // LE CORPS DE POLICE EST RECALCULÉ, pas seulement le texte.
+            // LE DÉBORDEMENT EST RABOTÉ, la taille réglée est GARDÉE.
             //
             // `relativeWidth` ne règle que la taille des lettres : garder
             // celle d'un texte court en le remplaçant par un long donnait un
             // titre plus large que l'image — « GO » remplacé par « MON MONTAGE
-            // DU DIMANCHE » passait à 164 % de large, coupé des deux côtés. Et
+            // DU DIMANCHE » passait à 164 % de large, coupé des deux côtés, et
             // `anchoredCenter` saturait alors à 0,5, si bien qu'un titre ancré
-            // à gauche se retrouvait centré, en silence.
-            target.relativeWidth = OverlayGeometry.initialTextWidth(for: trimmed)
+            // à gauche se retrouvait centré en silence.
+            //
+            // Mais la recalculer entièrement était pire : le curseur est le
+            // SEUL réglage de taille de l'écran, et corriger une lettre d'un
+            // texte réduit à 8 % le renvoyait d'un coup à 50 %. On ne descend
+            // donc que si ça ne rentre plus, jamais on ne remonte. 0,94 est le
+            // seuil de `anchoredCenter` — au-delà, ses marges de 3 % ne
+            // tiennent plus et les trois colonnes d'ancrage se confondent.
+            let spanAtFull = OverlayGeometry.textSpan(trimmed, relativeWidth: 1)
+            if spanAtFull > 0 {
+                let widthThatFits = min(1.0, max(0.05, 0.94 / spanAtFull))
+                target.relativeWidth = min(target.relativeWidth, widthThatFits)
+            }
             applyAnchorAtCreation(target)
             try? modelContext.save()
             return
