@@ -45,8 +45,13 @@ enum MusicLibraryError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .badResponse(let status):
-            return "La bibliothèque a répondu avec le code \(status). "
-                + "Si cela persiste, le service Openverse est peut-être en panne — ce n'est pas une erreur de votre part."
+            if status == 401 || status == 403 {
+                return "La bibliothèque (Openverse) a refusé la connexion (code \(status)) malgré une nouvelle tentative automatique. "
+                    + "Leur pare-feu bloque parfois certains réseaux mobiles : essayez en Wi-Fi. "
+                    + "Si ça échoue aussi en Wi-Fi, signalez-le — ce n'est pas une erreur de votre part."
+            }
+            return "La bibliothèque a répondu avec le code \(status) malgré une nouvelle tentative. "
+                + "Le service Openverse est probablement en panne passagère — réessayez plus tard, ce n'est pas une erreur de votre part."
         case .rateLimited:
             return "Limite de recherches atteinte (20 par minute en accès libre). Attendez une minute puis réessayez — ce n'est pas un bug."
         case .decoding(let details):
@@ -58,6 +63,46 @@ enum MusicLibraryError: Error, LocalizedError {
 enum MusicLibraryAPI {
 
     static let pageSize = 25
+
+    /// Requête IDENTIFIÉE, comme la documentation Openverse le demande : leur
+    /// pare-feu rejette en 401/403 certains clients au User-Agent générique
+    /// (celui de CFNetwork en fait partie selon le réseau traversé). Constaté
+    /// sur appareil : 401 en 4G avec l'UA par défaut, 200 avec un UA nommé.
+    static func request(for url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.setValue("ClipFlow-iOS/1.0 (github.com/quentinmazzola23-coder/clipflow-ios)",
+                         forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 20
+        return request
+    }
+
+    /// Recherche avec UNE retentative automatique : les rejets du pare-feu
+    /// Openverse (401/403) et les erreurs passagères (5xx) se résolvent le
+    /// plus souvent au second essai — l'utilisateur n'a pas à le faire lui-même.
+    static func search(query: String, page: Int = 1) async throws -> [MusicSearchResult] {
+        guard let url = searchURL(query: query, page: page) else { return [] }
+        var lastStatus = 0
+        for attempt in 0..<2 {
+            if attempt > 0 {
+                try await Task.sleep(for: .milliseconds(1500))
+            }
+            let (data, response) = try await URLSession.shared.data(for: request(for: url))
+            guard let http = response as? HTTPURLResponse else {
+                return try parse(data)
+            }
+            switch http.statusCode {
+            case 200:
+                return try parse(data)
+            case 429:
+                throw MusicLibraryError.rateLimited
+            default:
+                lastStatus = http.statusCode
+                continue
+            }
+        }
+        throw MusicLibraryError.badResponse(status: lastStatus)
+    }
 
     /// URL de recherche : uniquement des titres à licence COMMERCIALE.
     static func searchURL(query: String, page: Int = 1) -> URL? {

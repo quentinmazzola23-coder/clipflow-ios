@@ -164,16 +164,11 @@ struct MusicLibraryView: View {
         searchTask = Task {
             defer { isSearching = false }
             do {
-                guard let url = MusicLibraryAPI.searchURL(query: trimmed) else { return }
-                let (data, response) = try await URLSession.shared.data(from: url)
+                // Toute la mécanique (UA identifié, retentative sur 401/403,
+                // analyse) vit dans MusicLibraryAPI — un seul chemin testable.
+                let found = try await MusicLibraryAPI.search(query: trimmed)
                 guard !Task.isCancelled else { return }
-                if let http = response as? HTTPURLResponse {
-                    if http.statusCode == 429 { throw MusicLibraryError.rateLimited }
-                    guard http.statusCode == 200 else {
-                        throw MusicLibraryError.badResponse(status: http.statusCode)
-                    }
-                }
-                results = try MusicLibraryAPI.parse(data)
+                results = found
             } catch is CancellationError {
             } catch let error as URLError {
                 // Réseau : dire CLAIREMENT que c'est la connexion, pas l'app.
@@ -206,7 +201,9 @@ struct MusicLibraryView: View {
         Task {
             defer { downloadingID = nil }
             do {
-                let (temporary, response) = try await URLSession.shared.download(from: result.fileURL)
+                let (temporary, response) = try await URLSession.shared.download(
+                    for: MusicLibraryAPI.request(for: result.fileURL)
+                )
                 if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                     throw MusicLibraryError.badResponse(status: http.statusCode)
                 }

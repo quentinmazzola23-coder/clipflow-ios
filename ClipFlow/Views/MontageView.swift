@@ -443,12 +443,17 @@ struct MontageView: View {
                 continue // ni cache ni source : rien à monter pour ce passage
             }
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
-            guard let duration = try? await AVURLAsset(url: url).load(.duration) else { continue }
+            // Borne = la PISTE VIDÉO, pas le conteneur : dans une copie source,
+            // la piste audio peut durer plus que la vidéo, et la durée du
+            // conteneur promettrait des images qui n'existent pas.
+            let asset = AVURLAsset(url: url)
+            guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+                  let trackRange = try? await track.load(.timeRange) else { continue }
 
             candidates.append(MontageClipCandidate(
                 id: index,
-                startInFile: startInFile,
-                fileDuration: duration,
+                startInFile: CMTimeMaximum(startInFile, trackRange.start),
+                fileDuration: trackRange.end,
                 speed: RationalSpeed(numerator: passage.speedNumerator,
                                      denominator: passage.speedDenominator)
             ))

@@ -69,8 +69,15 @@ enum MontageComposer {
         // dont les segments n'ont pas tous la même orientation.
         let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
 
-        // Les fichiers sont ouverts UNE fois chacun, même utilisés plusieurs fois.
-        var loadedTracks: [URL: (track: AVAssetTrack, size: CGSize, transform: CGAffineTransform)] = [:]
+        // Les fichiers sont ouverts UNE fois chacun, même utilisés plusieurs
+        // fois. L'ASSET EST RETENU DANS LE CACHE, et c'est capital :
+        // AVAssetTrack ne retient PAS son AVAsset (référence faible). Ne
+        // garder que la piste laissait l'asset se libérer à la sortie du
+        // bloc — piste pendante, et le premier insertTimeRange échouait en
+        // « Opération impossible » dès le clip 1, systématiquement.
+        var loadedTracks: [URL: (asset: AVURLAsset, track: AVAssetTrack,
+                                 range: CMTimeRange, size: CGSize,
+                                 transform: CGAffineTransform)] = [:]
         var renderSize = CGSize.zero
         var cursor = CMTime.zero
 
@@ -78,7 +85,8 @@ enum MontageComposer {
             guard let url = sources[placement.clipID] else {
                 throw MontageComposerError.missingSource(clipID: placement.clipID)
             }
-            let info: (track: AVAssetTrack, size: CGSize, transform: CGAffineTransform)
+            let info: (asset: AVURLAsset, track: AVAssetTrack, range: CMTimeRange,
+                       size: CGSize, transform: CGAffineTransform)
             if let cached = loadedTracks[url] {
                 info = cached
             } else {
@@ -86,8 +94,10 @@ enum MontageComposer {
                 guard let track = try await asset.loadTracks(withMediaType: .video).first else {
                     throw MontageComposerError.noVideoTrack(clipID: placement.clipID)
                 }
-                let (naturalSize, transform) = try await track.load(.naturalSize, .preferredTransform)
-                info = (track, naturalSize, transform)
+                let (naturalSize, transform, trackRange) = try await track.load(
+                    .naturalSize, .preferredTransform, .timeRange
+                )
+                info = (asset, track, trackRange, naturalSize, transform)
                 loadedTracks[url] = info
             }
 
@@ -106,19 +116,48 @@ enum MontageComposer {
                 )
             }
 
+            // BORNAGE À LA PISTE avant insertion : la durée du CONTENEUR peut
+            // dépasser celle de la piste vidéo, et une plage qui sort de la
+            // piste fait échouer l'insertion avec un message générique.
+            // Un dépassement d'une demi-image est absorbé en silence ; au-delà
+            // c'est un vrai défaut, expliqué chiffres à l'appui.
+            var sourceRange = placement.sourceRange
+            let trackEnd = info.range.end
+            let overshoot = CMTimeSubtract(sourceRange.end, trackEnd).seconds
+            if overshoot > 0 {
+                if overshoot <= 0.05 {
+                    sourceRange = CMTimeRange(start: sourceRange.start,
+                                              end: trackEnd)
+                } else {
+                    throw MontageComposerError.compositionFailed(String(
+                        format: "clip %d : la plage demandée (%.2f–%.2f s) dépasse la piste vidéo de son fichier (fin à %.2f s). C'est un défaut de l'app, pas une erreur d'utilisation — signalez-le.",
+                        placement.clipID + 1, sourceRange.start.seconds,
+                        sourceRange.end.seconds, trackEnd.seconds
+                    ))
+                }
+            }
+            if CMTimeCompare(sourceRange.start, info.range.start) < 0 {
+                sourceRange = CMTimeRange(start: info.range.start, end: sourceRange.end)
+            }
             do {
-                try videoTrack.insertTimeRange(placement.sourceRange,
+                try videoTrack.insertTimeRange(sourceRange,
                                                of: info.track,
                                                at: placement.timelineStart)
             } catch {
-                throw MontageComposerError.compositionFailed(
-                    "clip \(placement.clipID + 1) : \(error.localizedDescription)"
-                )
+                let nsError = error as NSError
+                throw MontageComposerError.compositionFailed(String(
+                    format: "clip %d : insertion refusée (plage %.2f–%.2f s, piste %.2f–%.2f s, erreur %@ %d). C'est un défaut de l'app, pas une erreur d'utilisation — signalez-le avec ces chiffres.",
+                    placement.clipID + 1, sourceRange.start.seconds, sourceRange.end.seconds,
+                    info.range.start.seconds, info.range.end.seconds,
+                    nsError.domain, nsError.code
+                ))
             }
             // RALENTI : la plage source (durée × vitesse) est étirée à la
             // durée exacte du créneau. 0,5× → chaque image tenue deux fois.
+            // La durée INSÉRÉE (éventuellement bornée à la piste) est celle
+            // qu'on étire — jamais la durée théorique du plan.
             videoTrack.scaleTimeRange(
-                CMTimeRange(start: placement.timelineStart, duration: placement.sourceRange.duration),
+                CMTimeRange(start: placement.timelineStart, duration: sourceRange.duration),
                 toDuration: placement.timelineDuration
             )
 
