@@ -529,6 +529,11 @@ struct MontageView: View {
         guard videoRatio > 0 else { return }
         var changed = false
         for layer in project.overlays where layer.anchorIndex >= 0 {
+            // Rapport d'image JAMAIS RELEVÉ : on ne touche à rien. La hauteur
+            // serait inventée, et le centre enregistré par-dessus une valeur
+            // juste. L'éditeur relèvera le rapport à la première lecture de
+            // l'image et recalera lui-même.
+            if layer.kind == .image, layer.imageAspect <= 0 { continue }
             guard abs(layer.anchorVideoRatio - videoRatio) > 0.0001,
                   let center = OverlayLayer.anchoredCenter(
                     anchorIndex: layer.anchorIndex,
@@ -946,7 +951,10 @@ struct MontageView: View {
         // recoller les incrustations ancrées quand le montage change
         // d'orientation. Sans cela, un logo ancré en bas à droite restait à sa
         // place de l'ancien cadrage et partait à l'export ainsi.
-        prepareOverlayShape(imageToo: false)
+        // `imageToo` seulement si la feuille est ouverte : elle attendrait
+        // sinon une vignette que la reconstruction vient d'annuler, et
+        // resterait sur « Préparation de l'aperçu… » jusqu'à sa fermeture.
+        prepareOverlayShape(imageToo: showOverlays)
     }
 
     // MARK: - Aperçu

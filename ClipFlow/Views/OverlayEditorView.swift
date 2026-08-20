@@ -63,6 +63,8 @@ struct OverlayEditorView: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var showTextField = false
     @State private var draftText = ""
+    /// Calque en cours de RETOUCHE. `nil` = l'alerte crée un nouveau calque.
+    @State private var editingTextLayer: OverlayLayer?
     @State private var message: String?
     /// Position au DÉBUT du glissement, en fractions, PAR CALQUE.
     ///
@@ -97,23 +99,29 @@ struct OverlayEditorView: View {
             if isCompactHeight {
                 HStack(spacing: 0) {
                     canvas
-                    ScrollView { controls }
-                        .frame(width: 340)
+                    VStack(spacing: 10) {
+                        // Les RÉGLAGES défilent, la rangée d'actions NON :
+                        // mise dans la zone défilante, elle passait sous le
+                        // pli et changeait de place à chaque sélection —
+                        // « Terminé » devenait introuvable.
+                        inspectorZone
+                        actionRow
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .frame(width: 320)
                 }
             } else {
-                VStack(spacing: 0) {
+                VStack(spacing: 10) {
                     canvas
-                    controls
+                    inspectorZone
+                        .frame(height: 270, alignment: .top)
+                    actionRow
                 }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
             }
         }
-        // Le clavier ne RETRANCHE PLUS la zone sûre : sans cela, saisir le
-        // texte d'une incrustation écrasait le cadre de pose à zéro — on
-        // écrivait sans plus voir où le texte est posé, ce qui est la seule
-        // raison d'avoir mis ce champ ici — et poussait la rangée d'actions
-        // sous le clavier. La sortie se fait par le bouton « Terminé » de la
-        // barre de clavier, posé dans l'inspecteur.
-        .ignoresSafeArea(.keyboard, edges: .bottom)
         .navigationTitle("Incrustations")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -126,19 +134,15 @@ struct OverlayEditorView: View {
             guard let item else { return }
             Task { await addImage(from: item) }
         }
-        // Filet de sécurité : la saisie de texte n'enregistre pas à chaque
-        // frappe. Fermer l'écran sans valider ne doit pas perdre la retouche.
-        // Et un calque de texte laissé VIDE ne se dessinerait nulle part : il
-        // resterait une case invisible dans le projet. L'ajout refuse déjà le
-        // vide, la retouche s'aligne dessus.
-        .onDisappear {
-            for layer in project.overlays where layer.kind == .text
-                && layer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if selectedLayer === layer { selectedLayer = nil }
-                modelContext.delete(layer)
-            }
-            try? modelContext.save()
-        }
+        // Filet de sécurité : les réglages enregistrent déjà au fil de l'eau,
+        // mais fermer l'écran ne doit rien laisser en suspens.
+        //
+        // AUCUNE SUPPRESSION AUTOMATIQUE ICI. Il y en a eu une, qui effaçait
+        // les textes vides à la fermeture : elle détruisait le placement et la
+        // portée réglés, sans un mot, juste après un message qui invitait à
+        // « retaper un texte ». Le vide ne peut plus arriver — la saisie passe
+        // par l'alerte, qui le refuse.
+        .onDisappear { try? modelContext.save() }
         .alert("Incrustations", isPresented: Binding(
             get: { message != nil }, set: { if !$0 { message = nil } }
         )) {
@@ -281,12 +285,13 @@ struct OverlayEditorView: View {
 
     // MARK: - Commandes
 
-    private var controls: some View {
-        VStack(spacing: 10) {
-            // HAUTEUR RÉSERVÉE, pas conditionnelle : sans elle, faire
-            // apparaître ou disparaître le panneau retaille le cadre de pose
-            // (la pile racine n'a pas de zone défilante, le cadre encaisse) et
-            // toutes les incrustations se déplacent à l'écran.
+    /// Zone des RÉGLAGES, hauteur pilotée par l'appelant.
+    ///
+    /// Séparée de la rangée d'actions : mises ensemble dans une zone
+    /// défilante, « Terminé » et la corbeille passaient sous le pli en
+    /// paysage et changeaient de place à chaque sélection.
+    private var inspectorZone: some View {
+        Group {
             ZStack(alignment: .top) {
                 if let selected, shapeIsKnown {
                     // DÉFILANT : un panneau de texte en portée par clips fait
@@ -319,65 +324,89 @@ struct OverlayEditorView: View {
                         .foregroundStyle(.tertiary)
                 }
             }
-            // VERROU, pas plancher — et libre en paysage, où la réserve est
-            // une colonne défilante.
-            .frame(height: isCompactHeight ? nil : 250, alignment: .top)
-
-            HStack(spacing: 12) {
-                PhotosPicker(selection: $photoItem, matching: .images) {
-                    Image(systemName: "photo")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 46, height: 46)
-                        .glassEffect(.regular.interactive(), in: Circle())
-                        .contentShape(Circle())
-                }
-                .disabled(!shapeIsKnown)
-                .accessibilityLabel("Ajouter une image")
-
-                Button {
-                    draftText = ""
-                    showTextField = true
-                } label: {
-                    Image(systemName: "textformat")
-                }
-                .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 46))
-                // Tant que la forme du montage est inconnue, créer graverait
-                // un centre ancré calculé sur un 9:16 supposé — l'écran refuse
-                // déjà de régler dans ces conditions, il doit refuser de créer.
-                .disabled(!shapeIsKnown)
-                .accessibilityLabel("Ajouter un texte")
-
-                Spacer()
-
-                if let selected {
-                    Button(role: .destructive) {
-                        remove(selected)
-                    } label: {
-                        Image(systemName: "trash")
-                    }
-                    .buttonStyle(GlassIconButtonStyle(tint: .red, diameter: 46))
-                    .accessibilityLabel("Supprimer l'incrustation")
-                }
-
-                Button {
-                    dismiss()
-                } label: {
-                    Label("Terminé", systemImage: "checkmark")
-                        .padding(.horizontal, 6)
-                }
-                .buttonStyle(.glassProminent)
-                .tint(Theme.accent)
-            }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+    }
+
+    private var actionRow: some View {
+        HStack(spacing: 12) {
+            PhotosPicker(selection: $photoItem, matching: .images) {
+                Image(systemName: "photo")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 46, height: 46)
+                    .glassEffect(.regular.interactive(), in: Circle())
+                    .contentShape(Circle())
+            }
+            .disabled(!shapeIsKnown)
+            // `PhotosPicker` ne se grise pas tout seul : sans cela le bouton
+            // paraissait actif et ne répondait pas, ce qui se lit comme une
+            // panne.
+            .opacity(shapeIsKnown ? 1 : 0.35)
+            .accessibilityLabel("Ajouter une image")
+
+            Button {
+                // Un texte SÉLECTIONNÉ se retouche ; sinon on en crée un. Le
+                // texte n'était saisissable qu'une fois : une faute de frappe
+                // obligeait à supprimer l'incrustation et à refaire tout le
+                // placement.
+                if let selected, selected.kind == .text {
+                    editingTextLayer = selected
+                    draftText = selected.text
+                } else {
+                    editingTextLayer = nil
+                    draftText = ""
+                }
+                showTextField = true
+            } label: {
+                Image(systemName: selected?.kind == .text
+                      ? "character.cursor.ibeam" : "textformat")
+            }
+            .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 46))
+            // Tant que la forme du montage est inconnue, créer graverait
+            // un centre ancré calculé sur un 9:16 supposé — l'écran refuse
+            // déjà de régler dans ces conditions, il doit refuser de créer.
+            .disabled(!shapeIsKnown)
+            .opacity(shapeIsKnown ? 1 : 0.35)
+            .accessibilityLabel(selected?.kind == .text
+                                ? "Modifier le texte" : "Ajouter un texte")
+
+            Spacer()
+
+            if let selected {
+                Button(role: .destructive) {
+                    remove(selected)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(GlassIconButtonStyle(tint: .red, diameter: 46))
+                .accessibilityLabel("Supprimer l'incrustation")
+            }
+
+            Button {
+                dismiss()
+            } label: {
+                Label("Terminé", systemImage: "checkmark")
+                    .padding(.horizontal, 6)
+            }
+            .buttonStyle(.glassProminent)
+            .tint(Theme.accent)
+        }
         // Posée ICI et non à côté de l'alerte des erreurs : deux `.alert` sur
         // la même vue se disputent la présentation, une seule s'affiche.
-        .alert("Texte", isPresented: $showTextField) {
+        //
+        // C'est aussi le SEUL chemin de saisie de texte, création comme
+        // retouche : un champ posé dans le panneau de réglages ne pouvait
+        // coexister avec le clavier sans cacher soit le cadre de pose, soit
+        // lui-même. Elle refuse le vide, ce qui supprime du même coup tout
+        // l'état « incrustation de texte sans texte ».
+        .alert(editingTextLayer == nil ? "Texte" : "Modifier le texte",
+               isPresented: $showTextField) {
             TextField("Votre texte", text: $draftText)
-            Button("Ajouter") { addText() }
-            Button("Annuler", role: .cancel) { draftText = "" }
+            Button(editingTextLayer == nil ? "Ajouter" : "Enregistrer") { submitText() }
+            Button("Annuler", role: .cancel) {
+                draftText = ""
+                editingTextLayer = nil
+            }
         } message: {
             Text("Le texte s'affiche en blanc, sans effet ni contour.")
         }
@@ -426,6 +455,10 @@ struct OverlayEditorView: View {
             let aspect = Double(image.size.height / max(image.size.width, 1))
             if abs(layer.imageAspect - aspect) > 0.0001, layer.modelContext != nil {
                 layer.imageAspect = aspect
+                // Le rapport connu, l'ancrage doit être RECOLLÉ tout de suite :
+                // corriger la donnée sans corriger la position laissait le
+                // calque là où une hauteur supposée l'avait mis.
+                if layer.anchorIndex >= 0 { applyAnchorAtCreation(layer) }
                 try? modelContext.save()
             }
         }
@@ -472,10 +505,40 @@ struct OverlayEditorView: View {
         }
     }
 
-    private func addText() {
+    /// Valide l'alerte : retouche le texte du calque visé, ou en crée un.
+    ///
+    /// Un texte VIDE est refusé dans les deux cas — il ne se dessinerait ni
+    /// dans l'aperçu ni dans le fichier, et laisserait une incrustation
+    /// invisible qu'on ne pourrait plus retrouver.
+    private func submitText() {
         let trimmed = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
         draftText = ""
-        guard !trimmed.isEmpty else { return }
+        let target = editingTextLayer
+        editingTextLayer = nil
+        guard !trimmed.isEmpty else {
+            // Différé : présenter une alerte pendant qu'une autre se referme
+            // les fait se disputer, et l'une des deux est avalée.
+            if target != nil {
+                Task { @MainActor in
+                    message = "Un texte vide ne s'afficherait nulle part : "
+                        + "l'incrustation garde son texte précédent. "
+                        + "Pour la retirer, utilisez la corbeille."
+                }
+            }
+            return
+        }
+        if let target, target.modelContext != nil {
+            target.text = trimmed
+            // La largeur d'un texte dépend de ses caractères : la marge de son
+            // ancrage change avec lui.
+            applyAnchorAtCreation(target)
+            try? modelContext.save()
+            return
+        }
+        addText(trimmed)
+    }
+
+    private func addText(_ trimmed: String) {
         let layer = OverlayLayer()
         layer.kind = .text
         layer.text = trimmed
@@ -517,14 +580,20 @@ struct OverlayEditorView: View {
 
     // MARK: - Géométrie
 
+    /// Rapport largeur/hauteur qui fait FOI pour toute la géométrie.
+    ///
+    /// Les MÉTADONNÉES d'abord, la vignette seulement en secours — et non
+    /// l'inverse. La vignette est plafonnée à 1080 px et arrondie au pixel :
+    /// son rapport vaut 1,7763 là où le rendu vaut 1,7778. L'écart est
+    /// invisible à l'œil mais il suffisait à faire échouer la comparaison
+    /// `anchorVideoRatio`, si bien que chaque reconstruction de plan recalait
+    /// toutes les incrustations ancrées — un déplacement gratuit, à répétition,
+    /// que personne n'avait demandé.
     private var backdropRatio: CGFloat {
+        if let videoRatio, videoRatio > 0 { return videoRatio }
         if let backdrop, backdrop.size.width > 0, backdrop.size.height > 0 {
             return backdrop.size.width / backdrop.size.height
         }
-        // Repli sur la forme RÉELLE du rendu, jamais sur une valeur arbitraire :
-        // un 9:16 supposé sur un montage 16:9 fausse le cadre de pose ET les
-        // marges d'ancrage, et la position fausse est enregistrée.
-        if let videoRatio, videoRatio > 0 { return videoRatio }
         return 9.0 / 16.0
     }
 

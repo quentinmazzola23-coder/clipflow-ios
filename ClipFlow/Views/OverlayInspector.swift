@@ -2,7 +2,7 @@
 //  OverlayInspector.swift
 //  ClipFlow
 //
-//  Réglages de l'incrustation SÉLECTIONNÉE : texte, position, taille, durée.
+//  Réglages de l'incrustation SÉLECTIONNÉE : position, taille, durée.
 //
 //  SUR LE DÉFAUT « le sélecteur revient tout seul sur Toute la vidéo » : la
 //  cause exacte n'est PAS établie. Une première explication — « le calque
@@ -19,20 +19,25 @@
 //  Si le symptôme revient, c'est qu'aucune des deux n'était la bonne — ne pas
 //  repartir de l'hypothèse « pas observé », elle est écartée.
 //
+//  PAS DE CHAMP DE SAISIE ICI, et c'est une décision. Il y en a eu un : le
+//  clavier recouvrait alors soit le cadre de pose (avec l'évitement standard,
+//  qui écrasait le canevas à zéro), soit le champ lui-même (sans lui). Aucun
+//  arbitrage de mise en page ne rendait les deux visibles sur un iPhone. La
+//  saisie repasse donc par l'alerte, qui n'a pas ce problème, refuse le vide,
+//  et sert déjà à la création — un seul chemin, une seule règle.
+//
 //  LES COMPTEURS MONTRENT CE QU'ILS CONTIENNENT. C'est le corollaire de la
 //  règle « le modèle n'est écrit que sur geste ». Une version intermédiaire
 //  affichait des rangs bornés au montage courant tout en gardant les vrais :
 //  l'écran annonçait « du clip 6 au clip 6 » sur une portée enregistrée 40→80,
-//  si bien qu'un seul appui sur le « − », geste anodin, écrasait le 80 par un
-//  4 sans que rien n'ait jamais montré ce qu'on détruisait. Les rangs affichés
-//  sont donc les rangs réels ; le dépassement du montage courant est dit en
-//  toutes lettres, et le bornage reste où il sert : au rendu.
+//  si bien qu'un seul appui sur le « − », geste anodin, écrasait le 80 sans
+//  que rien n'ait jamais montré ce qu'on détruisait.
 //
-//  POSITION PAR ANCRAGE plutôt qu'au doigt seul : neuf points (les quatre
-//  angles, les quatre milieux de bord, le centre). La règle de placement vit
-//  dans `OverlayLayer.anchoredCenter` et l'encombrement dans
-//  `OverlayGeometry` — une seule copie de chaque, partagée avec la création et
-//  avec le recalage d'orientation.
+//  POSITION PAR ANCRAGE : neuf points (les quatre angles, les quatre milieux
+//  de bord, le centre). La règle de placement vit dans
+//  `OverlayLayer.anchoredCenter` et l'encombrement dans `OverlayGeometry` —
+//  une seule copie de chaque, partagée avec la création et avec le recalage
+//  d'orientation.
 //
 //  TAILLE AU CURSEUR plutôt qu'au pincement : le pincement se disputait le
 //  geste avec le glissement — SwiftUI rapporte le point milieu des deux
@@ -54,10 +59,15 @@ struct OverlayInspector: View {
     var durationLabel: () -> String
     var onChange: () -> Void
 
-    @FocusState private var editingText: Bool
-    /// Dernier texte non vide : un texte effacé ne se dessine nulle part, on
-    /// le rend plutôt que d'enregistrer un calque invisible.
-    @State private var lastNonEmptyText = ""
+    /// Plafond des compteurs, FIGÉ tant qu'on ne change pas de calque ni de
+    /// montage.
+    ///
+    /// Il valait `max(lastIndex, valeur courante)`, recalculé à chaque appui :
+    /// sur une portée qui dépasse le montage, descendre d'un cran abaissait le
+    /// plafond d'autant et le « + » mourait aussitôt. Un cliquet, donc, où
+    /// chaque appui était sans retour — sur des valeurs que l'utilisateur
+    /// venait justement d'apprendre qu'elles étaient conservées.
+    @State private var scopeCeiling = 0
 
     private var relativeSpan: Double { OverlayGeometry.span(of: layer) }
     private var relativeHeight: Double {
@@ -72,14 +82,8 @@ struct OverlayInspector: View {
     /// elle redeviendra juste dès que le montage s'allongera.
     private var outOfPlan: Bool { clipCount > 0 && realLast > lastIndex }
 
-    private var textIsBlank: Bool {
-        layer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
     var body: some View {
         VStack(spacing: 12) {
-            if layer.kind == .text { textField }
-
             HStack(alignment: .top, spacing: 16) {
                 anchorGrid
                 sizeControl
@@ -87,7 +91,16 @@ struct OverlayInspector: View {
 
             scopeControl
         }
-        .onAppear { if !textIsBlank { lastNonEmptyText = layer.text } }
+        .onAppear { refreshCeiling() }
+        // Le panneau est RÉUTILISÉ d'une sélection à l'autre — même position
+        // dans l'arbre, donc SwiftUI garde son état et ne rejoue pas
+        // `onAppear`. Le plafond doit suivre le calque affiché.
+        .onChange(of: layer.persistentModelID) { _, _ in refreshCeiling() }
+        .onChange(of: clipCount) { _, _ in refreshCeiling() }
+    }
+
+    private func refreshCeiling() {
+        scopeCeiling = max(lastIndex, max(0, layer.lastClipIndex))
     }
 
     /// Enregistre AU TOUR SUIVANT. Sauvegarder pendant la validation d'un
@@ -107,66 +120,6 @@ struct OverlayInspector: View {
         layer.centerX = center.x
         layer.centerY = center.y
         layer.anchorVideoRatio = videoRatio
-    }
-
-    // MARK: - Texte
-
-    /// Le texte reste MODIFIABLE après l'ajout.
-    ///
-    /// Il ne se saisissait qu'une fois, dans l'alerte de création : une faute
-    /// de frappe obligeait à supprimer l'incrustation, en recréer une, et
-    /// refaire tout le placement.
-    private var textField: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            TextField("Texte", text: $layer.text)
-                .textFieldStyle(.plain)
-                .font(.callout)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                .focused($editingText)
-                .submitLabel(.done)
-                .onSubmit { finishEditing() }
-                // Écrire change la largeur du texte, donc la marge de son
-                // ancrage : on recolle à chaque frappe, mais on N'ENREGISTRE
-                // PAS — un `save()` SwiftData par caractère saccaderait la
-                // saisie. La sauvegarde vient à la validation, ou à la
-                // fermeture de l'écran.
-                .onChange(of: layer.text) { _, new in
-                    let trimmed = new.trimmingCharacters(in: .whitespacesAndNewlines)
-                    // Pas de recalage sur une largeur nulle : le champ vidé,
-                    // l'ancrage aurait collé le calque à 3 % du bord et perdu
-                    // la position réglée.
-                    guard !trimmed.isEmpty else { return }
-                    lastNonEmptyText = new
-                    applyAnchor()
-                }
-
-            if textIsBlank {
-                Text("Texte vide : cette incrustation ne sera dessinée ni dans l'aperçu "
-                     + "ni dans le fichier exporté. Retapez un texte, ou supprimez-la.")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-            }
-        }
-        // SORTIE DE CLAVIER EXPLICITE. La touche Retour la donnait déjà, mais
-        // rien ne le disait, et le clavier recouvre la rangée Terminé.
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("Terminé") { finishEditing() }
-            }
-        }
-    }
-
-    private func finishEditing() {
-        // Un texte vide ne produit rien au rendu : on rend la dernière valeur
-        // utile plutôt que d'enregistrer un calque que personne ne dessinera.
-        if textIsBlank, !lastNonEmptyText.isEmpty { layer.text = lastNonEmptyText }
-        applyAnchor()
-        editingText = false
-        commit()
     }
 
     // MARK: - Ancrages
@@ -289,7 +242,7 @@ struct OverlayInspector: View {
                                 if layer.lastClipIndex < first { layer.lastClipIndex = first }
                                 commit()
                             }
-                        ), in: 0...max(lastIndex, realFirst)) {
+                        ), in: 0...max(scopeCeiling, realFirst)) {
                             Text("Du clip \(realFirst + 1)")
                                 .font(.caption.monospacedDigit())
                         }
@@ -299,17 +252,14 @@ struct OverlayInspector: View {
                                 layer.lastClipIndex = max(realFirst, new)
                                 commit()
                             }
-                        ), in: realFirst...max(lastIndex, realLast)) {
+                        ), in: realFirst...max(scopeCeiling, realLast)) {
                             Text("au clip \(realLast + 1)")
                                 .font(.caption.monospacedDigit())
                         }
                     }
 
                     if outOfPlan {
-                        Text("Ce montage ne compte que \(clipCount) clip(s) : "
-                             + "l'incrustation s'arrêtera au dernier. La portée "
-                             + "enregistrée est gardée et se rétablira si le "
-                             + "montage s'allonge.")
+                        Text(outOfPlanMessage)
                             .font(.caption2)
                             .foregroundStyle(.orange)
                     }
@@ -327,5 +277,21 @@ struct OverlayInspector: View {
                 }
             }
         }
+    }
+
+    /// Message de dépassement.
+    ///
+    /// Il ne disait que la moitié de ce qui se passe : quand le DÉBUT dépasse
+    /// aussi, il est ramené au dernier clip, et l'incrustation ne dure plus
+    /// qu'un clip — ce que la durée affichée juste en dessous montrait sans
+    /// que rien ne l'explique.
+    private var outOfPlanMessage: String {
+        let base = "Ce montage ne compte que \(clipCount) clip(s). "
+        let detail = realFirst > lastIndex
+            ? "L'incrustation ne sera visible que sur le clip \(clipCount), le dernier. "
+            : "Elle s'arrêtera au clip \(clipCount). "
+        return base + detail
+            + "La portée enregistrée est gardée telle quelle et se rétablira "
+            + "si le montage s'allonge."
     }
 }

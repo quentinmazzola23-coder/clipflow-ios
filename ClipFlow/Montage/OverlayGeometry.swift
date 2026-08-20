@@ -64,7 +64,11 @@ enum OverlayGeometry {
     static func height(of layer: OverlayLayer, videoRatio: Double) -> Double {
         switch layer.kind {
         case .image:
-            return layer.relativeWidth * layer.imageAspect * videoRatio
+            // 0 = rapport jamais relevé : carré supposé pour DESSINER, jamais
+            // pour écrire. Le recalage d'orientation, lui, saute ces calques
+            // plutôt que d'enregistrer une position déduite d'une supposition.
+            let aspect = layer.imageAspect > 0 ? layer.imageAspect : 1
+            return layer.relativeWidth * aspect * videoRatio
         case .text:
             // Même formule que le rendu : corps = largeur × 0,22, interligne 1,2.
             return layer.relativeWidth * 0.22 * 1.2 * videoRatio

@@ -64,9 +64,14 @@ final class OverlayLayer {
     /// Mémorisé pour que la géométrie se calcule SANS ouvrir le fichier :
     /// recaler les ancrages depuis l'écran de montage, après un changement
     /// d'orientation du montage, aurait sinon imposé de décoder tous les PNG.
-    /// Vaut 1 pour un texte, et pour les calques posés avant son existence —
-    /// l'éditeur le corrige à la première lecture de l'image.
-    var imageAspect: Double = 1
+    /// Vaut 0 tant qu'il n'a JAMAIS été relevé — calque posé avant l'existence
+    /// du champ. Zéro et « carré » doivent se distinguer : sur un défaut de 1,
+    /// le recalage d'orientation calculait la hauteur d'un bandeau comme s'il
+    /// était carré, déplaçait le calque au milieu du cadre, l'enregistrait, et
+    /// notait au passage le rapport traité — si bien qu'il ne repassait jamais
+    /// corriger une fois le vrai rapport connu. L'éditeur le relève à la
+    /// première lecture de l'image.
+    var imageAspect: Double = 0
 
     /// Rapport du rendu pour lequel la position ancrée a été calculée.
     ///
