@@ -42,12 +42,19 @@ struct OverlayPreviewLayer: View {
                 ForEach(visibleOverlays(), id: \.stackOrder) { overlay in
                     content(overlay, videoWidth: videoRect.width)
                         .position(
-                            x: videoRect.minX + videoRect.width * overlay.centerX,
-                            y: videoRect.minY + videoRect.height * overlay.centerY
+                            x: videoRect.width * overlay.centerX,
+                            y: videoRect.height * overlay.centerY
                         )
                 }
             }
-            .frame(width: geometry.size.width, height: geometry.size.height)
+            // ROGNAGE AU CADRE DE L'IMAGE, comme à l'export : une incrustation
+            // qui déborde doit être coupée par le bord de la vidéo, pas
+            // s'étaler sur les bandes noires du lecteur.
+            .frame(width: videoRect.width, height: videoRect.height)
+            .clipped()
+            .offset(x: videoRect.minX, y: videoRect.minY)
+            .frame(width: geometry.size.width, height: geometry.size.height,
+                   alignment: .topLeading)
             // Purement indicatif : le geste appartient au lecteur en dessous.
             .allowsHitTesting(false)
         }
@@ -67,11 +74,16 @@ struct OverlayPreviewLayer: View {
         let width = videoWidth * overlay.relativeWidth
         switch overlay.kind {
         case .image:
-            if let url = overlay.imageURL, let image = UIImage(contentsOfFile: url.path) {
+            if let image = Self.image(at: overlay.imageURL) {
+                // MÊME formule que `OverlayRenderer.makeImageLayer` : hauteur
+                // calculée, jamais plafonnée par le cadre du lecteur. Avec un
+                // ajustement automatique, une incrustation plus haute que
+                // l'image rétrécissait à l'écran alors que le fichier, lui, la
+                // rogne — l'aperçu montrait 56 % là où l'export écrit 70 %.
+                let ratio = image.size.height / max(image.size.width, 1)
                 Image(uiImage: image)
                     .resizable()
-                    .scaledToFit()
-                    .frame(width: width)
+                    .frame(width: width, height: width * ratio)
             }
         case .text:
             // MÊME FORMULE que le moteur d'export (largeur × 0,22) : sans
@@ -83,6 +95,22 @@ struct OverlayPreviewLayer: View {
                 .lineLimit(1)
                 .fixedSize()
         }
+    }
+
+    /// Images gardées en mémoire, partagées par toutes les instances de la vue.
+    ///
+    /// C'était un `UIImage(contentsOfFile:)` posé dans le corps : le suivi de
+    /// lecture reconstruit cette vue vingt fois par seconde, donc vingt
+    /// décodages de PNG par seconde et par incrustation, sur le fil principal.
+    private static let imageCache = NSCache<NSString, UIImage>()
+
+    private static func image(at url: URL?) -> UIImage? {
+        guard let url else { return nil }
+        let key = url.path as NSString
+        if let cached = imageCache.object(forKey: key) { return cached }
+        guard let image = UIImage(contentsOfFile: url.path) else { return nil }
+        imageCache.setObject(image, forKey: key)
+        return image
     }
 
     /// Plus grand cadre du rapport voulu tenant dans l'espace, centré.

@@ -75,6 +75,42 @@ final class OverlayLayer {
         imageFilename.map { OverlayStore.url(forImageNamed: $0) }
     }
 
+    /// Centre correspondant à un ancrage — RÈGLE UNIQUE, partagée.
+    ///
+    /// Elle a d'abord été écrite deux fois : une position en dur à la création
+    /// et une formule dans le panneau de réglages. Les deux divergeaient, si
+    /// bien qu'un logo naissait déjà coupé en bas d'un montage large, et
+    /// sautait d'un coup dès qu'on effleurait le curseur de taille — le seul
+    /// geste qui rappelait la formule.
+    ///
+    /// - `relativeSpan` : largeur RÉELLEMENT occupée, en fraction de la
+    ///   largeur de l'image. Ce n'est `relativeWidth` que pour une image :
+    ///   pour un texte, `relativeWidth` ne règle que le corps de police et la
+    ///   largeur dépend du nombre de caractères, donc elle se mesure.
+    /// - `relativeHeight` : hauteur occupée, en fraction de la hauteur.
+    ///
+    /// Le plafond est le CENTRE (0,5), pas 0,45 : à 0,45, tout ce qui occupe
+    /// plus de 84 % du cadre débordait de l'autre côté. Un ancrage de bord ne
+    /// doit jamais franchir le centre — c'est ce que le plafond protège — mais
+    /// il ne doit pas non plus rogner ce qui tiendrait.
+    static func anchoredCenter(anchorIndex: Int,
+                               relativeSpan: Double,
+                               relativeHeight: Double) -> (x: Double, y: Double)? {
+        guard anchorIndex >= 0, anchorIndex < 9 else { return nil }
+        let horizontalInset = min(0.5, relativeSpan / 2 + 0.03)
+        let verticalInset = min(0.5, relativeHeight / 2 + 0.03)
+        let x: Double = switch anchorIndex % 3 {
+        case 0: horizontalInset
+        case 1: 0.5
+        default: 1 - horizontalInset
+        }
+        let y: Double = switch anchorIndex / 3 {
+        case 0: verticalInset
+        case 1: 0.5
+        default: 1 - verticalInset
+        }
+        return (x, y)
+    }
 }
 
 enum OverlayKind: String, Codable, Sendable, CaseIterable {

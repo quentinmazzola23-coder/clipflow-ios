@@ -5,10 +5,14 @@
 //  Rendu des incrustations dans la composition vidéo.
 //
 //  MÉCANISME : `AVVideoCompositionCoreAnimationTool`, l'outil prévu par
-//  AVFoundation pour poser des calques Core Animation sur une vidéo. Il sert
-//  À LA FOIS l'aperçu et l'export à partir de la MÊME videoComposition —
-//  donc ce qui est vu est ce qui est écrit, sans second moteur de rendu à
-//  faire correspondre.
+//  AVFoundation pour poser des calques Core Animation sur une vidéo.
+//
+//  IL NE SERT QUE L'EXPORT. Apple le documente comme un outil de rendu hors
+//  ligne : attaché à la composition d'un `AVPlayerItem`, il est ignoré ou
+//  laisse le lecteur noir. L'aperçu redessine donc les incrustations en
+//  SwiftUI (`OverlayPreviewLayer`), avec les mêmes fractions et la même
+//  formule de police — toute modification de géométrie ici doit être reportée
+//  là-bas, sinon l'aperçu ment sur le fichier produit.
 //
 //  APPARITION/DISPARITION SANS EFFET. Une couche Core Animation est visible
 //  par défaut sur toute la durée ; pour la borner, on utilise une animation
@@ -95,7 +99,8 @@ enum OverlayRenderer {
         guard !trimmed.isEmpty else { return nil }
 
         // La largeur relative pilote la TAILLE DE POLICE : c'est ce que le
-        // pincement règle, et ça reste lisible quelle que soit la définition.
+        // curseur de taille règle, et ça reste lisible quelle que soit la
+        // définition de sortie.
         let fontSize = renderSize.width * CGFloat(overlay.relativeWidth) * 0.22
         let font = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
         let attributes: [NSAttributedString.Key: Any] = [

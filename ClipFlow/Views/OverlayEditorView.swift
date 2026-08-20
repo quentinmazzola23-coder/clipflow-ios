@@ -14,6 +14,12 @@
 //  avec le glissement. La vignette de fond est une vraie image du montage,
 //  donc le cadrage est jugé sur le contenu réel.
 //
+//  LA MISE EN PAGE NE BOUGE PAS PENDANT UN GESTE. La zone de réglages a une
+//  hauteur réservée et la sélection n'a lieu qu'au relâchement : faire
+//  apparaître le panneau en plein glissement retirait ~190 pt au cadre de
+//  pose, et `.position(canvasSize.height × centerY)` téléportait l'incrustation
+//  loin du doigt — en changeant au passage le gain de la translation.
+//
 
 import SwiftUI
 import SwiftData
@@ -27,6 +33,9 @@ struct OverlayEditorView: View {
     var plan: MontagePlan
     /// Une image du montage, pour juger le placement sur du contenu réel.
     var backdrop: UIImage?
+    /// Rapport largeur/hauteur du RENDU réel, lu dans les métadonnées de la
+    /// piste. Il vaut même quand l'extraction de vignette échoue.
+    var videoRatio: CGFloat?
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
@@ -42,9 +51,14 @@ struct OverlayEditorView: View {
     @State private var showTextField = false
     @State private var draftText = ""
     @State private var message: String?
-    /// Position au DÉBUT du glissement, en fractions. Le déplacement se
-    /// calcule par rapport à elle.
-    @State private var dragOrigin: (x: Double, y: Double)?
+    /// Position au DÉBUT du glissement, en fractions, PAR CALQUE.
+    ///
+    /// C'était un état unique : deux doigts sur deux incrustations et la
+    /// seconde partait de l'origine de la première, donc se téléportait. Le
+    /// point de départ du doigt est mémorisé avec — si SwiftUI rapporte un
+    /// autre `startLocation`, c'est un nouveau geste, ce qui purge une origine
+    /// laissée par un glissement interrompu sans `onEnded`.
+    @State private var dragOrigins: [ObjectIdentifier: (x: Double, y: Double, start: CGPoint)] = [:]
     /// Images déjà lues, gardées en mémoire : les relire du disque à chaque
     /// évaluation de la vue saccadait le glissement.
     @State private var imageCache: [String: UIImage] = [:]
@@ -59,6 +73,11 @@ struct OverlayEditorView: View {
         guard let selectedLayer, selectedLayer.modelContext != nil else { return nil }
         return selectedLayer
     }
+
+    /// Forme du montage CONNUE ? Tant qu'elle ne l'est pas, on ne laisse pas
+    /// régler la position : un ancrage calculé sur une forme supposée grave un
+    /// centre faux dans le modèle, et il y survit.
+    private var shapeIsKnown: Bool { backdrop != nil || videoRatio != nil }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -92,8 +111,7 @@ struct OverlayEditorView: View {
         GeometryReader { geometry in
             // Le cadre de pose respecte le RAPPORT de la vidéo : poser dans
             // un cadre d'une autre forme décalerait tout à l'export.
-            let videoRatio = backdropRatio
-            let size = fittedSize(in: geometry.size, ratio: videoRatio)
+            let size = fittedSize(in: geometry.size, ratio: backdropRatio)
 
             ZStack {
                 Color.black
@@ -103,8 +121,8 @@ struct OverlayEditorView: View {
                         .scaledToFill()
                         .frame(width: size.width, height: size.height)
                         .clipped()
-                } else {
-                    Text("Aperçu indisponible")
+                } else if !shapeIsKnown {
+                    Text("Préparation de l'aperçu…")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -129,10 +147,14 @@ struct OverlayEditorView: View {
 
         return Group {
             if layer.kind == .image, let image = cachedImage(for: layer) {
+                // Hauteur DÉDUITE de la largeur, comme le moteur d'export : la
+                // laisser à la proposition du parent faisait rétrécir
+                // l'incrustation par ajustement automatique dès qu'elle
+                // dépassait le cadre — alors que le fichier, lui, la rogne.
+                let ratio = image.size.height / max(image.size.width, 1)
                 Image(uiImage: image)
                     .resizable()
-                    .scaledToFit()
-                    .frame(width: width)
+                    .frame(width: width, height: width * ratio)
             } else if layer.kind == .text {
                 // MÊME FORMULE que le moteur d'export, SANS plancher : un
                 // `max(8, …)` rendait le texte lisible dans l'éditeur et
@@ -151,6 +173,15 @@ struct OverlayEditorView: View {
                     .padding(-6)
             }
         }
+        // PRISE TACTILE PLANCHER, indépendante de la taille réglée. À 5 % de
+        // largeur le dessin ne fait plus qu'une quinzaine de points, alors
+        // qu'il est la SEULE voie de sélection : il n'existe pas de liste de
+        // calques, et le bouton Supprimer lui-même n'apparaît qu'une fois
+        // quelque chose de sélectionné. Sans ce plancher, réduire une
+        // incrustation au minimum puis la désélectionner la rendait
+        // irrécupérable. Le contenu reste centré : rien ne bouge à l'écran.
+        .frame(minWidth: 44, minHeight: 44)
+        .contentShape(Rectangle())
         .position(x: canvasSize.width * layer.centerX,
                   y: canvasSize.height * layer.centerY)
         .gesture(
@@ -160,11 +191,17 @@ struct OverlayEditorView: View {
             // sautait sous la main. La taille se règle au curseur.
             DragGesture()
                 .onChanged { value in
-                    selectedLayer = layer
-                    if dragOrigin == nil {
-                        dragOrigin = (layer.centerX, layer.centerY)
+                    // SÉLECTION VOLONTAIREMENT PAS ICI : elle ferait
+                    // apparaître le panneau de réglages, donc rétrécirait le
+                    // cadre de pose en plein geste.
+                    let key = ObjectIdentifier(layer)
+                    let origin: (x: Double, y: Double, start: CGPoint)
+                    if let known = dragOrigins[key], known.start == value.startLocation {
+                        origin = known
+                    } else {
+                        origin = (layer.centerX, layer.centerY, value.startLocation)
+                        dragOrigins[key] = origin
                     }
-                    guard let origin = dragOrigin else { return }
                     // Poser au doigt annule l'ancrage : sinon le prochain
                     // changement de taille ramènerait l'incrustation dans son
                     // coin, effaçant le placement qu'on vient de faire.
@@ -178,7 +215,8 @@ struct OverlayEditorView: View {
                         origin.y + value.translation.height / canvasSize.height), 1)
                 }
                 .onEnded { _ in
-                    dragOrigin = nil
+                    dragOrigins[ObjectIdentifier(layer)] = nil
+                    selectedLayer = layer // après le geste, plus pendant
                     try? modelContext.save()
                 }
         )
@@ -189,22 +227,34 @@ struct OverlayEditorView: View {
 
     private var controls: some View {
         VStack(spacing: 10) {
-            if let selected {
-                OverlayInspector(
-                    layer: selected,
-                    clipCount: plan.placements.count,
-                    relativeHeight: relativeHeight(of: selected),
-                    // Fermeture, pas une chaîne déjà calculée : le libellé
-                    // demande la résolution des portées, inutile de la refaire
-                    // à chaque image d'un glissement.
-                    durationLabel: { durationLabel(selected) },
-                    onChange: { try? modelContext.save() }
-                )
-            } else if !layers.isEmpty {
-                Text("Touchez une incrustation pour régler sa position, sa taille et sa durée.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+            // HAUTEUR RÉSERVÉE, pas conditionnelle : sans elle, faire
+            // apparaître ou disparaître le panneau retaille le cadre de pose
+            // (la pile racine n'a pas de zone défilante, le cadre encaisse) et
+            // toutes les incrustations se déplacent à l'écran.
+            ZStack(alignment: .top) {
+                if let selected, shapeIsKnown {
+                    OverlayInspector(
+                        layer: selected,
+                        clipCount: plan.placements.count,
+                        relativeHeight: relativeHeight(of: selected),
+                        relativeSpan: relativeSpan(of: selected),
+                        // Fermeture, pas une chaîne déjà calculée : le libellé
+                        // demande la résolution des portées, inutile de la
+                        // refaire à chaque image d'un glissement.
+                        durationLabel: { durationLabel(selected) },
+                        onChange: { try? modelContext.save() }
+                    )
+                } else if selected != nil {
+                    Text("Préparation de l'aperçu…")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                } else if !layers.isEmpty {
+                    Text("Touchez une incrustation pour régler sa position, sa taille et sa durée.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
             }
+            .frame(minHeight: 250, alignment: .top)
 
             HStack(spacing: 12) {
                 PhotosPicker(selection: $photoItem, matching: .images) {
@@ -261,6 +311,8 @@ struct OverlayEditorView: View {
         }
     }
 
+    // MARK: - Encombrement réel
+
     /// Hauteur de l'incrustation en fraction de la HAUTEUR de l'image.
     ///
     /// Sert aux marges d'ancrage : une marge verticale fixe coupait le haut
@@ -277,6 +329,33 @@ struct OverlayEditorView: View {
         case .text:
             // Même formule que le rendu : corps = largeur × 0,22, interligne 1,2.
             return layer.relativeWidth * 0.22 * 1.2 * ratio
+        }
+    }
+
+    /// Largeur RÉELLEMENT occupée, en fraction de la largeur de l'image.
+    ///
+    /// Pour un texte, `relativeWidth` ne pilote que le CORPS de police : la
+    /// largeur dépend du nombre de caractères et doit être MESURÉE. Sans cela
+    /// l'ancrage visait une marge sans rapport avec ce qui est dessiné — un
+    /// titre de vingt-cinq lettres ancré à gauche débordait de la moitié de
+    /// l'image, et un « GO » ancré à gauche se retrouvait presque centré.
+    private func relativeSpan(of layer: OverlayLayer) -> Double {
+        switch layer.kind {
+        case .image:
+            return layer.relativeWidth
+        case .text:
+            let trimmed = layer.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return 0 }
+            // Mesure à une largeur de référence : la formule du rendu est
+            // linéaire en largeur d'image, le RAPPORT ne dépend donc pas de la
+            // définition de sortie.
+            let reference: CGFloat = 1000
+            let font = UIFont.systemFont(
+                ofSize: reference * CGFloat(layer.relativeWidth) * 0.22,
+                weight: .semibold
+            )
+            let measured = (trimmed as NSString).size(withAttributes: [.font: font])
+            return Double(measured.width / reference)
         }
     }
 
@@ -324,11 +403,25 @@ struct OverlayEditorView: View {
             let layer = OverlayLayer()
             layer.kind = .image
             layer.imageFilename = filename
-            // Coin bas-droit par défaut : la place d'un filigrane.
             layer.relativeWidth = 0.22
-            layer.anchorIndex = 8 // bas droite
-            layer.centerX = 1 - (layer.relativeWidth / 2 + 0.03)
-            layer.centerY = 0.86
+            layer.anchorIndex = 8 // bas droite : la place d'un filigrane
+            // Cache amorcé AVANT tout calcul : `relativeHeight` doit rendre la
+            // bonne valeur dès le premier passage de la vue, sinon l'ancrage
+            // se recalcule et le logo saute.
+            imageCache[filename] = image
+            let ratio = Double(image.size.height / max(image.size.width, 1))
+            // Position DÉDUITE de l'ancrage, jamais écrite en dur : une
+            // constante 0,86 contredisait la règle du même ancrage, si bien
+            // que le logo naissait déjà coupé en bas d'un montage large et
+            // sautait au premier effleurement du curseur de taille.
+            if let center = OverlayLayer.anchoredCenter(
+                anchorIndex: layer.anchorIndex,
+                relativeSpan: layer.relativeWidth,
+                relativeHeight: layer.relativeWidth * ratio * Double(backdropRatio)
+            ) {
+                layer.centerX = center.x
+                layer.centerY = center.y
+            }
             layer.stackOrder = (layers.map(\.stackOrder).max() ?? -1) + 1
             // insert AVANT le rattachement : relier un objet non suivi à un
             // projet suivi laisse SwiftData réconcilier après coup.
@@ -350,8 +443,14 @@ struct OverlayEditorView: View {
         layer.text = trimmed
         layer.relativeWidth = 0.5
         layer.anchorIndex = 1 // haut centre : la place d'un titre
-        layer.centerX = 0.5
-        layer.centerY = 0.18
+        if let center = OverlayLayer.anchoredCenter(
+            anchorIndex: layer.anchorIndex,
+            relativeSpan: relativeSpan(of: layer),
+            relativeHeight: relativeHeight(of: layer)
+        ) {
+            layer.centerX = center.x
+            layer.centerY = center.y
+        }
         layer.stackOrder = (layers.map(\.stackOrder).max() ?? -1) + 1
         modelContext.insert(layer)
         layer.project = project
@@ -371,8 +470,14 @@ struct OverlayEditorView: View {
     // MARK: - Géométrie
 
     private var backdropRatio: CGFloat {
-        guard let backdrop, backdrop.size.width > 0 else { return 9.0 / 16.0 }
-        return backdrop.size.width / backdrop.size.height
+        if let backdrop, backdrop.size.width > 0, backdrop.size.height > 0 {
+            return backdrop.size.width / backdrop.size.height
+        }
+        // Repli sur la forme RÉELLE du rendu, jamais sur une valeur arbitraire :
+        // un 9:16 supposé sur un montage 16:9 fausse le cadre de pose ET les
+        // marges d'ancrage, et la position fausse est enregistrée.
+        if let videoRatio, videoRatio > 0 { return videoRatio }
+        return 9.0 / 16.0
     }
 
     /// Plus grand cadre du rapport voulu tenant dans l'espace disponible.

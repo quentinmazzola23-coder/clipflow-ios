@@ -43,6 +43,15 @@ struct MontageView: View {
     @State private var showOverlays = false
     /// Image extraite du montage, fond de la pose d'incrustations.
     @State private var overlayBackdrop: UIImage?
+    /// Clip d'où vient la vignette. La taille de rendu du montage est celle du
+    /// PREMIER clip placé : si ce clip change (autre densité, autre fenêtre),
+    /// une vignette gardée décrirait un cadrage qui n'existe plus.
+    @State private var overlayBackdropClipID: Int?
+    /// Rapport largeur/hauteur RÉEL du rendu, lu dans les métadonnées de la
+    /// piste. Il vaut même quand l'extraction d'image échoue — sans lui,
+    /// l'éditeur retombait sur un 9:16 supposé et gravait des positions
+    /// calculées sur une forme inventée.
+    @State private var overlayVideoRatio: CGFloat?
     /// Position de lecture de l'aperçu — pilote l'affichage des incrustations.
     @State private var previewTime: Double = 0
     /// Observateur de temps du lecteur d'aperçu, retiré avec lui.
@@ -58,6 +67,21 @@ struct MontageView: View {
     @State private var analysisTask: Task<Void, Never>?
     @State private var player: AVPlayer?
     @State private var isPreviewing = false
+    /// Tâche de construction de l'aperçu — ANNULABLE.
+    ///
+    /// Sans ce jeton, fermer l'écran pendant la construction (plusieurs
+    /// secondes sur 150 clips) laissait la tâche se réveiller APRÈS la
+    /// disparition de la vue : le lecteur s'installait, jouait à plein volume
+    /// par-dessus l'écran précédent, et plus aucun bouton ne pouvait
+    /// l'arrêter. L'observateur périodique n'était alors jamais retiré.
+    @State private var previewTask: Task<Void, Never>?
+    /// Numéro de génération du plan. Un aperçu construit sur un plan périmé
+    /// se jette au lieu de s'installer derrière le dos de `rebuildPlan`.
+    @State private var planGeneration = 0
+    /// Vrai pendant `MontageComposer.build` : `isPreviewing` ne devient vrai
+    /// qu'à la fin, il ne peut donc pas servir de verrou contre un double
+    /// appui qui lancerait deux compositions complètes en parallèle.
+    @State private var isBuildingPreview = false
     /// Jeton d'observation de fin de lecture — retiré avant chaque nouvel
     /// aperçu, sinon un observateur s'accumule par lecture.
     @State private var endObserver: NSObjectProtocol?
@@ -109,13 +133,22 @@ struct MontageView: View {
                 }
             }
         }
+        // TOUTE FEUILLE COUPE LA LECTURE, et le branchement est sur le
+        // DRAPEAU, pas sur le bouton : la bibliothèque s'ouvre aussi d'
+        // elle-même quand le projet n'a pas encore de musique, et l'aperçu
+        // continuait alors sous la feuille — bande-son du montage mêlée aux
+        // extraits écoutés. Même patron que ProjectEditorView.
+        .onChange(of: showOverlays) { _, presented in if presented { silence() } }
+        .onChange(of: showLibrary) { _, presented in if presented { silence() } }
+        .onChange(of: showFileImporter) { _, presented in if presented { silence() } }
         // INCRUSTATIONS : étape POSTÉRIEURE au montage — on ne décore pas une
         // vidéo qu'on n'a pas encore construite.
         .sheet(isPresented: $showOverlays, onDismiss: refreshOverlays) {
             NavigationStack {
                 if let plan {
                     OverlayEditorView(project: project, plan: plan,
-                                      backdrop: overlayBackdrop)
+                                      backdrop: overlayBackdrop,
+                                      videoRatio: overlayVideoRatio)
                 }
             }
         }
@@ -129,7 +162,10 @@ struct MontageView: View {
         }
         .onDisappear {
             analysisTask?.cancel()
-            player?.pause()
+            // `stopPreview` et non `pause` : il annule aussi la construction
+            // en vol, et remet l'indicateur — sans quoi le bouton affichait
+            // « pause » au retour alors que rien ne jouait.
+            stopPreview()
             stopAudition()
             // Observateur de fin de lecture : retiré à la sortie, sinon un
             // observateur ET son AVPlayer fuyaient à chaque visite de l'écran.
@@ -395,15 +431,21 @@ struct MontageView: View {
 
     private func refreshOverlays() {
         guard let plan else { resolvedOverlays = []; return }
-        // Rangs REMIS DANS LES BORNES du montage courant, dans le modèle :
-        // un calque posé « du clip 150 » sur un montage qui n'en a plus que
-        // 40 faisait planter les réglages (plage de compteur inversée).
-        let lastIndex = max(0, plan.placements.count - 1)
-        for layer in project.overlays where !layer.spansWholeMontage {
-            layer.firstClipIndex = min(max(0, layer.firstClipIndex), lastIndex)
-            layer.lastClipIndex = min(max(layer.firstClipIndex, layer.lastClipIndex), lastIndex)
-        }
-        try? modelContext.save()
+        // AUCUNE ÉCRITURE DANS LE MODÈLE ICI, et c'est délibéré.
+        //
+        // Une version précédente recalait les rangs des portées dans les
+        // bornes du plan courant puis enregistrait. C'était une PERTE DE
+        // DONNÉES : le nombre de clips varie à chaque déplacement de la
+        // fenêtre musicale (`BeatMap.slots` part du beat courant et va
+        // jusqu'à la fin du morceau), et il tombe à zéro sur un cran de
+        // densité trop lent pour les rushes. Une incrustation posée « du clip
+        // 40 au clip 80 » se retrouvait réécrite en 5→5, ou en 0→0, sans
+        // aucun moyen de revenir en arrière — alors qu'il suffit de ne rien
+        // toucher pour qu'elle redevienne juste dès que la fenêtre revient.
+        //
+        // Les bornes sont appliquées LÀ OÙ ELLES SERVENT : `OverlayStore
+        // .resolve` pour le rendu, et des liaisons bornées pour les
+        // compteurs de l'inspecteur.
         resolvedOverlays = OverlayStore.resolve(project.overlays,
                                                 placements: plan.placements,
                                                 totalDuration: plan.totalDuration)
@@ -412,10 +454,24 @@ struct MontageView: View {
     /// Extrait une image du montage : on juge le placement d'un logo sur du
     /// contenu réel, pas sur un rectangle noir.
     private func prepareOverlayBackdrop() {
-        guard overlayBackdrop == nil, let plan, let first = plan.placements.first,
+        guard let plan, let first = plan.placements.first,
               let url = clipSources[first.clipID] else { return }
+        // Vignette réutilisée UNIQUEMENT si elle vient du clip qui fixe la
+        // taille de rendu du plan COURANT.
+        guard overlayBackdrop == nil || overlayVideoRatio == nil
+                || overlayBackdropClipID != first.clipID else { return }
+        let clipID = first.clipID
         Task {
             let asset = AVURLAsset(url: url)
+            // RAPPORT D'ABORD, depuis les métadonnées : aucune image à
+            // décoder, donc il aboutit là où l'extraction peut échouer.
+            if let track = try? await asset.loadTracks(withMediaType: .video).first,
+               let natural = try? await track.load(.naturalSize),
+               let transform = try? await track.load(.preferredTransform) {
+                let oriented = natural.applying(transform)
+                let width = abs(oriented.width), height = abs(oriented.height)
+                if width > 0, height > 0 { overlayVideoRatio = width / height }
+            }
             let generator = AVAssetImageGenerator(asset: asset)
             generator.appliesPreferredTrackTransform = true
             generator.maximumSize = CGSize(width: 1080, height: 1080)
@@ -424,6 +480,7 @@ struct MontageView: View {
                                                        multiplier: 1, divisor: 2))
             if let image = try? await generator.image(at: time).image {
                 overlayBackdrop = UIImage(cgImage: image)
+                overlayBackdropClipID = clipID
             }
         }
     }
@@ -436,15 +493,11 @@ struct MontageView: View {
         guard newDensity != density else { return }
         project.montageDensityRaw = newDensity.rawValue
         try? modelContext.save()
-        // Changer la densité change le NOMBRE de clips : une incrustation
-        // posée « du clip 4 au clip 12 » ne couvre plus le même moment. Elle
-        // est recalée dans les bornes du nouveau montage, mais l'utilisateur
-        // doit le savoir — sinon son logo se déplace tout seul.
-        let scoped = project.overlays.filter { !$0.spansWholeMontage }
-        if !scoped.isEmpty {
-            errorMessage = "\(scoped.count) incrustation(s) sont posées sur des clips précis. "
-                + "En changeant la densité, le découpage change : vérifiez leur position dans l'écran Incrustations."
-        }
+        // AUCUNE ALERTE. La barre de densité est faite pour être tapée en
+        // rafale au pouce : cinq crans essayés donnaient cinq modales à
+        // fermer, sur le canal des vraies erreurs en plus. Et il n'y a plus
+        // rien à signaler — les portées d'incrustation ne sont plus réécrites
+        // (voir refreshOverlays), seulement bornées à l'affichage et au rendu.
         Task { await rebuildPlan() }
     }
 
@@ -474,11 +527,21 @@ struct MontageView: View {
             Button {
                 togglePreview()
             } label: {
-                Image(systemName: isPreviewing ? "pause.fill" : "play.fill")
+                // La construction prend plusieurs secondes sans rien montrer :
+                // l'utilisateur rappuyait, et deux compositions complètes se
+                // construisaient en parallèle pour que l'une soit jetée.
+                if isBuildingPreview {
+                    ProgressView()
+                } else {
+                    Image(systemName: isPreviewing ? "pause.fill" : "play.fill")
+                }
             }
             .buttonStyle(GlassIconButtonStyle(diameter: 52))
-            .accessibilityLabel(isPreviewing ? "Pause" : "Aperçu")
-            .disabled(isExporting || (plan?.placements.isEmpty ?? true))
+            .accessibilityLabel(isBuildingPreview
+                                ? "Préparation de l'aperçu"
+                                : (isPreviewing ? "Pause" : "Aperçu"))
+            .disabled(isExporting || isBuildingPreview
+                      || (plan?.placements.isEmpty ?? true))
 
             Spacer()
 
@@ -499,10 +562,6 @@ struct MontageView: View {
                 .accessibilityLabel("Annuler l'export")
             } else {
                 Button {
-                    // La lecture continuait DERRIÈRE la feuille : on posait
-                    // son logo avec la bande-son du montage dans les oreilles.
-                    stopPreview()
-                    stopAudition()
                     prepareOverlayBackdrop()
                     showOverlays = true
                 } label: {
@@ -751,7 +810,10 @@ struct MontageView: View {
     /// chacun démarrant à SON point d'entrée, durée dictée par son créneau.
     private func rebuildPlan() async {
         guard let map = beatMap else { return }
-        stopPreview()
+        stopPreview() // annule aussi la construction en cours
+        // Le plan change de génération : un aperçu construit sur l'ANCIEN se
+        // jettera au lieu de se réinstaller derrière ce `player = nil`.
+        planGeneration &+= 1
         // La composition affichée ne correspond plus au plan : la garder
         // rejouerait l'ANCIEN montage — pire qu'un écran de veille.
         releaseTimeObserver() // avant de lâcher le lecteur, jamais après
@@ -794,7 +856,14 @@ struct MontageView: View {
         let slots = map.slots(from: windowStart, density: density)
         plan = MontagePlanner.plan(slots: slots, clips: candidates, windowStart: windowStart)
         clipSources = sources
-        refreshOverlays() // rangs recalés sur le nouveau découpage
+        // Le PREMIER placement peut changer de clip, donc d'orientation : la
+        // vignette de pose et la taille de rendu mémorisée décriraient un
+        // montage qui n'existe plus.
+        overlayBackdrop = nil
+        overlayBackdropClipID = nil
+        overlayVideoRatio = nil
+        previewRenderSize = nil
+        refreshOverlays()
     }
 
     // MARK: - Aperçu
@@ -805,15 +874,26 @@ struct MontageView: View {
             stopPreview()
             return
         }
+        // Verrou posé AVANT la tâche : voir `isBuildingPreview`.
+        guard !isBuildingPreview else { return }
         guard let plan, let filename = project.musicFilename else { return }
-        Task {
+        let generation = planGeneration
+        let sources = clipSources
+        isBuildingPreview = true
+        previewTask = Task {
+            defer { isBuildingPreview = false }
             do {
                 let montage = try await MontageComposer.build(
                     plan: plan,
-                    sources: clipSources,
+                    sources: sources,
                     musicURL: MusicStore.url(forMusicFilename: filename),
                     overlays: resolvedOverlays // dessinées par-dessus, pas incrustées ici
                 )
+                // La construction dure plusieurs secondes : l'écran a pu être
+                // fermé, ou le plan reconstruit, entre-temps. Installer ce
+                // lecteur maintenant ferait jouer un montage que plus rien ne
+                // décrit à l'écran — et que l'export ne produirait pas.
+                guard !Task.isCancelled, generation == planGeneration else { return }
                 let item = AVPlayerItem(asset: montage.composition)
                 item.videoComposition = montage.videoComposition
                 // L'ANCIEN observateur se retire de SON lecteur, jamais du
@@ -845,14 +925,26 @@ struct MontageView: View {
                     Task { @MainActor in isPreviewing = false }
                 }
             } catch {
+                guard !Task.isCancelled, generation == planGeneration else { return }
                 errorMessage = error.localizedDescription
             }
         }
     }
 
     private func stopPreview() {
+        // La construction EN VOL tombe aussi : sinon elle rallumerait le son
+        // après coup — feuille ouverte, écran fermé, export lancé.
+        previewTask?.cancel()
+        previewTask = nil
         player?.pause()
         isPreviewing = false
+    }
+
+    /// Coupe TOUT ce qui produit du son sur cet écran : l'aperçu du montage
+    /// et l'écoute de repérage.
+    private func silence() {
+        stopPreview()
+        stopAudition()
     }
 
     /// Détache l'observateur de temps DE SON lecteur. Passer par ici partout
