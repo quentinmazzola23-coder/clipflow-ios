@@ -41,7 +41,10 @@ enum BeatAnalyzer {
         guard let grid = TempoEstimator.estimateGrid(curves: curves, duration: duration) else {
             return nil
         }
-        let beats = TempoEstimator.beatTimes(grid: grid, duration: duration)
+        // Grille ASSERVIE : suit les attaques réelles, rattrape les décalages
+        // (break, montage du morceau, dérive) au lieu de les accumuler.
+        let beats = TempoEstimator.adaptiveBeatTimes(grid: grid, curves: curves,
+                                                     duration: duration)
         guard beats.count >= 4 else { return nil }
         return map(curves: curves, grid: grid, beats: beats, duration: duration)
     }

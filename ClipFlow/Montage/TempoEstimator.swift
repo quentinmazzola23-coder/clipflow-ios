@@ -177,6 +177,96 @@ enum TempoEstimator {
         return bestPhase
     }
 
+    /// Grille ASSERVIE : les beats suivent la grille régulière, mais chaque
+    /// beat se recale EN DOUCEUR sur l'attaque réelle la plus proche.
+    ///
+    /// Pourquoi : un morceau réel n'est pas un métronome parfait — un break
+    /// peut décaler la suite, un montage du morceau lui-même peut couper une
+    /// demi-mesure, l'encodage peut dériver. Une grille rigide accumulerait le
+    /// décalage jusqu'à couper à contretemps toute la fin du morceau.
+    ///
+    /// Mécanisme (asservissement de phase, borné) :
+    ///  - à chaque beat prédit, chercher le pic d'attaque dans ± 15 % de
+    ///    période autour de la prédiction ;
+    ///  - pic NET (≥ 0,25 sur l'enveloppe normalisée) → corriger de la moitié
+    ///    de l'écart, plafonné à 8 % de période par beat — le rattrapage est
+    ///    progressif, jamais un saut ;
+    ///  - pas de pic net (break, silence) → la grille CONTINUE sur son élan,
+    ///    sans invention.
+    ///
+    /// LIMITE MESURÉE (banc, réplique numérique) : le bassin de capture vaut
+    /// ± 20 % de période environ (fenêtre de ± 15 % élargie d'une trame).
+    /// Un décalage PLUS GRAND n'est jamais rattrapé — la grille reste à
+    /// contretemps constant. À 150 BPM cela couvre ± 80 ms : les dérives
+    /// d'encodage et les breaks ordinaires, pas un montage sauvage du morceau.
+    ///
+    /// Sur un morceau au métronome, les corrections sont nulles : la grille
+    /// asservie est identique à la grille fixe — vérifié par le banc.
+    static func adaptiveBeatTimes(grid: BeatGrid,
+                                  curves: AnalysisCurves,
+                                  duration: Double) -> [Double] {
+        guard grid.period > 0 else { return [] }
+        let period = grid.period
+        let searchRadius = period * 0.15
+        let maxCorrection = period * 0.08
+        let minimumPeak: Float = 0.25
+
+        var result: [Double] = []
+        var predicted = grid.phase
+        while predicted < duration {
+            var beat = predicted
+            if let peak = strongestPeak(in: curves,
+                                        around: predicted,
+                                        radius: searchRadius,
+                                        minimumValue: minimumPeak) {
+                let error = peak - predicted
+                let correction = max(-maxCorrection, min(maxCorrection, error * 0.5))
+                beat = predicted + correction
+            }
+            result.append(beat)
+            predicted = beat + period
+        }
+        return result
+    }
+
+    /// Instant du pic d'enveloppe le plus fort dans [center−radius ; center+radius],
+    /// affiné par parabole ; nil si rien n'atteint `minimumValue`.
+    static func strongestPeak(in curves: AnalysisCurves,
+                              around center: Double,
+                              radius: Double,
+                              minimumValue: Float) -> Double? {
+        let envelope = curves.onsetEnvelope
+        guard !envelope.isEmpty else { return nil }
+        let lowerIndex = Int(curves.frameIndex(at: center - radius))
+        let upperIndex = min(envelope.count - 1,
+                             Int(curves.frameIndex(at: center + radius).rounded(.up)))
+        guard lowerIndex < upperIndex else { return nil }
+
+        var bestIndex = lowerIndex
+        var bestValue = envelope[lowerIndex]
+        for index in lowerIndex...upperIndex where envelope[index] > bestValue {
+            bestValue = envelope[index]
+            bestIndex = index
+        }
+        guard bestValue >= minimumValue else { return nil }
+
+        // Affinage parabolique : la trame fait ~12 ms, le pic réel est entre
+        // deux trames.
+        var refined = Double(bestIndex)
+        if bestIndex > 0, bestIndex < envelope.count - 1 {
+            let left = Double(envelope[bestIndex - 1])
+            let centerValue = Double(envelope[bestIndex])
+            let right = Double(envelope[bestIndex + 1])
+            let denominator = left - 2 * centerValue + right
+            if abs(denominator) > 1e-12 {
+                let delta = 0.5 * (left - right) / denominator
+                if abs(delta) < 1 { refined += delta }
+            }
+        }
+        // Retour au temps réel : centre de fenêtre compensé.
+        return refined * curves.hopSeconds + curves.frameCenterOffset
+    }
+
     /// Instants de tous les beats de la grille sur [0 ; duration].
     static func beatTimes(grid: BeatGrid, duration: Double) -> [Double] {
         guard grid.period > 0 else { return [] }

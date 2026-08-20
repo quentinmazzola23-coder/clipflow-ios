@@ -48,6 +48,15 @@ struct MontageView: View {
     @State private var analysisTask: Task<Void, Never>?
     @State private var player: AVPlayer?
     @State private var isPreviewing = false
+    /// Jeton d'observation de fin de lecture — retiré avant chaque nouvel
+    /// aperçu, sinon un observateur s'accumule par lecture.
+    @State private var endObserver: NSObjectProtocol?
+    /// Lecteur d'AUDITION : joue la musique seule pendant le glissement de la
+    /// fenêtre — on place le départ à l'oreille, pas à l'aveugle.
+    @State private var auditionPlayer: AVPlayer?
+    @State private var auditionStopTask: Task<Void, Never>?
+    /// Limitation des seeks d'audition pendant le glissement (~8/s suffisent).
+    @State private var lastAuditionSeek = Date.distantPast
 
     var body: some View {
         VStack(spacing: 0) {
@@ -93,6 +102,7 @@ struct MontageView: View {
         .onDisappear {
             analysisTask?.cancel()
             player?.pause()
+            stopAudition()
         }
         .alert("Montage", isPresented: Binding(
             get: { errorMessage != nil },
@@ -189,6 +199,8 @@ struct MontageView: View {
                 // sous les pieds de la session — verrouillé.
                 .allowsHitTesting(!isExporting)
 
+                densityBar
+
                 bottomBar
             }
             .padding(.bottom, 8)
@@ -217,6 +229,17 @@ struct MontageView: View {
                 Spacer()
             }
             .font(.footnote.monospacedDigit())
+            // L'INFORMATION DE PLANIFICATION : la durée de chaque clip au cran
+            // choisi, et la longueur de rush nécessaire (à 0,5×, le double est
+            // prélevé… non : la moitié est prélevée — durée finale × vitesse).
+            // C'est ce qui permet de choisir la musique AVANT de dérusher.
+            if let range = slotRangeMilliseconds {
+                Text(range.min == range.max
+                     ? "coupes : \(range.min) ms · rush requis par clip : ≥ \(range.sourceMin) ms"
+                     : "coupes : \(range.min)–\(range.max) ms · rush requis : ≥ \(range.sourceMin)–\(range.sourceMax) ms")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
             // CRÉDIT DE LICENCE (CC-BY) : visible tant que le titre l'exige —
             // un tap le montre en entier, à coller dans la description de la
             // vidéo publiée.
@@ -231,6 +254,19 @@ struct MontageView: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, 16)
         .padding(.top, 6)
+    }
+
+    /// Écarts de coupe du plan courant, en millisecondes entières, avec la
+    /// durée SOURCE à prélever par clip (durée finale × vitesse du projet).
+    private var slotRangeMilliseconds: (min: Int, max: Int, sourceMin: Int, sourceMax: Int)? {
+        guard let map = beatMap else { return nil }
+        let slots = map.slots(from: windowStart, density: density)
+        guard let range = BeatMap.slotDurationRange(slots) else { return nil }
+        let speedRatio = Double(project.speedNumerator) / Double(max(project.speedDenominator, 1))
+        return (Int((range.min * 1000).rounded()),
+                Int((range.max * 1000).rounded()),
+                Int((range.min * speedRatio * 1000).rounded(.up)),
+                Int((range.max * speedRatio * 1000).rounded(.up)))
     }
 
     /// Erreurs de PARCOURS UTILISATEUR — chacune dit si c'est un cas d'usage
@@ -252,6 +288,17 @@ struct MontageView: View {
     private var isExporting: Bool {
         if case .exporting = stage { return true }
         return false
+    }
+
+    private var density: CutDensity {
+        CutDensity(rawValue: project.montageDensityRaw) ?? .standard
+    }
+
+    private func setDensity(_ newDensity: CutDensity) {
+        guard newDensity != density else { return }
+        project.montageDensityRaw = newDensity.rawValue
+        try? modelContext.save()
+        Task { await rebuildPlan() }
     }
 
     /// Barre basse — les trois actions, à portée de pouce, sans confirmation.
@@ -311,6 +358,85 @@ struct MontageView: View {
         .padding(.horizontal, 16)
     }
 
+    /// SÉLECTEUR DE DENSITÉ : cinq crans réguliers, du plus posé au plus
+    /// nerveux. Chaque cran affiche LA DURÉE RÉELLE de clip qu'il produit à ce
+    /// BPM — pas un jargon de beats : des millisecondes.
+    private var densityBar: some View {
+        HStack(spacing: 6) {
+            ForEach(CutDensity.allCases, id: \.rawValue) { candidate in
+                Button {
+                    setDensity(candidate)
+                } label: {
+                    VStack(spacing: 1) {
+                        Text(densityLabel(candidate))
+                            .font(.caption.monospacedDigit().weight(
+                                candidate == density ? .bold : .regular))
+                        Text(candidate == density ? "ms" : " ")
+                            .font(.system(size: 8))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .glassEffect(candidate == density
+                                 ? .regular.tint(Theme.accent.opacity(0.5)).interactive()
+                                 : .regular.interactive(),
+                                 in: Capsule())
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Coupe toutes les \(densityLabel(candidate)) millisecondes")
+            }
+        }
+        .padding(.horizontal, 16)
+        .disabled(isExporting)
+    }
+
+    private func densityLabel(_ candidate: CutDensity) -> String {
+        guard let map = beatMap else { return "—" }
+        return String(Int((candidate.slotDuration(bpm: map.bpm) * 1000).rounded()))
+    }
+
+    // MARK: - Audition (placement à l'oreille)
+
+    /// Joue la musique À MESURE que la fenêtre glisse : seek continu pendant
+    /// le geste, puis la lecture continue ~10 s après le relâchement — on
+    /// entend exactement où le montage démarrera.
+    private func audition(at time: Double, released: Bool) {
+        guard let filename = project.musicFilename else { return }
+        stopPreview()
+        auditionStopTask?.cancel()
+
+        if auditionPlayer == nil {
+            auditionPlayer = AVPlayer(url: MusicStore.url(forMusicFilename: filename))
+        }
+        guard let auditionPlayer else { return }
+
+        let target = CMTime(seconds: max(0, time), preferredTimescale: 600)
+        if released {
+            auditionPlayer.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+            auditionPlayer.play()
+            auditionStopTask = Task {
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled else { return }
+                auditionPlayer.pause()
+            }
+        } else {
+            // Pendant le geste : seeks limités (8/s), lecture en continu pour
+            // entendre défiler la musique sous le doigt.
+            if auditionPlayer.rate == 0 { auditionPlayer.play() }
+            if Date().timeIntervalSince(lastAuditionSeek) > 0.12 {
+                lastAuditionSeek = Date()
+                auditionPlayer.seek(to: target,
+                                    toleranceBefore: CMTime(seconds: 0.05, preferredTimescale: 600),
+                                    toleranceAfter: CMTime(seconds: 0.05, preferredTimescale: 600))
+            }
+        }
+    }
+
+    private func stopAudition() {
+        auditionStopTask?.cancel()
+        auditionPlayer?.pause()
+    }
+
     // MARK: - Musique
 
     /// Titre venu de la bibliothèque : fichier déjà local, crédit conservé.
@@ -353,6 +479,8 @@ struct MontageView: View {
     }
 
     private func startAnalysis(filename: String) {
+        stopAudition()
+        auditionPlayer = nil // nouvelle musique = nouveau lecteur
         stage = .analyzing
         analysisTask?.cancel()
         analysisTask = Task {
@@ -405,6 +533,12 @@ struct MontageView: View {
 
     private func moveWindow(to time: Double, commit: Bool) {
         guard let map = beatMap else { return }
+        // AUDITION : la musique se joue sous le doigt pendant le glissement,
+        // et continue ~10 s au relâchement (sur le beat recalé).
+        audition(at: commit
+                 ? (map.beatTimes.min(by: { abs($0 - time) < abs($1 - time) }) ?? time)
+                 : time,
+                 released: commit)
         // Recalage AU BEAT le plus proche : la fenêtre commence toujours sur
         // un beat, sinon tout le montage serait décalé de la musique.
         let snapped = map.beatTimes.min(by: {
@@ -460,7 +594,7 @@ struct MontageView: View {
             sources[index] = url
         }
 
-        let slots = map.slots(from: windowStart)
+        let slots = map.slots(from: windowStart, density: density)
         plan = MontagePlanner.plan(slots: slots, clips: candidates, windowStart: windowStart)
         clipSources = sources
     }
@@ -468,6 +602,7 @@ struct MontageView: View {
     // MARK: - Aperçu
 
     private func togglePreview() {
+        stopAudition()
         if isPreviewing {
             stopPreview()
             return
@@ -487,7 +622,8 @@ struct MontageView: View {
                 newPlayer.play()
                 isPreviewing = true
                 // Fin de lecture : l'état du bouton suit, sans intervention.
-                NotificationCenter.default.addObserver(
+                if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+                endObserver = NotificationCenter.default.addObserver(
                     forName: AVPlayerItem.didPlayToEndTimeNotification,
                     object: item, queue: .main
                 ) { _ in
@@ -509,6 +645,7 @@ struct MontageView: View {
     private func exportMontage() {
         guard let plan, let filename = project.musicFilename else { return }
         stopPreview()
+        stopAudition()
         stage = .exporting(0)
         Task {
             do {
@@ -562,6 +699,18 @@ struct BeatWaveformView: View {
     var onScrub: (Double) -> Void
     var onScrubEnd: (Double) -> Void
 
+    /// ZOOM DE PRÉCISION : pendant le glissement, la vue montre une loupe de
+    /// ± 5 s autour du point saisi au lieu du morceau entier — au doigt, tout
+    /// le morceau sur 360 pt rend 1 px ≈ 0,5 s, poser le départ au beat près
+    /// y est impossible. La loupe est ANCRÉE au début du geste : la
+    /// correspondance écran → temps ne bouge pas sous le doigt (pas de boucle
+    /// de rétroaction), elle se ré-ancre seulement si le doigt sort du cadre.
+    @State private var zoomWindow: (start: Double, duration: Double)?
+    /// Dernier ré-ancrage de la loupe : borné dans le temps, sinon le
+    /// micro-tremblement d'un doigt posé au bord déclenchait un ré-ancrage
+    /// par événement tactile (~60/s) — défilement incontrôlable.
+    @State private var lastReanchor = Date.distantPast
+
     private func color(for section: BeatSection) -> Color {
         switch section {
         case .drop: return Theme.accent
@@ -575,55 +724,125 @@ struct BeatWaveformView: View {
         GeometryReader { geometry in
             let width = geometry.size.width
             let height = geometry.size.height
-            let scale = width / max(map.duration, 0.001)
+            // Fenêtre visible : tout le morceau au repos, la loupe en geste.
+            let visibleStart = zoomWindow?.start ?? 0
+            let visibleDuration = zoomWindow?.duration ?? max(map.duration, 0.001)
+            let scale = width / CGFloat(visibleDuration)
             let montageEnd = windowStart + (plan?.totalDuration.seconds ?? 0)
 
             Canvas { context, size in
-                // 1. Forme d'onde (barres, max par seau).
+                // 1. Forme d'onde (barres, max par seau) — seaux recadrés sur
+                //    la fenêtre visible.
                 let buckets = map.waveform
-                guard !buckets.isEmpty else { return }
-                let barWidth = size.width / CGFloat(buckets.count)
-                for (index, value) in buckets.enumerated() {
-                    let x = CGFloat(index) * barWidth
-                    let barHeight = max(1, CGFloat(value) * size.height * 0.55)
-                    let time = Double(index) / Double(buckets.count) * map.duration
-                    let inWindow = time >= windowStart && time <= montageEnd
+                guard !buckets.isEmpty, map.duration > 0 else { return }
+                let bucketDuration = map.duration / Double(buckets.count)
+                let firstBucket = max(0, Int(visibleStart / bucketDuration))
+                let lastBucket = min(buckets.count - 1,
+                                     Int((visibleStart + visibleDuration) / bucketDuration) + 1)
+                guard firstBucket <= lastBucket else { return }
+                for index in firstBucket...lastBucket {
+                    let bucketTime = Double(index) * bucketDuration
+                    let barX = CGFloat(bucketTime - visibleStart) * scale
+                    let barWidth = max(0.5, CGFloat(bucketDuration) * scale - 0.5)
+                    let barHeight = max(1, CGFloat(buckets[index]) * size.height * 0.55)
+                    let inWindow = bucketTime >= windowStart && bucketTime <= montageEnd
                     context.fill(
-                        Path(CGRect(x: x, y: (size.height - barHeight) / 2,
-                                    width: max(0.5, barWidth - 0.5), height: barHeight)),
+                        Path(CGRect(x: barX, y: (size.height - barHeight) / 2,
+                                    width: barWidth, height: barHeight)),
                         with: .color(.white.opacity(inWindow ? 0.85 : 0.25))
                     )
                 }
-                // 2. Beats : un trait coloré par section, sur la fenêtre.
+                // 2. Beats : traits colorés par section. En loupe, TOUS les
+                //    beats visibles — c'est la règle graduée sur laquelle on
+                //    pose le départ.
                 for (index, beat) in map.beatTimes.enumerated()
-                where beat >= windowStart && beat <= montageEnd {
-                    let x = CGFloat(beat) * scale
+                where beat >= visibleStart && beat <= visibleStart + visibleDuration {
+                    guard index < map.sections.count else { break }
+                    let zoomed = zoomWindow != nil
+                    guard zoomed || (beat >= windowStart && beat <= montageEnd) else { continue }
+                    let beatX = CGFloat(beat - visibleStart) * scale
                     context.fill(
-                        Path(CGRect(x: x, y: size.height * 0.82,
-                                    width: 2, height: size.height * 0.14)),
+                        Path(CGRect(x: beatX, y: size.height * (zoomed ? 0.66 : 0.82),
+                                    width: 2, height: size.height * (zoomed ? 0.30 : 0.14))),
                         with: .color(color(for: map.sections[index]))
                     )
                 }
                 // 3. Bord de fenêtre : la poignée visuelle du glissement.
-                let startX = CGFloat(windowStart) * scale
-                context.fill(
-                    Path(CGRect(x: startX - 1.5, y: 0, width: 3, height: size.height)),
-                    with: .color(Theme.accent)
-                )
+                let startX = CGFloat(windowStart - visibleStart) * scale
+                if startX >= -2, startX <= size.width + 2 {
+                    context.fill(
+                        Path(CGRect(x: startX - 1.5, y: 0, width: 3, height: size.height)),
+                        with: .color(Theme.accent)
+                    )
+                }
+                // 4. En loupe : graduation (un repère par seconde) — on sait
+                //    OÙ on est dans le morceau.
+                if zoomWindow != nil {
+                    let firstSecond = Int(visibleStart.rounded(.up))
+                    let lastSecond = Int((visibleStart + visibleDuration).rounded(.down))
+                    if firstSecond <= lastSecond {
+                        for second in firstSecond...lastSecond {
+                            let tickX = CGFloat(Double(second) - visibleStart) * scale
+                            context.fill(
+                                Path(CGRect(x: tickX, y: 0, width: 1, height: 6)),
+                                with: .color(.white.opacity(0.4))
+                            )
+                            context.draw(
+                                Text(String(format: "%d:%02d", second / 60, second % 60))
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.gray),
+                                at: CGPoint(x: tickX + 2, y: 8), anchor: .leading
+                            )
+                        }
+                    }
+                }
             }
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 2)
                     .onChanged { value in
-                        onScrub(Double(value.location.x / max(scale, 0.001)))
+                        if zoomWindow == nil {
+                            // Ancrage de la loupe au DÉBUT du geste, centrée
+                            // sur le point saisi dans la vue plein-morceau.
+                            let grabbed = Double(value.startLocation.x / max(scale, 0.001))
+                            let zoomDuration = min(10.0, max(map.duration, 0.001))
+                            let zoomStart = min(max(0, grabbed - zoomDuration / 2),
+                                                max(0, map.duration - zoomDuration))
+                            zoomWindow = (zoomStart, zoomDuration)
+                            return // premier événement : on installe la loupe
+                        }
+                        guard let window = zoomWindow else { return }
+                        var t = window.start + Double(value.location.x / max(scale, 0.001))
+                        // Doigt au bord : la loupe se ré-ancre pour suivre —
+                        // au plus tous les 400 ms. Sans cette borne, chaque
+                        // événement tactile re-décalait de 5 s : un morceau
+                        // entier traversé en une seconde de tremblement.
+                        if Date().timeIntervalSince(lastReanchor) > 0.4 {
+                            if t < window.start + window.duration * 0.05 {
+                                lastReanchor = Date()
+                                zoomWindow = (max(0, window.start - window.duration * 0.5),
+                                              window.duration)
+                            } else if t > window.start + window.duration * 0.95 {
+                                lastReanchor = Date()
+                                zoomWindow = (min(max(0, map.duration - window.duration),
+                                                  window.start + window.duration * 0.5),
+                                              window.duration)
+                            }
+                        }
+                        t = min(max(0, t), map.duration)
+                        onScrub(t)
                     }
                     .onEnded { value in
-                        onScrubEnd(Double(value.location.x / max(scale, 0.001)))
+                        let base = zoomWindow?.start ?? 0
+                        let t = min(max(0, base + Double(value.location.x / max(scale, 0.001))),
+                                    map.duration)
+                        zoomWindow = nil
+                        onScrubEnd(t)
                     }
             )
             .frame(width: width, height: height)
         }
         .accessibilityLabel("Fenêtre de montage dans la musique")
-        .accessibilityHint("Glissez pour déplacer le départ du montage")
+        .accessibilityHint("Glissez pour déplacer le départ — la vue zoome et la musique se joue sous le doigt")
     }
 }

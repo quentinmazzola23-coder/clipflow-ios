@@ -123,6 +123,9 @@ final class ClipProject {
     /// nil = utiliser le départ SUGGÉRÉ par l'analyse (cluster de drops).
     /// Persisté : déplacer la fenêtre puis revenir au projet ne perd rien.
     var montageStartCentiseconds: Int?
+    /// Densité de découpe du montage (CutDensity.rawValue). Le cran du milieu
+    /// (une coupe par beat) par défaut — le comportement CapCut.
+    var montageDensityRaw: Int = 3
     /// Crédit de licence du titre (bibliothèque en ligne, CC-BY) — à coller
     /// dans la description de la vidéo publiée. nil pour un fichier personnel.
     var musicAttribution: String?

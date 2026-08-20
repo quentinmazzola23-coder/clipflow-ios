@@ -154,74 +154,190 @@ struct SectionClassificationTests {
     }
 }
 
-// MARK: - Créneaux
+// MARK: - Créneaux (découpe régulière par densité)
 
 struct SlotGenerationTests {
 
-    private func uniformMap(bpm: Double, beats: Int,
-                            sections: [BeatSection]) -> BeatMap {
+    private func uniformMap(bpm: Double, beats: Int) -> BeatMap {
         let period = 60.0 / bpm
         return BeatMap(
             bpm: bpm,
             beatTimes: (0..<beats).map { Double($0) * period },
             energies: [Double](repeating: 0.5, count: beats),
-            sections: sections,
+            sections: [BeatSection](repeating: .verse, count: beats),
             duration: Double(beats) * period,
             suggestedWindowStart: 0,
             waveform: []
         )
     }
 
-    /// Les multiplicateurs du script : drop consomme 1 beat, verse 2, break 3.
-    @Test func slotDurationsFollowSectionMultipliers() {
+    /// Chaque cran produit des créneaux d'une durée UNIQUE et connue :
+    /// beats × période. C'est l'engagement du sélecteur de densité.
+    @Test func everyDensityYieldsUniformPredictableSlots() {
+        let map = uniformMap(bpm: 150, beats: 64)
         let period = 60.0 / 150
-        let sections: [BeatSection] =
-            [.drop, .verse, .verse, .breakdown, .breakdown, .breakdown, .build]
-            + Array(repeating: .drop, count: 9)
-        let map = uniformMap(bpm: 150, beats: 16, sections: sections)
-        let slots = map.slots(from: 0)
-
-        #expect(slots[0].section == .drop)
-        #expect(abs(slots[0].duration - period) < 1e-9)
-        #expect(slots[1].section == .verse)
-        #expect(abs(slots[1].duration - 2 * period) < 1e-9)
-        #expect(slots[2].section == .breakdown)
-        #expect(abs(slots[2].duration - 3 * period) < 1e-9)
+        for density in CutDensity.allCases {
+            let slots = map.slots(from: 0, density: density)
+            #expect(slots.count >= 3, "Pas assez de créneaux au cran \(density.rawValue)")
+            let expected = period * density.beatsPerCut
+            for slot in slots {
+                #expect(abs(slot.duration - expected) < 1e-9,
+                        "Durée inattendue au cran \(density.rawValue)")
+            }
+            // L'aide au choix (slotDuration) dit EXACTEMENT ce que produit le cran.
+            #expect(abs(density.slotDuration(bpm: 150) - expected) < 1e-9)
+        }
     }
 
-    /// Contiguïté : chaque créneau commence où le précédent finit — les
-    /// coupes tombent sur les beats PAR CONSTRUCTION, jamais par arrondi.
-    @Test func slotsAreContiguousOnBeats() {
-        let sections = (0..<64).map { index -> BeatSection in
-            switch index % 4 {
-            case 0: return .drop
-            case 1: return .verse
-            case 2: return .build
-            default: return .breakdown
+    /// Contiguïté à tous les crans : chaque créneau commence où le précédent
+    /// finit — les coupes tombent sur la grille par construction.
+    @Test func slotsAreContiguousAtEveryDensity() {
+        let map = uniformMap(bpm: 150, beats: 64)
+        for density in CutDensity.allCases {
+            let slots = map.slots(from: 0, density: density)
+            for index in 1..<slots.count {
+                #expect(abs(slots[index].start
+                            - (slots[index - 1].start + slots[index - 1].duration)) < 1e-9,
+                        "Trou au cran \(density.rawValue)")
             }
         }
-        let map = uniformMap(bpm: 150, beats: 64, sections: sections)
-        let slots = map.slots(from: 0)
-        #expect(slots.count > 5)
-        for index in 1..<slots.count {
-            #expect(abs(slots[index].start - (slots[index - 1].start + slots[index - 1].duration)) < 1e-9,
-                    "Trou ou chevauchement entre créneaux")
+    }
+
+    /// Le demi-beat coupe au beat ET au milieu exact de chaque intervalle.
+    @Test func halfDensityCutsAtMidpoints() {
+        let map = uniformMap(bpm: 150, beats: 16)
+        let period = 60.0 / 150
+        let slots = map.slots(from: 0, density: .half)
+        #expect(abs(slots[0].duration - period / 2) < 1e-9)
+        #expect(abs(slots[1].start - period / 2) < 1e-9)
+    }
+
+    /// Départ au milieu du morceau : premier créneau au premier beat ≥ départ.
+    @Test func slotsStartAtFirstBeatAfterWindowStart() {
+        let map = uniformMap(bpm: 150, beats: 64)
+        let period = 60.0 / 150
+        let slots = map.slots(from: 10 * period - 0.01, density: .beat1)
+        #expect(abs((slots.first?.start ?? -1) - 10 * period) < 1e-9)
+    }
+
+    /// L'information de planification : min = max sur une grille régulière,
+    /// et la valeur est celle annoncée par le cran.
+    @Test func slotRangeReportsExactDurations() {
+        let map = uniformMap(bpm: 200, beats: 64)
+        let slots = map.slots(from: 0, density: .beats2)
+        let range = BeatMap.slotDurationRange(slots)
+        #expect(range != nil)
+        #expect(abs((range?.min ?? 0) - 0.6) < 1e-9)   // 2 beats à 200 BPM
+        #expect(abs((range?.max ?? 0) - 0.6) < 1e-9)
+        #expect(BeatMap.slotDurationRange([]) == nil)
+    }
+}
+
+// MARK: - Grille asservie (rattrapage de dérive)
+
+struct AdaptiveGridTests {
+
+    /// Morceau au métronome : la grille asservie est IDENTIQUE à la grille
+    /// fixe — aucune correction parasite (pas de tremblement).
+    @Test func steadyTrackYieldsSteadyGrid() {
+        let samples = TestSignal.clickTrack(bpm: 150, seconds: 30, phase: 0.1)
+        let curves = OnsetExtractor.curves(samples: samples, sampleRate: TestSignal.sampleRate)
+        guard let grid = TempoEstimator.estimateGrid(curves: curves, duration: 30) else {
+            #expect(Bool(false), "Grille non posée sur un signal propre")
+            return
         }
-        // Chaque début de créneau EST un instant de beat de la carte.
-        for slot in slots {
-            #expect(map.beatTimes.contains(where: { abs($0 - slot.start) < 1e-9 }),
-                    "Un créneau ne démarre pas sur un beat")
+        let beats = TempoEstimator.adaptiveBeatTimes(grid: grid, curves: curves, duration: 30)
+        let period = 60.0 / 150
+        for beat in beats.prefix(60) {
+            let nearest = ((beat - 0.1) / period).rounded() * period + 0.1
+            #expect(abs(beat - nearest) < 0.025, "Beat asservi éloigné du kick")
         }
     }
 
-    /// Départ au milieu du morceau : le premier créneau démarre au premier
-    /// beat ≥ départ demandé.
-    @Test func slotsStartAtFirstBeatAfterWindowStart() {
-        let map = uniformMap(bpm: 150, beats: 64,
-                             sections: Array(repeating: .drop, count: 64))
-        let period = 60.0 / 150
-        let slots = map.slots(from: 10 * period - 0.01)
-        #expect(abs((slots.first?.start ?? -1) - 10 * period) < 1e-9)
+    /// LE CAS DEMANDÉ : un morceau dont la seconde moitié est DÉCALÉE (break
+    /// irrégulier, montage du morceau). La grille fixe resterait à contretemps
+    /// jusqu'à la fin ; la grille asservie doit se recaler.
+    ///
+    /// FIXTURE MAÎTRISÉE (leçon d'une contre-épreuve numérique) : la première
+    /// moitié dure un nombre ENTIER de périodes (16 s = 40 × 0,4 s), pour que
+    /// le décalage VU par la grille soit exactement `jump` — pas un artefact
+    /// modulaire. Et `jump` est choisi DANS le bassin de capture mesuré
+    /// (± 20 % de période ≈ ± 80 ms) : au-delà, l'asservissement ne raccroche
+    /// jamais, c'est sa limite documentée, pas un défaut.
+    @Test func gridRecoversAfterPhaseJump() {
+        let bpm = 150.0
+        let period = 60.0 / bpm
+        let jump = 0.07 // 17,5 % de période : dans le bassin de capture
+        let sampleRate = TestSignal.sampleRate
+        let first = TestSignal.clickTrack(bpm: bpm, seconds: 16)
+        let second = TestSignal.clickTrack(bpm: bpm, seconds: 16, phase: jump)
+        let samples = first + second
+        let curves = OnsetExtractor.curves(samples: samples, sampleRate: sampleRate)
+        guard let grid = TempoEstimator.estimateGrid(curves: curves, duration: 32) else {
+            #expect(Bool(false), "Grille non posée")
+            return
+        }
+        let beats = TempoEstimator.adaptiveBeatTimes(grid: grid, curves: curves, duration: 32)
+        // En FIN de morceau (le rattrapage a eu le temps de jouer), les beats
+        // doivent coller aux kicks décalés à moins de 30 ms.
+        let lateBeats = beats.filter { $0 > 26 && $0 < 31 }
+        #expect(lateBeats.count >= 8, "Pas assez de beats en fin de morceau")
+        for beat in lateBeats {
+            let nearest = ((beat - 16 - jump) / period).rounded() * period + 16 + jump
+            #expect(abs(beat - nearest) < 0.03,
+                    "La grille ne s'est pas recalée après le décalage")
+        }
+    }
+
+    /// Silence au milieu (break sans percussions) : la grille CONTINUE sur son
+    /// élan — pas d'invention, pas de dérive brutale.
+    @Test func gridCoastsThroughSilence() {
+        let bpm = 150.0
+        let period = 60.0 / bpm
+        let sampleRate = TestSignal.sampleRate
+        // Durées MULTIPLES de la période (10 s = 25 × 0,4 ; 4,8 s = 12 × 0,4) :
+        // la reprise après le silence est EN PHASE avec la grille — le test
+        // exerce le maintien dans le silence ET la re-accroche à la sortie.
+        let part = TestSignal.clickTrack(bpm: bpm, seconds: 10)
+        let silence = [Float](repeating: 0, count: Int(4.8 * sampleRate))
+        let samples = part + silence + part
+        let curves = OnsetExtractor.curves(samples: samples, sampleRate: sampleRate)
+        guard let grid = TempoEstimator.estimateGrid(curves: curves, duration: 24.8) else {
+            #expect(Bool(false), "Grille non posée")
+            return
+        }
+        let beats = TempoEstimator.adaptiveBeatTimes(grid: grid, curves: curves, duration: 24.8)
+        // Dans le silence (10-14,8 s), les intervalles restent la période.
+        let inSilence = zip(beats, beats.dropFirst()).filter { $0.0 > 10.5 && $0.1 < 14.3 }
+        for (a, b) in inSilence {
+            #expect(abs((b - a) - period) < 0.02, "La grille a dérivé dans le silence")
+        }
+    }
+}
+
+// MARK: - Bibliothèque : filtre de licence (repli Internet Archive)
+
+struct MusicLicenseFilterTests {
+
+    /// Seules les licences à usage commercial ET dérivé passent : domaine
+    /// public, CC0, BY, BY-SA. NC et ND sont écartées — un montage est une
+    /// œuvre dérivée à usage commercial.
+    @Test func commercialFilterKeepsOnlyUsableLicenses() {
+        #expect(MusicLibraryAPI.isCommercialLicense("https://creativecommons.org/publicdomain/zero/1.0/"))
+        #expect(MusicLibraryAPI.isCommercialLicense("http://creativecommons.org/licenses/by/4.0/"))
+        #expect(MusicLibraryAPI.isCommercialLicense("http://creativecommons.org/licenses/by-sa/3.0/"))
+        #expect(MusicLibraryAPI.isCommercialLicense("http://creativecommons.org/publicdomain/mark/1.0/"))
+        #expect(!MusicLibraryAPI.isCommercialLicense("http://creativecommons.org/licenses/by-nc/4.0/"))
+        #expect(!MusicLibraryAPI.isCommercialLicense("http://creativecommons.org/licenses/by-nc-nd/2.5/it/"))
+        #expect(!MusicLibraryAPI.isCommercialLicense("http://creativecommons.org/licenses/by-nd/4.0/"))
+        #expect(!MusicLibraryAPI.isCommercialLicense("https://example.com/proprietary"))
+        #expect(!MusicLibraryAPI.isCommercialLicense(""))
+    }
+
+    @Test func licenseLabelsAreShort() {
+        #expect(MusicLibraryAPI.licenseLabel("https://creativecommons.org/publicdomain/zero/1.0/") == "cc0")
+        #expect(MusicLibraryAPI.licenseLabel("http://creativecommons.org/licenses/by/4.0/") == "by")
+        #expect(MusicLibraryAPI.licenseLabel("http://creativecommons.org/licenses/by-sa/3.0/") == "by-sa")
     }
 }
 

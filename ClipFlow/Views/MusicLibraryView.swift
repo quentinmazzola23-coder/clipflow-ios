@@ -22,6 +22,8 @@ struct MusicLibraryView: View {
     @State private var isSearching = false
     @State private var hasSearched = false
     @State private var errorMessage: String?
+    /// Note visible quand la recherche est passée par la source de repli.
+    @State private var fallbackNote: String?
     @State private var downloadingID: String?
     @State private var previewingID: String?
     @State private var previewPlayer: AVPlayer?
@@ -49,6 +51,15 @@ struct MusicLibraryView: View {
                     Text(errorMessage)
                         .font(.footnote)
                         .foregroundStyle(.orange)
+                }
+            }
+            // Repli actif : le dire, sans en faire une erreur — les résultats
+            // sont là, simplement d'un autre catalogue.
+            if let fallbackNote {
+                Section {
+                    Label(fallbackNote, systemImage: "arrow.triangle.2.circlepath")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             Section {
@@ -159,22 +170,28 @@ struct MusicLibraryView: View {
         guard !trimmed.isEmpty else { return }
         searchTask?.cancel()
         errorMessage = nil
+        fallbackNote = nil
         isSearching = true
         hasSearched = true
         searchTask = Task {
             defer { isSearching = false }
             do {
-                // Toute la mécanique (UA identifié, retentative sur 401/403,
-                // analyse) vit dans MusicLibraryAPI — un seul chemin testable.
-                let found = try await MusicLibraryAPI.search(query: trimmed)
+                // Toute la mécanique (trois lignes de défense : Openverse,
+                // Openverse en UA navigateur, Internet Archive) vit dans
+                // MusicLibraryAPI — un seul chemin testable.
+                let outcome = try await MusicLibraryAPI.search(query: trimmed)
                 guard !Task.isCancelled else { return }
-                results = found
+                results = outcome.results
+                fallbackNote = outcome.fallbackNote
             } catch is CancellationError {
+                // Tâche remplacée par une nouvelle recherche : ne rien toucher.
             } catch let error as URLError {
+                guard !Task.isCancelled else { return }
                 // Réseau : dire CLAIREMENT que c'est la connexion, pas l'app.
                 results = []
                 errorMessage = "Pas de connexion à la bibliothèque (\(error.localizedDescription)). Vérifiez le réseau puis réessayez."
             } catch {
+                guard !Task.isCancelled else { return }
                 results = []
                 errorMessage = error.localizedDescription
             }
