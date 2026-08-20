@@ -71,11 +71,25 @@ enum MontagePlanner {
     static func plan(slots: [BeatSlot],
                      clips: [MontageClipCandidate],
                      windowStart: Double) -> MontagePlan {
-        // CONVERSION UNIQUE : chaque borne de créneau devient un CMTime une
-        // seule fois ; toutes les durées sont des différences de ces valeurs.
-        let boundaries: [(start: CMTime, end: CMTime)] = slots.map { slot in
-            (CMTime(seconds: slot.start, preferredTimescale: timescale),
-             CMTime(seconds: slot.start + slot.duration, preferredTimescale: timescale))
+        // CONVERSION UNIQUE ET BORNES PARTAGÉES. Chaque DÉBUT de créneau est
+        // converti une seule fois ; la FIN d'un créneau contigu au suivant
+        // EST le début du suivant — le même CMTime, pas une reconversion.
+        // Sans ce partage, « fin de k » (start + duration en Double) et
+        // « début de k+1 » peuvent s'arrondir sur deux ticks différents de
+        // 1/600, et le télescopage casse d'un tick — mesuré en CI sur des
+        // créneaux fabriqués par k × 0,4.
+        let starts = slots.map { CMTime(seconds: $0.start, preferredTimescale: timescale) }
+        let boundaries: [(start: CMTime, end: CMTime)] = slots.indices.map { index in
+            let slot = slots[index]
+            let end: CMTime
+            if index + 1 < slots.count,
+               abs(slot.start + slot.duration - slots[index + 1].start) < 0.002 {
+                end = starts[index + 1] // borne PARTAGÉE : contiguïté exacte
+            } else {
+                end = CMTime(seconds: slot.start + slot.duration,
+                             preferredTimescale: timescale)
+            }
+            return (starts[index], end)
         }
         // ORIGINE = LE PREMIER CRÉNEAU, jamais windowStart brut. Les créneaux
         // démarrent au premier beat ≥ windowStart : la moindre différence
