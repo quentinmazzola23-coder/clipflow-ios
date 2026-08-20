@@ -61,8 +61,24 @@ enum OverlayStore {
         // d'orientation : `pngData()` sérialise l'image brute et PERD
         // l'orientation EXIF. Un logo photographié en portrait était donc
         // stocké couché, définitivement. Redessiner l'image la remet d'aplomb.
-        let upright = UIGraphicsImageRenderer(size: image.size).image { _ in
-            image.draw(in: CGRect(origin: .zero, size: image.size))
+        //
+        // ÉCHELLE FORCÉE À 1, et c'est capital. Sans format explicite, le
+        // rendu prend l'échelle de l'écran — 3 sur un iPhone : le bitmap
+        // alloué faisait neuf fois la surface de l'image, sur le fil
+        // principal, et le PNG écrit sur disque autant. Une photo de 12 Mpx
+        // devenait un bitmap de plusieurs centaines de mégaoctets.
+        let pixels = CGSize(width: image.size.width * image.scale,
+                            height: image.size.height * image.scale)
+        // Plafond : au-delà de la largeur de rendu d'un montage, ces pixels
+        // sont perdus à la composition.
+        let factor = min(1, 2048 / max(pixels.width, pixels.height, 1))
+        let target = CGSize(width: max(1, (pixels.width * factor).rounded()),
+                            height: max(1, (pixels.height * factor).rounded()))
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = false // la transparence d'un logo doit survivre
+        let upright = UIGraphicsImageRenderer(size: target, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: target))
         }
         guard let data = upright.pngData() else { throw OverlayStoreError.unreadableImage }
         let filename = UUID().uuidString + ".png"

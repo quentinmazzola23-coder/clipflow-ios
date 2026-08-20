@@ -87,6 +87,14 @@ enum MontageComposer {
         var cursor = CMTime.zero
 
         for placement in plan.placements {
+            // ANNULATION EFFECTIVE. Sans ce point de contrôle, une
+            // construction abandonnée — l'écran s'est fermé, une feuille s'est
+            // ouverte, le plan a changé — allait quand même jusqu'au bout de
+            // ses cent cinquante insertions, monopolisant l'appareil pour un
+            // résultat que personne n'installera. Le `CancellationError` levé
+            // ici est déjà traité par l'appelant, qui n'en fait pas une erreur
+            // visible.
+            try Task.checkCancellation()
             guard let url = sources[placement.clipID] else {
                 throw MontageComposerError.missingSource(clipID: placement.clipID)
             }

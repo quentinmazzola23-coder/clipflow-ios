@@ -82,6 +82,17 @@ struct MontageView: View {
     /// qu'à la fin, il ne peut donc pas servir de verrou contre un double
     /// appui qui lancerait deux compositions complètes en parallèle.
     @State private var isBuildingPreview = false
+    /// Jeton de la construction COURANTE. Une construction abandonnée qui va
+    /// jusqu'à son terme ne doit pas éteindre l'indicateur d'une construction
+    /// plus récente — ni le laisser allumé alors que plus rien ne se prépare.
+    @State private var previewToken = UUID()
+    /// Génération du plan qui a produit le lecteur en place. Au-delà, la
+    /// composition mémorisée ne décrit plus le montage affiché.
+    @State private var playerGeneration: Int?
+    /// Extraction de la vignette de pose — annulable, comme l'aperçu.
+    @State private var backdropTask: Task<Void, Never>?
+    /// Reconstruction de plan en cours.
+    @State private var rebuildTask: Task<Void, Never>?
     /// Jeton d'observation de fin de lecture — retiré avant chaque nouvel
     /// aperçu, sinon un observateur s'accumule par lecture.
     @State private var endObserver: NSObjectProtocol?
@@ -162,6 +173,8 @@ struct MontageView: View {
         }
         .onDisappear {
             analysisTask?.cancel()
+            rebuildTask?.cancel()
+            backdropTask?.cancel()
             // `stopPreview` et non `pause` : il annule aussi la construction
             // en vol, et remet l'indicateur — sans quoi le bouton affichait
             // « pause » au retour alors que rien ne jouait.
@@ -453,25 +466,41 @@ struct MontageView: View {
 
     /// Extrait une image du montage : on juge le placement d'un logo sur du
     /// contenu réel, pas sur un rectangle noir.
-    private func prepareOverlayBackdrop() {
+    private func prepareOverlayShape(imageToo: Bool) {
         guard let plan, let first = plan.placements.first,
               let url = clipSources[first.clipID] else { return }
         // Vignette réutilisée UNIQUEMENT si elle vient du clip qui fixe la
         // taille de rendu du plan COURANT.
-        guard overlayBackdrop == nil || overlayVideoRatio == nil
-                || overlayBackdropClipID != first.clipID else { return }
+        let needsImage = imageToo
+            && (overlayBackdrop == nil || overlayBackdropClipID != first.clipID)
+        let needsRatio = overlayVideoRatio == nil
+        guard needsImage || needsRatio else { return }
         let clipID = first.clipID
-        Task {
+        // GÉNÉRATION CAPTURÉE, et revérifiée avant CHAQUE écriture. Cette
+        // tâche dure de quelques centaines de millisecondes à plusieurs
+        // secondes sur un rush 4K : sans ce garde, une extraction lancée avant
+        // un changement de densité revenait ensuite écrire le rapport et la
+        // vignette d'un clip qui n'était plus le premier, et tout ancrage posé
+        // ensuite était calculé — puis enregistré — sur une forme fausse.
+        let generation = planGeneration
+        backdropTask?.cancel()
+        backdropTask = Task {
             let asset = AVURLAsset(url: url)
             // RAPPORT D'ABORD, depuis les métadonnées : aucune image à
             // décoder, donc il aboutit là où l'extraction peut échouer.
-            if let track = try? await asset.loadTracks(withMediaType: .video).first,
+            if needsRatio,
+               let track = try? await asset.loadTracks(withMediaType: .video).first,
                let natural = try? await track.load(.naturalSize),
                let transform = try? await track.load(.preferredTransform) {
                 let oriented = natural.applying(transform)
                 let width = abs(oriented.width), height = abs(oriented.height)
-                if width > 0, height > 0 { overlayVideoRatio = width / height }
+                guard !Task.isCancelled, generation == planGeneration else { return }
+                if width > 0, height > 0 {
+                    overlayVideoRatio = width / height
+                    reanchorOverlays(videoRatio: Double(width / height))
+                }
             }
+            guard needsImage else { return }
             let generator = AVAssetImageGenerator(asset: asset)
             generator.appliesPreferredTrackTransform = true
             generator.maximumSize = CGSize(width: 1080, height: 1080)
@@ -479,9 +508,41 @@ struct MontageView: View {
                                  CMTimeMultiplyByRatio(first.sourceRange.duration,
                                                        multiplier: 1, divisor: 2))
             if let image = try? await generator.image(at: time).image {
+                guard !Task.isCancelled, generation == planGeneration else { return }
                 overlayBackdrop = UIImage(cgImage: image)
                 overlayBackdropClipID = clipID
             }
+        }
+    }
+
+    /// Recolle les incrustations ANCRÉES sur la nouvelle forme du montage.
+    ///
+    /// Changer de cran de densité change la durée des créneaux, donc les clips
+    /// écartés, donc le premier clip placé — et c'est lui qui fixe la taille de
+    /// rendu. Un montage peut ainsi passer de 9:16 à 16:9 d'un cran à l'autre.
+    /// Un ancrage est une PROMESSE de coin : il doit survivre à ça.
+    ///
+    /// Les calques posés librement (`anchorIndex < 0`) ne sont jamais touchés,
+    /// et ceux déjà calculés pour ce rapport non plus — ce n'est pas un
+    /// recalage aveugle.
+    private func reanchorOverlays(videoRatio: Double) {
+        guard videoRatio > 0 else { return }
+        var changed = false
+        for layer in project.overlays where layer.anchorIndex >= 0 {
+            guard abs(layer.anchorVideoRatio - videoRatio) > 0.0001,
+                  let center = OverlayLayer.anchoredCenter(
+                    anchorIndex: layer.anchorIndex,
+                    relativeSpan: OverlayGeometry.span(of: layer),
+                    relativeHeight: OverlayGeometry.height(of: layer, videoRatio: videoRatio))
+            else { continue }
+            layer.centerX = center.x
+            layer.centerY = center.y
+            layer.anchorVideoRatio = videoRatio
+            changed = true
+        }
+        if changed {
+            try? modelContext.save()
+            refreshOverlays()
         }
     }
 
@@ -498,7 +559,8 @@ struct MontageView: View {
         // fermer, sur le canal des vraies erreurs en plus. Et il n'y a plus
         // rien à signaler — les portées d'incrustation ne sont plus réécrites
         // (voir refreshOverlays), seulement bornées à l'affichage et au rendu.
-        Task { await rebuildPlan() }
+        rebuildTask?.cancel()
+        rebuildTask = Task { await rebuildPlan() }
     }
 
     /// Barre basse — les trois actions, à portée de pouce, sans confirmation.
@@ -562,7 +624,7 @@ struct MontageView: View {
                 .accessibilityLabel("Annuler l'export")
             } else {
                 Button {
-                    prepareOverlayBackdrop()
+                    prepareOverlayShape(imageToo: true)
                     showOverlays = true
                 } label: {
                     Image(systemName: overlayCount > 0
@@ -803,21 +865,31 @@ struct MontageView: View {
         guard commit else { return }
         project.montageStartCentiseconds = Int((snapped * 100).rounded())
         try? modelContext.save()
-        Task { await rebuildPlan() }
+        rebuildTask?.cancel()
+        rebuildTask = Task { await rebuildPlan() }
     }
 
     /// Reconstruit le plan de placement : passages dans l'ordre de validation,
     /// chacun démarrant à SON point d'entrée, durée dictée par son créneau.
     private func rebuildPlan() async {
         guard let map = beatMap else { return }
+        // TRIPLET CAPTURÉ À L'ENTRÉE. La carte de rythme l'était déjà, mais la
+        // fenêtre et la densité étaient relues à la FIN, après plusieurs
+        // secondes de chargement de pistes : changer de musique entre-temps
+        // produisait un plan bâtard — grille rythmique d'un morceau, fenêtre
+        // d'un autre — que l'export acceptait sans broncher.
+        let start = windowStart
+        let cutDensity = density
         stopPreview() // annule aussi la construction en cours
         // Le plan change de génération : un aperçu construit sur l'ANCIEN se
         // jettera au lieu de se réinstaller derrière ce `player = nil`.
         planGeneration &+= 1
+        let generation = planGeneration
         // La composition affichée ne correspond plus au plan : la garder
         // rejouerait l'ANCIEN montage — pire qu'un écran de veille.
         releaseTimeObserver() // avant de lâcher le lecteur, jamais après
         player = nil
+        playerGeneration = nil
 
         var candidates: [MontageClipCandidate] = []
         var sources: [Int: URL] = [:]
@@ -853,17 +925,28 @@ struct MontageView: View {
             sources[index] = url
         }
 
-        let slots = map.slots(from: windowStart, density: density)
-        plan = MontagePlanner.plan(slots: slots, clips: candidates, windowStart: windowStart)
+        // Deux reconstructions peuvent être en vol : celle qui n'est plus la
+        // dernière se jette au lieu d'écraser le bon plan.
+        guard !Task.isCancelled, generation == planGeneration else { return }
+        let slots = map.slots(from: start, density: cutDensity)
+        plan = MontagePlanner.plan(slots: slots, clips: candidates, windowStart: start)
         clipSources = sources
         // Le PREMIER placement peut changer de clip, donc d'orientation : la
         // vignette de pose et la taille de rendu mémorisée décriraient un
         // montage qui n'existe plus.
+        backdropTask?.cancel()
+        backdropTask = nil
         overlayBackdrop = nil
         overlayBackdropClipID = nil
         overlayVideoRatio = nil
         previewRenderSize = nil
         refreshOverlays()
+        // La FORME du montage est réétablie tout de suite, sans attendre que
+        // l'écran d'incrustations soit rouvert : c'est elle qui permet de
+        // recoller les incrustations ancrées quand le montage change
+        // d'orientation. Sans cela, un logo ancré en bas à droite restait à sa
+        // place de l'ancien cadrage et partait à l'export ainsi.
+        prepareOverlayShape(imageToo: false)
     }
 
     // MARK: - Aperçu
@@ -876,12 +959,32 @@ struct MontageView: View {
         }
         // Verrou posé AVANT la tâche : voir `isBuildingPreview`.
         guard !isBuildingPreview else { return }
+        // REPRISE. Le lecteur en place joue déjà la composition du plan
+        // courant, et les incrustations de l'aperçu sont dessinées en SwiftUI
+        // par-dessus : un réglage d'incrustation ne change rien à cette
+        // composition. Rien à reconstruire, et le point de lecture est gardé.
+        // Sans cette branche, « pause » n'était pas une pause : reprendre
+        // rebâtissait tout le montage et repartait de zéro — plusieurs
+        // secondes d'attente pour revoir l'effet du réglage qu'on vient de
+        // faire, c'est-à-dire le geste le plus fréquent de cet écran.
+        if let player, playerGeneration == planGeneration {
+            if let item = player.currentItem, item.duration.isNumeric,
+               CMTimeCompare(player.currentTime(), item.duration) >= 0 {
+                player.seek(to: .zero) // arrivé au bout : repartir, pas rester figé
+            }
+            player.play()
+            isPreviewing = true
+            return
+        }
         guard let plan, let filename = project.musicFilename else { return }
         let generation = planGeneration
         let sources = clipSources
+        let token = UUID()
+        previewToken = token
         isBuildingPreview = true
         previewTask = Task {
-            defer { isBuildingPreview = false }
+            // Ne s'éteint QUE si c'est encore la construction courante.
+            defer { if previewToken == token { isBuildingPreview = false } }
             do {
                 let montage = try await MontageComposer.build(
                     plan: plan,
@@ -905,6 +1008,7 @@ struct MontageView: View {
                 let newPlayer = AVPlayer(playerItem: item)
                 previewRenderSize = montage.renderSize
                 player = newPlayer
+                playerGeneration = generation
                 // Suivi du temps : les incrustations n'apparaissent que sur
                 // leur plage. 20 relevés par seconde suffisent — l'œil ne
                 // distingue pas mieux, et c'est autant de reconstructions
@@ -934,8 +1038,16 @@ struct MontageView: View {
     private func stopPreview() {
         // La construction EN VOL tombe aussi : sinon elle rallumerait le son
         // après coup — feuille ouverte, écran fermé, export lancé.
+        //
+        // Le jeton change AVANT l'annulation : `MontageComposer.build` va de
+        // toute façon à son terme sur les tronçons déjà engagés, et sans cette
+        // désolidarisation le bouton restait éteint avec son indicateur qui
+        // tournait dans le vide, plusieurs secondes, pour une préparation
+        // déjà jetée.
+        previewToken = UUID()
         previewTask?.cancel()
         previewTask = nil
+        isBuildingPreview = false
         player?.pause()
         isPreviewing = false
     }

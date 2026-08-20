@@ -59,6 +59,23 @@ final class OverlayLayer {
     /// faisait déborder du cadre, la marge dépendant de la largeur.
     var anchorIndex: Int = -1
 
+    /// Rapport hauteur/largeur de l'image posée, relevé une fois à l'ajout.
+    ///
+    /// Mémorisé pour que la géométrie se calcule SANS ouvrir le fichier :
+    /// recaler les ancrages depuis l'écran de montage, après un changement
+    /// d'orientation du montage, aurait sinon imposé de décoder tous les PNG.
+    /// Vaut 1 pour un texte, et pour les calques posés avant son existence —
+    /// l'éditeur le corrige à la première lecture de l'image.
+    var imageAspect: Double = 1
+
+    /// Rapport du rendu pour lequel la position ancrée a été calculée.
+    ///
+    /// Change de premier clip, change d'orientation : un montage peut passer
+    /// de 9:16 à 16:9 d'un cran de densité à l'autre, et une incrustation
+    /// ancrée dans un coin doit y RESTER. Sans cette trace, on ne saurait pas
+    /// lesquelles recaler, ni éviter de recaler celles qui sont déjà justes.
+    var anchorVideoRatio: Double = 0
+
     /// Ordre d'empilement : les derniers ajoutés passent devant.
     var stackOrder: Int = 0
 

@@ -19,24 +19,24 @@
 //  Si le symptôme revient, c'est qu'aucune des deux n'était la bonne — ne pas
 //  repartir de l'hypothèse « pas observé », elle est écartée.
 //
-//  LE MODÈLE N'EST ÉCRIT QUE SUR GESTE DE L'UTILISATEUR. Les compteurs de
-//  portée passent par des liaisons BORNÉES : ils affichent des rangs valables
-//  pour le montage courant sans jamais réécrire ceux qui sont enregistrés. Un
-//  recalage automatique a existé et détruisait les portées — le nombre de
-//  clips varie à chaque déplacement de la fenêtre musicale, et « du clip 40 au
-//  clip 80 » devenait définitivement « 5 → 5 » le temps d'un passage court.
+//  LES COMPTEURS MONTRENT CE QU'ILS CONTIENNENT. C'est le corollaire de la
+//  règle « le modèle n'est écrit que sur geste ». Une version intermédiaire
+//  affichait des rangs bornés au montage courant tout en gardant les vrais :
+//  l'écran annonçait « du clip 6 au clip 6 » sur une portée enregistrée 40→80,
+//  si bien qu'un seul appui sur le « − », geste anodin, écrasait le 80 par un
+//  4 sans que rien n'ait jamais montré ce qu'on détruisait. Les rangs affichés
+//  sont donc les rangs réels ; le dépassement du montage courant est dit en
+//  toutes lettres, et le bornage reste où il sert : au rendu.
 //
 //  POSITION PAR ANCRAGE plutôt qu'au doigt seul : neuf points (les quatre
-//  angles, les quatre milieux de bord, le centre). Un logo se pose presque
-//  toujours sur l'un d'eux, et viser un coin au pouce sur un aperçu de la
-//  taille d'une carte postale est pénible. Le glissement reste possible. La
-//  règle de placement vit dans `OverlayLayer.anchoredCenter` — une seule
-//  copie, partagée avec la création.
+//  angles, les quatre milieux de bord, le centre). La règle de placement vit
+//  dans `OverlayLayer.anchoredCenter` et l'encombrement dans
+//  `OverlayGeometry` — une seule copie de chaque, partagée avec la création et
+//  avec le recalage d'orientation.
 //
 //  TAILLE AU CURSEUR plutôt qu'au pincement : le pincement se disputait le
 //  geste avec le glissement — SwiftUI rapporte le point milieu des deux
-//  doigts, et l'incrustation sautait sous la main pendant qu'on la
-//  redimensionnait.
+//  doigts, et l'incrustation sautait sous la main.
 //
 
 import SwiftUI
@@ -44,27 +44,37 @@ import SwiftData
 
 struct OverlayInspector: View {
     @Bindable var layer: OverlayLayer
-    /// Nombre de clips du montage courant — borne les rangs.
+    /// Nombre de clips du montage courant.
     var clipCount: Int
-    /// Hauteur occupée, en fraction de la hauteur de l'image.
-    var relativeHeight: Double
-    /// Largeur RÉELLEMENT occupée, en fraction de la largeur de l'image.
-    /// Fournie par le parent : pour un texte, elle est MESURÉE, `relativeWidth`
-    /// n'y réglant que le corps de police.
-    var relativeSpan: Double
+    /// Rapport largeur/hauteur du rendu — pilote l'encombrement vertical.
+    var videoRatio: Double
     /// Durée réelle de la portée. Fermeture ÉVALUÉE À LA DEMANDE : calculée à
     /// chaque passage, elle refaisait la résolution des portées cent fois par
     /// seconde pendant un glissement, sur le fil principal.
     var durationLabel: () -> String
     var onChange: () -> Void
 
-    /// Rangs BORNÉS pour l'affichage seulement. `Stepper(in:)` plante sur une
-    /// plage inversée (« Can't form Range with upperBound < lowerBound »), cas
-    /// atteint dès qu'on change la densité de coupe — elle divise ou multiplie
-    /// le nombre de clips par seize.
+    @FocusState private var editingText: Bool
+    /// Dernier texte non vide : un texte effacé ne se dessine nulle part, on
+    /// le rend plutôt que d'enregistrer un calque invisible.
+    @State private var lastNonEmptyText = ""
+
+    private var relativeSpan: Double { OverlayGeometry.span(of: layer) }
+    private var relativeHeight: Double {
+        OverlayGeometry.height(of: layer, videoRatio: videoRatio)
+    }
+
+    /// Rangs RÉELS, tels qu'ils sont enregistrés.
     private var lastIndex: Int { max(0, clipCount - 1) }
-    private var safeFirst: Int { min(max(0, layer.firstClipIndex), lastIndex) }
-    private var safeLast: Int { min(max(safeFirst, layer.lastClipIndex), lastIndex) }
+    private var realFirst: Int { max(0, layer.firstClipIndex) }
+    private var realLast: Int { max(realFirst, layer.lastClipIndex) }
+    /// La portée dépasse-t-elle le montage courant ? Ce n'est pas une erreur —
+    /// elle redeviendra juste dès que le montage s'allongera.
+    private var outOfPlan: Bool { clipCount > 0 && realLast > lastIndex }
+
+    private var textIsBlank: Bool {
+        layer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         VStack(spacing: 12) {
@@ -77,6 +87,7 @@ struct OverlayInspector: View {
 
             scopeControl
         }
+        .onAppear { if !textIsBlank { lastNonEmptyText = layer.text } }
     }
 
     /// Enregistre AU TOUR SUIVANT. Sauvegarder pendant la validation d'un
@@ -95,6 +106,7 @@ struct OverlayInspector: View {
         ) else { return }
         layer.centerX = center.x
         layer.centerY = center.y
+        layer.anchorVideoRatio = videoRatio
     }
 
     // MARK: - Texte
@@ -105,20 +117,56 @@ struct OverlayInspector: View {
     /// de frappe obligeait à supprimer l'incrustation, en recréer une, et
     /// refaire tout le placement.
     private var textField: some View {
-        TextField("Texte", text: $layer.text)
-            .textFieldStyle(.plain)
-            .font(.callout)
-            .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-            .submitLabel(.done)
-            .onSubmit { commit() }
-            // Écrire change la largeur du texte, donc la marge de son ancrage.
-            .onChange(of: layer.text) { _, _ in
-                applyAnchor()
-                commit()
+        VStack(alignment: .leading, spacing: 4) {
+            TextField("Texte", text: $layer.text)
+                .textFieldStyle(.plain)
+                .font(.callout)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                .focused($editingText)
+                .submitLabel(.done)
+                .onSubmit { finishEditing() }
+                // Écrire change la largeur du texte, donc la marge de son
+                // ancrage : on recolle à chaque frappe, mais on N'ENREGISTRE
+                // PAS — un `save()` SwiftData par caractère saccaderait la
+                // saisie. La sauvegarde vient à la validation, ou à la
+                // fermeture de l'écran.
+                .onChange(of: layer.text) { _, new in
+                    let trimmed = new.trimmingCharacters(in: .whitespacesAndNewlines)
+                    // Pas de recalage sur une largeur nulle : le champ vidé,
+                    // l'ancrage aurait collé le calque à 3 % du bord et perdu
+                    // la position réglée.
+                    guard !trimmed.isEmpty else { return }
+                    lastNonEmptyText = new
+                    applyAnchor()
+                }
+
+            if textIsBlank {
+                Text("Texte vide : cette incrustation ne sera dessinée ni dans l'aperçu "
+                     + "ni dans le fichier exporté. Retapez un texte, ou supprimez-la.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
             }
+        }
+        // SORTIE DE CLAVIER EXPLICITE. La touche Retour la donnait déjà, mais
+        // rien ne le disait, et le clavier recouvre la rangée Terminé.
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Terminé") { finishEditing() }
+            }
+        }
+    }
+
+    private func finishEditing() {
+        // Un texte vide ne produit rien au rendu : on rend la dernière valeur
+        // utile plutôt que d'enregistrer un calque que personne ne dessinera.
+        if textIsBlank, !lastNonEmptyText.isEmpty { layer.text = lastNonEmptyText }
+        applyAnchor()
+        editingText = false
+        commit()
     }
 
     // MARK: - Ancrages
@@ -190,12 +238,11 @@ struct OverlayInspector: View {
                 // Le pourcentage ne veut PAS dire la même chose pour les deux
                 // types : sur un texte le curseur règle le corps de police, et
                 // annoncer « 50 % de la largeur » était faux — la largeur
-                // dépend du nombre de caractères.
-                Text(layer.kind == .image
-                     ? "\(Int(layer.relativeWidth * 100)) %"
-                     : "\(Int(relativeSpan * 100)) % de large")
+                // dépend du nombre de caractères. On affiche donc l'occupation
+                // réelle, en orange dès qu'elle déborde du cadre.
+                Text("\(Int(relativeSpan * 100)) % de large")
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(relativeSpan > 1 ? .orange : .secondary)
             }
             Slider(
                 value: $layer.relativeWidth,
@@ -230,35 +277,46 @@ struct OverlayInspector: View {
             if !layer.spansWholeMontage {
                 if clipCount > 0 {
                     HStack(spacing: 12) {
-                        // LIAISONS BORNÉES : elles montrent un rang valable
-                        // pour le montage courant, et n'écrivent QUE si
-                        // l'utilisateur touche le compteur. Lire ne modifie
-                        // jamais la portée enregistrée.
+                        // Les plages contiennent TOUJOURS la valeur affichée,
+                        // donc `Stepper(in:)` ne peut pas recevoir de plage
+                        // inversée — le plantage « Can't form Range with
+                        // upperBound < lowerBound » reste écarté.
                         Stepper(value: Binding(
-                            get: { safeFirst },
+                            get: { realFirst },
                             set: { new in
-                                let first = min(max(0, new), lastIndex)
+                                let first = max(0, new)
                                 layer.firstClipIndex = first
                                 if layer.lastClipIndex < first { layer.lastClipIndex = first }
                                 commit()
                             }
-                        ), in: 0...lastIndex) {
-                            Text("Du clip \(safeFirst + 1)")
+                        ), in: 0...max(lastIndex, realFirst)) {
+                            Text("Du clip \(realFirst + 1)")
                                 .font(.caption.monospacedDigit())
                         }
                         Stepper(value: Binding(
-                            get: { safeLast },
+                            get: { realLast },
                             set: { new in
-                                layer.lastClipIndex = min(max(safeFirst, new), lastIndex)
+                                layer.lastClipIndex = max(realFirst, new)
                                 commit()
                             }
-                        ), in: safeFirst...lastIndex) {
-                            Text("au clip \(safeLast + 1)")
+                        ), in: realFirst...max(lastIndex, realLast)) {
+                            Text("au clip \(realLast + 1)")
                                 .font(.caption.monospacedDigit())
                         }
                     }
+
+                    if outOfPlan {
+                        Text("Ce montage ne compte que \(clipCount) clip(s) : "
+                             + "l'incrustation s'arrêtera au dernier. La portée "
+                             + "enregistrée est gardée et se rétablira si le "
+                             + "montage s'allonge.")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+
                     // La durée réelle, en clair : des rangs de clips ne parlent
-                    // pas d'eux-mêmes.
+                    // pas d'eux-mêmes. Calculée sur les rangs BORNÉS, puisqu'elle
+                    // décrit ce qui sera réellement rendu.
                     Text(durationLabel())
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
