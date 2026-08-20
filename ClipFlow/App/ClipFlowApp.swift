@@ -50,16 +50,6 @@ struct ClipFlowApp: App {
             RootView()
         }
         .modelContainer(container)
-        // REPRISE AU LANCEMENT, dans cet ordre :
-        //  1. les musiques des projets d'avant la bibliothèque y entrent —
-        //     sinon elles passeraient pour des fichiers orphelins ;
-        //  2. les analyses interrompues repartent — la file vit en mémoire,
-        //     un morceau importé puis l'app fermée restait sinon bloqué.
-        .task {
-            let context = container.mainContext
-            MusicLibraryController.adoptProjectMusic(context: context)
-            MusicLibraryController.shared.resumePending(context: context)
-        }
     }
 }
 
@@ -67,9 +57,24 @@ struct ClipFlowApp: App {
 /// (La NavigationStack vit dans ProjectListView, qui possède le chemin pour
 /// pousser un projet fraîchement créé directement dans l'éditeur.)
 struct RootView: View {
+    /// Contexte de la base — `.task` n'existe pas sur une `Scene`, la reprise
+    /// au lancement vit donc ici, dans la première vue.
+    @Environment(\.modelContext) private var modelContext
+
     var body: some View {
         ProjectListView()
             .tint(Theme.accent)
             .preferredColorScheme(.dark)
+            // REPRISE AU LANCEMENT, dans cet ordre :
+            //  1. les musiques des projets d'avant la bibliothèque y entrent —
+            //     sinon elles passeraient pour des fichiers orphelins, et un
+            //     tap dans l'écran Stockage les aurait effacées ;
+            //  2. les analyses interrompues repartent — la file vit en
+            //     mémoire, un morceau importé puis l'app fermée restait sinon
+            //     bloqué sur « en attente d'analyse ».
+            .task {
+                MusicLibraryController.adoptProjectMusic(context: modelContext)
+                MusicLibraryController.shared.resumePending(context: modelContext)
+            }
     }
 }
