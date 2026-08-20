@@ -69,7 +69,8 @@ enum OnsetExtractor {
 
         let log2n = vDSP_Length(log2(Double(fftSize)))
         guard let fft = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
-            return AnalysisCurves(onsetEnvelope: [], rms: [], hopSeconds: hopSeconds)
+            return AnalysisCurves(onsetEnvelope: [], rms: [], hopSeconds: hopSeconds,
+                                  frameCenterOffset: centerOffset)
         }
         defer { vDSP_destroy_fftsetup(fft) }
 
