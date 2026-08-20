@@ -14,17 +14,21 @@
 //  avec le glissement. La vignette de fond est une vraie image du montage,
 //  donc le cadrage est jugé sur le contenu réel.
 //
-//  LA MISE EN PAGE NE BOUGE JAMAIS. La zone de réglages a une hauteur
-//  VERROUILLÉE (pas un plancher : un panneau de texte en portée par clips
-//  dépasse 290 pt et poussait quand même) et son surplus défile. La sélection
-//  n'a lieu qu'au relâchement. Faire apparaître le panneau pendant un
-//  glissement retirait ~190 pt au cadre de pose, et
-//  `.position(canvasSize.height × centerY)` téléportait l'incrustation loin du
-//  doigt — en changeant au passage le gain de la translation.
+//  LA MISE EN PAGE NE BOUGE PAS TANT QU'IL Y A QUELQUE CHOSE À DÉPLACER.
+//  Dès qu'une incrustation existe, la zone de réglages occupe une hauteur
+//  VERROUILLÉE — pas un plancher, un panneau chargé la dépassait et poussait
+//  quand même — et son surplus défile ; la sélection n'a lieu qu'au
+//  relâchement. Sans cela, faire apparaître le panneau pendant un glissement
+//  retirait ~190 pt au cadre de pose, et `.position(hauteur × centerY)`
+//  téléportait l'incrustation loin du doigt, en changeant au passage le gain
+//  de la translation. Tant qu'aucune incrustation n'est posée, la réserve
+//  n'existe pas : il n'y a rien à sélectionner, donc rien à faire sauter, et
+//  270 pt vides ramenaient le cadre à 139 pt de large sur un petit écran.
 //
 //  En PAYSAGE la réserve verticale n'a pas de sens : elle ne laissait qu'une
 //  vingtaine de points au cadre de pose et poussait « Terminé » hors écran.
-//  Les réglages passent alors dans une colonne latérale défilante.
+//  Les réglages passent alors dans une colonne latérale défilante, dont la
+//  rangée d'actions reste ancrée en bas.
 //
 
 import SwiftUI
@@ -104,7 +108,14 @@ struct OverlayEditorView: View {
                         // mise dans la zone défilante, elle passait sous le
                         // pli et changeait de place à chaque sélection —
                         // « Terminé » devenait introuvable.
+                        //
+                        // La zone prend TOUTE la hauteur restante, sélection ou
+                        // non : sans cela la rangée d'actions remontait au
+                        // milieu de la colonne quand rien n'était sélectionné,
+                        // puis redescendait d'une centaine de points au premier
+                        // toucher.
                         inspectorZone
+                            .frame(maxHeight: .infinity, alignment: .top)
                         actionRow
                     }
                     .padding(.horizontal, 12)
@@ -114,8 +125,19 @@ struct OverlayEditorView: View {
             } else {
                 VStack(spacing: 10) {
                     canvas
-                    inspectorZone
-                        .frame(height: 270, alignment: .top)
+                    // RÉSERVE seulement s'il y a quelque chose à régler.
+                    //
+                    // Elle existe pour que le cadre de pose ne change pas de
+                    // taille quand le panneau apparaît — un glissement en
+                    // cours verrait sinon l'incrustation sauter sous le doigt.
+                    // Sans aucune incrustation posée, il n'y a rien à
+                    // sélectionner donc rien à faire sauter : garder 270 pt
+                    // vides ramenait le cadre à 139 pt de large sur un petit
+                    // écran, pour un montage portrait.
+                    if !layers.isEmpty {
+                        inspectorZone
+                            .frame(height: 270, alignment: .top)
+                    }
                     actionRow
                 }
                 .padding(.horizontal, 16)
@@ -469,6 +491,14 @@ struct OverlayEditorView: View {
 
     private func addImage(from item: PhotosPickerItem) async {
         defer { photoItem = nil }
+        // Le BOUTON est désactivé quand la forme est inconnue, mais pas ce
+        // rappel : une sélection de photo commencée avant peut aboutir après,
+        // et graverait un centre ancré calculé sur un 9:16 supposé.
+        guard shapeIsKnown else {
+            message = "La forme du montage n'est pas encore connue : "
+                + "réessayez dans un instant."
+            return
+        }
         guard let data = try? await item.loadTransferable(type: Data.self),
               let image = UIImage(data: data) else {
             message = "Cette image n'a pas pu être lue. Choisissez une photo ou un PNG."
@@ -518,19 +548,26 @@ struct OverlayEditorView: View {
         guard !trimmed.isEmpty else {
             // Différé : présenter une alerte pendant qu'une autre se referme
             // les fait se disputer, et l'une des deux est avalée.
-            if target != nil {
-                Task { @MainActor in
-                    message = "Un texte vide ne s'afficherait nulle part : "
-                        + "l'incrustation garde son texte précédent. "
-                        + "Pour la retirer, utilisez la corbeille."
-                }
-            }
+            let explanation = target == nil
+                ? "Un texte vide ne s'afficherait nulle part : aucune "
+                    + "incrustation n'a été créée."
+                : "Un texte vide ne s'afficherait nulle part : l'incrustation "
+                    + "garde son texte précédent. Pour la retirer, utilisez "
+                    + "la corbeille."
+            Task { @MainActor in message = explanation }
             return
         }
         if let target, target.modelContext != nil {
             target.text = trimmed
-            // La largeur d'un texte dépend de ses caractères : la marge de son
-            // ancrage change avec lui.
+            // LE CORPS DE POLICE EST RECALCULÉ, pas seulement le texte.
+            //
+            // `relativeWidth` ne règle que la taille des lettres : garder
+            // celle d'un texte court en le remplaçant par un long donnait un
+            // titre plus large que l'image — « GO » remplacé par « MON MONTAGE
+            // DU DIMANCHE » passait à 164 % de large, coupé des deux côtés. Et
+            // `anchoredCenter` saturait alors à 0,5, si bien qu'un titre ancré
+            // à gauche se retrouvait centré, en silence.
+            target.relativeWidth = OverlayGeometry.initialTextWidth(for: trimmed)
             applyAnchorAtCreation(target)
             try? modelContext.save()
             return

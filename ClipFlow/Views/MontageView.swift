@@ -468,7 +468,22 @@ struct MontageView: View {
     /// contenu réel, pas sur un rectangle noir.
     private func prepareOverlayShape(imageToo: Bool) {
         guard let plan, let first = plan.placements.first,
-              let url = clipSources[first.clipID] else { return }
+              let url = clipSources[first.clipID] else {
+            // AUCUN CLIP À DÉCORER. Sortir en silence laissait la feuille
+            // ouverte sur « Préparation de l'aperçu… » pour toujours : rien ne
+            // rappelle cette fonction une fois la feuille présentée, et les
+            // deux boutons d'ajout restaient grisés sans explication. Le cas
+            // s'atteint en tapant un cran de densité trop lent puis, sans
+            // attendre, le bouton d'incrustations — le plan encore affiché
+            // n'est pas vide, donc rien ne bloque l'ouverture.
+            if showOverlays {
+                showOverlays = false
+                errorMessage = "Ce cran de densité ne place aucun clip : "
+                    + "il n'y a rien à décorer. Choisissez un cran plus rapide, "
+                    + "puis rouvrez les incrustations."
+            }
+            return
+        }
         // Vignette réutilisée UNIQUEMENT si elle vient du clip qui fixe la
         // taille de rendu du plan COURANT.
         let needsImage = imageToo
@@ -511,6 +526,17 @@ struct MontageView: View {
                 guard !Task.isCancelled, generation == planGeneration else { return }
                 overlayBackdrop = UIImage(cgImage: image)
                 overlayBackdropClipID = clipID
+            }
+            // Ni rapport ni vignette : le fichier source a disparu entre la
+            // construction du plan et l'extraction, et les deux échecs sont
+            // avalés par leurs `try?`. Sans ce filet, la feuille resterait
+            // ouverte sur un écran de préparation qui n'aboutira jamais.
+            guard !Task.isCancelled, generation == planGeneration else { return }
+            if overlayVideoRatio == nil, overlayBackdrop == nil, showOverlays {
+                showOverlays = false
+                errorMessage = "Le premier clip du montage n'a pas pu être lu : "
+                    + "son fichier a peut-être été déplacé ou supprimé. "
+                    + "Reconstruisez le montage avant d'ajouter une incrustation."
             }
         }
     }

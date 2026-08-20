@@ -59,16 +59,6 @@ struct OverlayInspector: View {
     var durationLabel: () -> String
     var onChange: () -> Void
 
-    /// Plafond des compteurs, FIGÉ tant qu'on ne change pas de calque ni de
-    /// montage.
-    ///
-    /// Il valait `max(lastIndex, valeur courante)`, recalculé à chaque appui :
-    /// sur une portée qui dépasse le montage, descendre d'un cran abaissait le
-    /// plafond d'autant et le « + » mourait aussitôt. Un cliquet, donc, où
-    /// chaque appui était sans retour — sur des valeurs que l'utilisateur
-    /// venait justement d'apprendre qu'elles étaient conservées.
-    @State private var scopeCeiling = 0
-
     private var relativeSpan: Double { OverlayGeometry.span(of: layer) }
     private var relativeHeight: Double {
         OverlayGeometry.height(of: layer, videoRatio: videoRatio)
@@ -82,6 +72,18 @@ struct OverlayInspector: View {
     /// elle redeviendra juste dès que le montage s'allongera.
     private var outOfPlan: Bool { clipCount > 0 && realLast > lastIndex }
 
+    /// Borne haute des compteurs : UNE MARCHE au-dessus de la valeur affichée.
+    ///
+    /// Le « + » reste donc toujours vivant, sans aucun état à conserver. Une
+    /// version précédente figeait un plafond dans un `@State` — mais cet état
+    /// mourait avec la sélection, et désélectionner est le geste le plus
+    /// facile de l'écran (une touche à côté de l'incrustation). Le cliquet
+    /// n'était pas supprimé, seulement retardé d'un effleurement : on
+    /// redescendait d'un cran, on touchait à côté, et le rang perdu ne
+    /// remontait plus. Dérivée du seul modèle, la borne ne peut ni mourir ni
+    /// se raboter.
+    private var scopeBound: Int { max(lastIndex, realLast) + 1 }
+
     var body: some View {
         VStack(spacing: 12) {
             HStack(alignment: .top, spacing: 16) {
@@ -91,16 +93,6 @@ struct OverlayInspector: View {
 
             scopeControl
         }
-        .onAppear { refreshCeiling() }
-        // Le panneau est RÉUTILISÉ d'une sélection à l'autre — même position
-        // dans l'arbre, donc SwiftUI garde son état et ne rejoue pas
-        // `onAppear`. Le plafond doit suivre le calque affiché.
-        .onChange(of: layer.persistentModelID) { _, _ in refreshCeiling() }
-        .onChange(of: clipCount) { _, _ in refreshCeiling() }
-    }
-
-    private func refreshCeiling() {
-        scopeCeiling = max(lastIndex, max(0, layer.lastClipIndex))
     }
 
     /// Enregistre AU TOUR SUIVANT. Sauvegarder pendant la validation d'un
@@ -242,7 +234,7 @@ struct OverlayInspector: View {
                                 if layer.lastClipIndex < first { layer.lastClipIndex = first }
                                 commit()
                             }
-                        ), in: 0...max(scopeCeiling, realFirst)) {
+                        ), in: 0...max(scopeBound, realFirst)) {
                             Text("Du clip \(realFirst + 1)")
                                 .font(.caption.monospacedDigit())
                         }
@@ -252,12 +244,18 @@ struct OverlayInspector: View {
                                 layer.lastClipIndex = max(realFirst, new)
                                 commit()
                             }
-                        ), in: realFirst...max(scopeCeiling, realLast)) {
+                        ), in: realFirst...max(scopeBound, realLast)) {
                             Text("au clip \(realLast + 1)")
                                 .font(.caption.monospacedDigit())
                         }
                     }
 
+                    // NOTE : les compteurs vont d'un clip à la fois. Sur un
+                    // montage de cent cinquante clips, atteindre le rang 120
+                    // demande de maintenir le doigt (le pas se répète tout
+                    // seul). C'est assumé : la portée se règle presque
+                    // toujours sur les premiers clips, et la durée affichée
+                    // juste en dessous donne le repère qui compte.
                     if outOfPlan {
                         Text(outOfPlanMessage)
                             .font(.caption2)
