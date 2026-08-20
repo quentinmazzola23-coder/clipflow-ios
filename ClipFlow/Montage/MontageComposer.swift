@@ -46,6 +46,9 @@ enum MontageComposerError: Error, LocalizedError {
 struct MontageComposition {
     var composition: AVMutableComposition
     var videoComposition: AVMutableVideoComposition
+    /// Taille de l'image rendue — l'aperçu s'en sert pour retrouver le cadre
+    /// réel de la vidéo dans le lecteur (qui la met en boîte aux lettres).
+    var renderSize: CGSize
 }
 
 enum MontageComposer {
@@ -56,7 +59,9 @@ enum MontageComposer {
     /// - `sources` : URL du fichier de chaque clip, par identifiant.
     static func build(plan: MontagePlan,
                       sources: [Int: URL],
-                      musicURL: URL) async throws -> MontageComposition {
+                      musicURL: URL,
+                      overlays: [ResolvedOverlay] = [],
+                      forExport: Bool = false) async throws -> MontageComposition {
         guard !plan.placements.isEmpty else { throw MontageComposerError.emptyPlan }
 
         let composition = AVMutableComposition()
@@ -210,7 +215,23 @@ enum MontageComposer {
         // dupliquer des images dans le fichier.
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
 
-        return MontageComposition(composition: composition, videoComposition: videoComposition)
+        // INCRUSTATIONS — UNIQUEMENT sur le chemin d'EXPORT.
+        //
+        // `AVVideoCompositionCoreAnimationTool` est documenté par Apple comme
+        // un outil de rendu HORS LIGNE. Attaché à la composition d'un
+        // AVPlayerItem, il est au mieux ignoré (aperçu sans incrustation), au
+        // pire il invalide l'élément et le lecteur reste noir. L'aperçu
+        // dessine donc ses incrustations en SwiftUI par-dessus le lecteur
+        // (voir OverlayPreviewLayer), avec la même géométrie fractionnaire.
+        if forExport {
+            OverlayRenderer.attach(overlays, to: videoComposition,
+                                   renderSize: renderSize,
+                                   totalDuration: plan.totalDuration)
+        }
+
+        return MontageComposition(composition: composition,
+                                  videoComposition: videoComposition,
+                                  renderSize: renderSize)
     }
 
     /// Transformation « remplir le cadre » : orientation native appliquée,

@@ -133,6 +133,11 @@ final class ClipProject {
     @Relationship(deleteRule: .cascade, inverse: \Passage.project)
     var passages: [Passage] = []
 
+    /// Incrustations du montage (logo, filigrane, texte). En cascade : elles
+    /// n'ont aucun sens hors du projet qui les porte.
+    @Relationship(deleteRule: .cascade, inverse: \OverlayLayer.project)
+    var overlays: [OverlayLayer] = []
+
     init(name: String) {
         self.name = name
         self.categoryGroupsJSON = CategoryGroup.encodeDefaults()

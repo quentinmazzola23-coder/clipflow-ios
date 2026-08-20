@@ -16,7 +16,7 @@ struct PersistenceTests {
     private func makeContainer() throws -> ModelContainer {
         let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
         return try ModelContainer(
-            for: ClipProject.self, Rush.self, Passage.self,
+            for: ClipProject.self, Rush.self, Passage.self, MusicTrack.self, OverlayLayer.self,
             configurations: configuration
         )
     }

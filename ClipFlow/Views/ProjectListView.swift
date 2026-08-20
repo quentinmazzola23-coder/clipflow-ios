@@ -272,6 +272,16 @@ struct ProjectListView: View {
                 try? FileManager.default.removeItem(at: StorageManager.url(forCachedRangeRelativePath: path))
             }
         }
+        // Les IMAGES D'INCRUSTATION suivent le projet : contrairement à la
+        // musique, elles n'ont aucun sens ailleurs. Sans cette boucle, la
+        // cascade SwiftData effaçait les calques — donc la seule référence
+        // vers leurs fichiers — et des PNG de plusieurs dizaines de Mo
+        // restaient sur le téléphone, invisibles et impurgeables.
+        for overlay in project.overlays {
+            if let filename = overlay.imageFilename {
+                OverlayStore.deleteImage(filename: filename)
+            }
+        }
         // La MUSIQUE n'est PAS supprimée : depuis la bibliothèque locale, un
         // morceau appartient à la banque et sert souvent à plusieurs projets.
         // Il se supprime depuis l'écran Bibliothèque, qui prévient alors des

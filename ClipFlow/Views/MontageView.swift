@@ -19,6 +19,7 @@ import SwiftData
 import AVKit
 import CoreMedia
 import UniformTypeIdentifiers
+import UIKit
 
 struct MontageView: View {
     @Bindable var project: ClipProject
@@ -39,6 +40,16 @@ struct MontageView: View {
     @State private var windowStart: Double = 0
     @State private var showFileImporter = false
     @State private var showLibrary = false
+    @State private var showOverlays = false
+    /// Image extraite du montage, fond de la pose d'incrustations.
+    @State private var overlayBackdrop: UIImage?
+    /// Position de lecture de l'aperçu — pilote l'affichage des incrustations.
+    @State private var previewTime: Double = 0
+    /// Observateur de temps du lecteur d'aperçu, retiré avec lui.
+    @State private var timeObserver: Any?
+    /// Taille de l'image rendue, pour placer les incrustations dans le cadre
+    /// réel de la vidéo (le lecteur la met en boîte aux lettres).
+    @State private var previewRenderSize: CGSize?
     @State private var autoImporterLaunched = false
     @State private var errorMessage: String?
     @State private var exportToast: String?
@@ -98,6 +109,16 @@ struct MontageView: View {
                 }
             }
         }
+        // INCRUSTATIONS : étape POSTÉRIEURE au montage — on ne décore pas une
+        // vidéo qu'on n'a pas encore construite.
+        .sheet(isPresented: $showOverlays) {
+            NavigationStack {
+                if let plan {
+                    OverlayEditorView(project: project, plan: plan,
+                                      backdrop: overlayBackdrop)
+                }
+            }
+        }
         .sheet(isPresented: $showLibrary) {
             NavigationStack {
                 MusicLibraryView(density: density,
@@ -115,6 +136,12 @@ struct MontageView: View {
             if let endObserver {
                 NotificationCenter.default.removeObserver(endObserver)
                 self.endObserver = nil
+            }
+            // Observateur de temps : accroché AU LECTEUR, il doit partir avec
+            // lui — sinon il survit à chaque aperçu et s'accumule.
+            if let timeObserver {
+                player?.removeTimeObserver(timeObserver)
+                self.timeObserver = nil
             }
         }
         // Résultat d'un export terminé pendant l'absence : annoncé au retour.
@@ -199,6 +226,15 @@ struct MontageView: View {
                 ZStack {
                     if let player {
                         VideoPlayer(player: player)
+                        // INCRUSTATIONS DE L'APERÇU, dessinées par-dessus.
+                        // L'outil Core Animation d'AVFoundation ne fonctionne
+                        // qu'à l'export : sans cette couche, l'utilisateur
+                        // posait son logo et ne le voyait jamais à l'écran.
+                        OverlayPreviewLayer(
+                            overlays: resolvedOverlays,
+                            currentTime: previewTime,
+                            videoRatio: previewVideoRatio
+                        )
                     } else {
                         RoundedRectangle(cornerRadius: 12)
                             .fill(.black.opacity(0.6))
@@ -337,6 +373,48 @@ struct MontageView: View {
         MontageExportController.shared.isExporting
     }
 
+    private var overlayCount: Int { project.overlays.count }
+
+    /// Rapport largeur/hauteur du rendu. Tant que rien n'a été composé, on
+    /// prend celui du premier clip plutôt qu'une valeur arbitraire.
+    private var previewVideoRatio: CGFloat {
+        if let size = previewRenderSize, size.height > 0 {
+            return size.width / size.height
+        }
+        if let backdrop = overlayBackdrop, backdrop.size.height > 0 {
+            return backdrop.size.width / backdrop.size.height
+        }
+        return 9.0 / 16.0
+    }
+
+    /// Incrustations résolues en temps absolu, prêtes pour le rendu.
+    /// Aperçu et export consomment la MÊME liste.
+    private var resolvedOverlays: [ResolvedOverlay] {
+        guard let plan else { return [] }
+        return OverlayStore.resolve(project.overlays,
+                                    placements: plan.placements,
+                                    totalDuration: plan.totalDuration)
+    }
+
+    /// Extrait une image du montage : on juge le placement d'un logo sur du
+    /// contenu réel, pas sur un rectangle noir.
+    private func prepareOverlayBackdrop() {
+        guard overlayBackdrop == nil, let plan, let first = plan.placements.first,
+              let url = clipSources[first.clipID] else { return }
+        Task {
+            let asset = AVURLAsset(url: url)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 1080, height: 1080)
+            let time = CMTimeAdd(first.sourceRange.start,
+                                 CMTimeMultiplyByRatio(first.sourceRange.duration,
+                                                       multiplier: 1, divisor: 2))
+            if let image = try? await generator.image(at: time).image {
+                overlayBackdrop = UIImage(cgImage: image)
+            }
+        }
+    }
+
     private var density: CutDensity {
         CutDensity(rawValue: project.montageDensityRaw) ?? .standard
     }
@@ -345,6 +423,15 @@ struct MontageView: View {
         guard newDensity != density else { return }
         project.montageDensityRaw = newDensity.rawValue
         try? modelContext.save()
+        // Changer la densité change le NOMBRE de clips : une incrustation
+        // posée « du clip 4 au clip 12 » ne couvre plus le même moment. Elle
+        // est recalée dans les bornes du nouveau montage, mais l'utilisateur
+        // doit le savoir — sinon son logo se déplace tout seul.
+        let scoped = project.overlays.filter { !$0.spansWholeMontage }
+        if !scoped.isEmpty {
+            errorMessage = "\(scoped.count) incrustation(s) sont posées sur des clips précis. "
+                + "En changeant la densité, le découpage change : vérifiez leur position dans l'écran Incrustations."
+        }
         Task { await rebuildPlan() }
     }
 
@@ -398,6 +485,20 @@ struct MontageView: View {
                 .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 40))
                 .accessibilityLabel("Annuler l'export")
             } else {
+                Button {
+                    prepareOverlayBackdrop()
+                    showOverlays = true
+                } label: {
+                    Image(systemName: overlayCount > 0
+                          ? "textformat.size.larger" : "textformat")
+                }
+                .buttonStyle(GlassIconButtonStyle(
+                    tint: overlayCount > 0 ? Theme.accent : .secondary, diameter: 46))
+                .accessibilityLabel(overlayCount > 0
+                                    ? "Incrustations (\(overlayCount))"
+                                    : "Ajouter une incrustation")
+                .disabled(plan?.placements.isEmpty ?? true)
+
                 Button {
                     exportMontage()
                 } label: {
@@ -691,12 +792,24 @@ struct MontageView: View {
                 let montage = try await MontageComposer.build(
                     plan: plan,
                     sources: clipSources,
-                    musicURL: MusicStore.url(forMusicFilename: filename)
+                    musicURL: MusicStore.url(forMusicFilename: filename),
+                    overlays: resolvedOverlays // dessinées par-dessus, pas incrustées ici
                 )
                 let item = AVPlayerItem(asset: montage.composition)
                 item.videoComposition = montage.videoComposition
                 let newPlayer = AVPlayer(playerItem: item)
+                previewRenderSize = montage.renderSize
                 player = newPlayer
+                // Suivi du temps : les incrustations n'apparaissent que sur
+                // leur plage. 20 relevés par seconde suffisent — l'œil ne
+                // distingue pas mieux, et c'est autant de reconstructions
+                // de vue en moins.
+                if let timeObserver { newPlayer.removeTimeObserver(timeObserver) }
+                timeObserver = newPlayer.addPeriodicTimeObserver(
+                    forInterval: CMTime(value: 1, timescale: 20), queue: .main
+                ) { time in
+                    previewTime = time.seconds
+                }
                 newPlayer.play()
                 isPreviewing = true
                 // Fin de lecture : l'état du bouton suit, sans intervention.
@@ -728,6 +841,7 @@ struct MontageView: View {
             plan: plan,
             sources: clipSources,
             musicURL: MusicStore.url(forMusicFilename: filename),
+            overlays: resolvedOverlays,
             outputFilename: "Montage — \(project.name).mov",
             albumName: project.albumPerProject ? project.name : nil,
             projectName: project.name
