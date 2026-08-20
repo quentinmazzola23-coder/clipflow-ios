@@ -272,13 +272,10 @@ struct ProjectListView: View {
                 try? FileManager.default.removeItem(at: StorageManager.url(forCachedRangeRelativePath: path))
             }
         }
-        // La MUSIQUE aussi : sans cette ligne, chaque projet supprimé laissait
-        // son fichier audio et sa carte de rythme orphelins dans Application
-        // Support — invisibles dans l'écran Stockage, impurgeables, et
-        // sauvegardés sur iCloud par-dessus le marché.
-        if let music = project.musicFilename {
-            MusicStore.deleteMusic(filename: music)
-        }
+        // La MUSIQUE n'est PAS supprimée : depuis la bibliothèque locale, un
+        // morceau appartient à la banque et sert souvent à plusieurs projets.
+        // Il se supprime depuis l'écran Bibliothèque, qui prévient alors des
+        // projets concernés.
         modelContext.delete(project)
         try? modelContext.save()
         ThumbnailCache.shared.clearMemory()

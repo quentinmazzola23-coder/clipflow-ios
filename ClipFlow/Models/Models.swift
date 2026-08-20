@@ -126,9 +126,6 @@ final class ClipProject {
     /// Densité de découpe du montage (CutDensity.rawValue). Le cran du milieu
     /// (une coupe par beat) par défaut — le comportement CapCut.
     var montageDensityRaw: Int = 3
-    /// Crédit de licence du titre (bibliothèque en ligne, CC-BY) — à coller
-    /// dans la description de la vidéo publiée. nil pour un fichier personnel.
-    var musicAttribution: String?
 
     @Relationship(deleteRule: .cascade, inverse: \Rush.project)
     var rushes: [Rush] = []

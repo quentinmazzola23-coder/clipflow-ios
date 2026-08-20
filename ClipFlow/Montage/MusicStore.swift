@@ -2,11 +2,13 @@
 //  MusicStore.swift
 //  ClipFlow
 //
-//  Stockage de la musique d'un projet et cache des cartes de rythme.
+//  Stockage des fichiers de la BIBLIOTHÈQUE musicale et cache des cartes de
+//  rythme.
 //
-//  La musique vit dans Application Support (comme les sources copiées) : elle
-//  fait partie du projet, elle ne doit pas être purgée par le système. La
-//  carte de rythme vit dans Caches : recalculable en quelques secondes.
+//  Les morceaux vivent dans Application Support (comme les sources copiées) :
+//  ils appartiennent à la bibliothèque, pas à un projet, et ne doivent pas
+//  être purgés par le système. La carte de rythme vit dans Caches :
+//  recalculable en quelques secondes.
 //
 
 import Foundation
@@ -70,19 +72,6 @@ enum MusicStore {
         }
         if let copyError {
             throw MusicStoreError.copyFailed(copyError.localizedDescription)
-        }
-        return filename
-    }
-
-    /// Enregistre un fichier DÉJÀ LOCAL (téléchargé depuis la bibliothèque).
-    static func adoptDownloadedFile(at localURL: URL) throws -> String {
-        let filename = UUID().uuidString + "." + (localURL.pathExtension.isEmpty
-                                                  ? "mp3" : localURL.pathExtension)
-        let destination = musicDirectory.appendingPathComponent(filename)
-        do {
-            try FileManager.default.moveItem(at: localURL, to: destination)
-        } catch {
-            throw MusicStoreError.copyFailed(error.localizedDescription)
         }
         return filename
     }

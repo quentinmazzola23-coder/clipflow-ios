@@ -2,258 +2,241 @@
 //  MusicLibraryView.swift
 //  ClipFlow
 //
-//  BIBLIOTHÈQUE MUSICALE EN LIGNE (Openverse — titres à licence commerciale).
+//  BIBLIOTHÈQUE MUSICALE LOCALE : la banque de morceaux, importée une fois,
+//  analysée une fois, réutilisée dans tous les projets.
 //
-//  Même philosophie que le reste : une recherche, des pastilles de genre pour
-//  chercher SANS taper, pré-écoute d'un tap, « Utiliser » télécharge et rend
-//  la main au montage. Aucune confirmation.
+//  Remplace la recherche en ligne, retirée après mesure : une fois écartées
+//  les licences non commerciales, les catalogues libres ne rendaient rien
+//  d'utilisable pour un montage POV, et les bons catalogues (Artlist,
+//  Epidemic) réservent leurs API aux plateformes sous contrat. L'app fait
+//  donc ce qu'elle peut faire excellemment : gérer TES morceaux.
+//
+//  Chaque ligne affiche le BPM et la DURÉE DE COUPE que le morceau produira
+//  au cran de densité courant. C'est le point : on choisit sa musique en
+//  sachant ce qu'elle imposera aux clips, avant même de dérusher.
 //
 
 import SwiftUI
-import AVFoundation
+import SwiftData
+import UniformTypeIdentifiers
 
 struct MusicLibraryView: View {
-    /// Appelé avec le fichier téléchargé (local) et sa fiche.
-    var onPicked: (URL, MusicSearchResult) -> Void
+    /// Densité courante du projet — sert à afficher la durée de coupe.
+    var density: CutDensity
+    /// Morceau déjà retenu par le projet, s'il y en a un — marqué dans la liste.
+    var currentFilename: String?
+    /// Morceau retenu. La feuille se ferme derrière.
+    var onPick: (MusicTrack) -> Void
+
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
 
-    @State private var query = ""
-    @State private var results: [MusicSearchResult] = []
-    @State private var isSearching = false
-    @State private var hasSearched = false
-    @State private var errorMessage: String?
-    /// Note visible quand la recherche est passée par la source de repli.
-    @State private var fallbackNote: String?
-    /// Tâche de téléchargement — annulée si la feuille se ferme.
-    @State private var downloadTask: Task<Void, Never>?
-    @State private var downloadingID: String?
-    @State private var previewingID: String?
-    @State private var previewPlayer: AVPlayer?
-    @State private var searchTask: Task<Void, Never>?
+    @Query(sort: \MusicTrack.importedAt, order: .reverse) private var tracks: [MusicTrack]
 
-    /// Genres d'un tap — requêtes en anglais, la langue du catalogue.
-    private static let genres: [(label: String, query: String)] = [
-        ("Électro", "electronic beat"),
-        ("Hardstyle", "hardstyle"),
-        ("Hip-hop", "hip hop beat"),
-        ("Rock", "rock energetic"),
-        ("Cinématique", "cinematic epic"),
-        ("Chill", "chill lofi"),
-    ]
+    @State private var showImporter = false
+    @State private var message: String?
+    @State private var pendingDeletion: MusicTrack?
+    @State private var sortByBPM = false
+
+    private var library: MusicLibraryController { MusicLibraryController.shared }
+
+    /// Tri par BPM quand demandé — on cherche souvent « un morceau à 150 ».
+    private var displayed: [MusicTrack] {
+        sortByBPM ? tracks.sorted { $0.bpm > $1.bpm } : tracks
+    }
 
     var body: some View {
         List {
-            Section {
-                genreChips
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-            }
-            if let errorMessage {
+            if library.isWorking {
                 Section {
-                    Text(errorMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
-                }
-            }
-            // Repli actif : le dire, sans en faire une erreur — les résultats
-            // sont là, simplement d'un autre catalogue.
-            if let fallbackNote {
-                Section {
-                    Label(fallbackNote, systemImage: "arrow.triangle.2.circlepath")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Section {
-                if isSearching {
-                    HStack {
+                    HStack(spacing: 10) {
                         ProgressView()
-                        Text("Recherche…").foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Analyse : \(library.analyzingTitle ?? "…")")
+                                .font(.footnote)
+                            Text("\(library.remainingCount) morceau(x) restant(s)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                } else if results.isEmpty && hasSearched {
-                    Text("Aucun titre trouvé pour cette recherche — essayez d'autres mots (en anglais, le catalogue est international).")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(results) { result in
-                        row(result)
-                    }
-                }
-            } footer: {
-                if !results.isEmpty {
-                    Text("Titres à licence commerciale (CC0 / CC-BY). Les titres CC-BY demandent de créditer l'auteur — le crédit est conservé avec le projet.")
                 }
             }
+
+            if tracks.isEmpty {
+                Section {
+                    VStack(spacing: 14) {
+                        Text("Aucun morceau dans la bibliothèque.\n\nImportez vos musiques une seule fois : ClipFlow les analyse et retient leur BPM. Ensuite, un seul tap suffit pour les réutiliser sur n'importe quel projet.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        // BOUTON EXPLICITE : un écran vide qui ne renvoie qu'à
+                        // un petit « + » de barre d'outils laisse l'utilisateur
+                        // sans porte d'entrée visible.
+                        Button {
+                            showImporter = true
+                        } label: {
+                            Label("Importer des morceaux", systemImage: "plus")
+                                .padding(.horizontal, 8)
+                        }
+                        .buttonStyle(.glassProminent)
+                        .tint(Theme.accent)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                }
+                .listRowBackground(Color.clear)
+            } else {
+                Section {
+                    ForEach(displayed) { track in
+                        row(track)
+                    }
+                } header: {
+                    Text("\(tracks.count) morceau(x)")
+                }
+            }
+        }
+        .task {
+            // Reprend une analyse laissée en plan (app fermée pendant l'import).
+            library.resumePending(context: modelContext)
         }
         .navigationTitle("Bibliothèque")
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $query, prompt: "Rechercher un titre, un genre…")
-        .onSubmit(of: .search) { search(query) }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button { dismiss() } label: { Image(systemName: "chevron.down") }
-                    .accessibilityLabel("Fermer la bibliothèque")
+                    .accessibilityLabel("Fermer")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { sortByBPM.toggle() } label: {
+                    Image(systemName: sortByBPM ? "metronome.fill" : "clock")
+                }
+                .accessibilityLabel(sortByBPM ? "Trier par date d'import" : "Trier par BPM")
+                .disabled(tracks.count < 2)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { showImporter = true } label: { Image(systemName: "plus") }
+                    .accessibilityLabel("Importer des morceaux")
             }
         }
-        .onDisappear {
-            searchTask?.cancel()
-            // Téléchargement abandonné avec la feuille : sans cette annulation,
-            // il revenait plus tard imposer son titre par-dessus la musique
-            // choisie entre-temps.
-            downloadTask?.cancel()
-            previewPlayer?.pause()
+        // IMPORT EN LOT : on vide un dossier de téléchargements d'un coup,
+        // au lieu d'un aller-retour par morceau.
+        .fileImporter(
+            isPresented: $showImporter,
+            allowedContentTypes: [.audio],
+            allowsMultipleSelection: true
+        ) { result in
+            switch result {
+            case .success(let urls):
+                let outcome = library.importTracks(from: urls, context: modelContext)
+                if !outcome.failures.isEmpty {
+                    message = "\(outcome.added) morceau(x) importé(s). Échecs :\n"
+                        + outcome.failures.joined(separator: "\n")
+                }
+            case .failure(let error):
+                message = "Sélection impossible : \(error.localizedDescription)"
+            }
         }
-        .onAppear {
-            // Écran jamais vide : une première fournée sans aucun geste.
-            if results.isEmpty, !hasSearched { search("electronic beat") }
+        .alert("Bibliothèque", isPresented: Binding(
+            get: { message != nil }, set: { if !$0 { message = nil } }
+        )) {
+            Button("OK") { message = nil }
+        } message: {
+            Text(message ?? "")
+        }
+        .confirmationDialog(
+            "Supprimer ce morceau ?",
+            isPresented: Binding(
+                get: { pendingDeletion != nil }, set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Supprimer", role: .destructive) {
+                if let track = pendingDeletion { library.delete(track, context: modelContext) }
+                pendingDeletion = nil
+            }
+            Button("Annuler", role: .cancel) { pendingDeletion = nil }
+        } message: {
+            // SEULE confirmation de l'app, et elle se justifie : le morceau
+            // sert peut-être à des projets déjà montés, qui perdraient leur
+            // bande-son sans possibilité de la retrouver.
+            if let track = pendingDeletion {
+                let used = library.projectsUsing(track, context: modelContext)
+                Text(used.isEmpty
+                     ? "Le fichier sera effacé du téléphone."
+                     : "Utilisé par \(used.count) projet(s) : \(used.map(\.name).joined(separator: ", ")). Leur montage perdra sa musique.")
+            }
         }
     }
 
-    private var genreChips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(Self.genres, id: \.label) { genre in
-                    Button {
-                        query = genre.query
-                        search(genre.query)
-                    } label: {
-                        Text(genre.label)
-                            .font(.footnote.weight(.medium))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                            .glassEffect(.regular.interactive(), in: Capsule())
-                            .contentShape(Capsule())
+    private func row(_ track: MusicTrack) -> some View {
+        Button {
+            guard track.isAnalyzed else {
+                message = track.analysisError
+                    ?? "Ce morceau n'est pas encore analysé — patientez quelques secondes."
+                return
+            }
+            track.lastUsedAt = .now
+            try? modelContext.save()
+            onPick(track)
+            dismiss()
+        } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(track.title)
+                        .font(.callout)
+                        .lineLimit(1)
+                        .foregroundStyle(.primary)
+                    if track.isAnalyzed {
+                        HStack(spacing: 10) {
+                            Label(String(format: "%.0f BPM", track.bpm), systemImage: "metronome")
+                            Text(track.durationLabel)
+                            if let ms = track.slotMilliseconds(density: density) {
+                                Text("coupes \(ms) ms")
+                                    .foregroundStyle(Theme.accent)
+                            }
+                        }
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    } else if let error = track.analysisError {
+                        Text(error)
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .lineLimit(2)
+                    } else {
+                        Text("En attente d'analyse…")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
-                    .buttonStyle(.plain)
+                }
+                Spacer(minLength: 4)
+                if track.filename == currentFilename {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Theme.accent)
+                } else if track.isAnalyzed {
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
             }
+            .frame(minHeight: 44) // cible tactile réglementaire
+            .contentShape(Rectangle())
         }
-    }
-
-    private func row(_ result: MusicSearchResult) -> some View {
-        HStack(spacing: 12) {
-            // Pré-écoute : lecture en continu depuis le réseau, un tap.
-            Button {
-                togglePreview(result)
+        .buttonStyle(.plain)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                pendingDeletion = track
             } label: {
-                Image(systemName: previewingID == result.id ? "pause.fill" : "play.fill")
+                Label("Supprimer", systemImage: "trash")
             }
-            .buttonStyle(GlassIconButtonStyle(diameter: 40))
-            .accessibilityLabel(previewingID == result.id ? "Pause" : "Pré-écouter")
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(result.title)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
-                HStack(spacing: 6) {
-                    Text(result.creator).lineLimit(1)
-                    if result.durationSeconds > 0 {
-                        Text("· \(Int(result.durationSeconds / 60)):\(String(format: "%02d", Int(result.durationSeconds) % 60))")
-                    }
-                    Text("· \(result.license.uppercased())")
+            // Secours dès que le morceau n'est pas exploitable — pas
+            // seulement en cas d'erreur affichée. Un morceau resté « en
+            // attente » (app fermée pendant l'import) n'avait aucune issue.
+            if !track.isAnalyzed {
+                Button {
+                    library.reanalyze(track, context: modelContext)
+                } label: {
+                    Label("Analyser", systemImage: "arrow.clockwise")
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-            Spacer()
-
-            if downloadingID == result.id {
-                ProgressView()
-            } else {
-                Button("Utiliser") { use(result) }
-                    .buttonStyle(.glassProminent)
-                    .tint(Theme.accent)
-                    .disabled(downloadingID != nil)
-            }
-        }
-        .padding(.vertical, 2)
-    }
-
-    // MARK: - Actions
-
-    private func search(_ text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        searchTask?.cancel()
-        errorMessage = nil
-        fallbackNote = nil
-        isSearching = true
-        hasSearched = true
-        searchTask = Task {
-            // Le spinner n'appartient qu'à la tâche EN COURS : une recherche
-            // annulée qui l'éteignait faisait afficher « Aucun titre trouvé »
-            // pendant que la suivante travaillait encore.
-            defer { if !Task.isCancelled { isSearching = false } }
-            do {
-                // Toute la mécanique (trois lignes de défense : Openverse,
-                // Openverse en UA navigateur, Internet Archive) vit dans
-                // MusicLibraryAPI — un seul chemin testable.
-                let outcome = try await MusicLibraryAPI.search(query: trimmed)
-                guard !Task.isCancelled else { return }
-                results = outcome.results
-                fallbackNote = outcome.fallbackNote
-            } catch is CancellationError {
-                // Tâche remplacée par une nouvelle recherche : ne rien toucher.
-            } catch let error as URLError {
-                guard !Task.isCancelled else { return }
-                // Réseau : dire CLAIREMENT que c'est la connexion, pas l'app.
-                results = []
-                errorMessage = "Pas de connexion à la bibliothèque (\(error.localizedDescription)). Vérifiez le réseau puis réessayez."
-            } catch {
-                guard !Task.isCancelled else { return }
-                results = []
-                errorMessage = error.localizedDescription
-            }
-        }
-    }
-
-    private func togglePreview(_ result: MusicSearchResult) {
-        if previewingID == result.id {
-            previewPlayer?.pause()
-            previewingID = nil
-            return
-        }
-        previewPlayer?.pause()
-        let player = AVPlayer(url: result.fileURL)
-        previewPlayer = player
-        previewingID = result.id
-        player.play()
-    }
-
-    private func use(_ result: MusicSearchResult) {
-        previewPlayer?.pause()
-        previewingID = nil
-        downloadingID = result.id
-        downloadTask?.cancel()
-        downloadTask = Task {
-            defer { downloadingID = nil }
-            do {
-                let (temporary, response) = try await URLSession.shared.download(
-                    for: MusicLibraryAPI.request(for: result.fileURL)
-                )
-                if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-                    throw MusicLibraryError.badResponse(status: http.statusCode)
-                }
-                // Extension d'après l'URL du fichier (mp3 le plus souvent).
-                let ext = result.fileURL.pathExtension.isEmpty ? "mp3" : result.fileURL.pathExtension
-                let named = temporary.deletingLastPathComponent()
-                    .appendingPathComponent(UUID().uuidString)
-                    .appendingPathExtension(ext)
-                try? FileManager.default.moveItem(at: temporary, to: named)
-                // Feuille fermée entre-temps : ne PAS livrer. Sinon le
-                // téléchargement d'un titre abandonné revenait 30 s plus tard
-                // écraser la musique choisie depuis — elle changeait toute
-                // seule sous les yeux de l'utilisateur.
-                guard !Task.isCancelled else {
-                    try? FileManager.default.removeItem(at: named)
-                    return
-                }
-                onPicked(named, result)
-                dismiss()
-            } catch let error as URLError {
-                errorMessage = "Téléchargement interrompu (\(error.localizedDescription)). Vérifiez le réseau puis réessayez."
-            } catch {
-                errorMessage = error.localizedDescription
+                .tint(Theme.accent)
             }
         }
     }

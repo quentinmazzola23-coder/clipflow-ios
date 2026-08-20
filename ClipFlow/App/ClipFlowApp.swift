@@ -26,7 +26,7 @@ struct ClipFlowApp: App {
                 cloudKitDatabase: .none
             )
             container = try ModelContainer(
-                for: ClipProject.self, Rush.self, Passage.self,
+                for: ClipProject.self, Rush.self, Passage.self, MusicTrack.self,
                 configurations: configuration
             )
         } catch {
@@ -50,6 +50,16 @@ struct ClipFlowApp: App {
             RootView()
         }
         .modelContainer(container)
+        // REPRISE AU LANCEMENT, dans cet ordre :
+        //  1. les musiques des projets d'avant la bibliothèque y entrent —
+        //     sinon elles passeraient pour des fichiers orphelins ;
+        //  2. les analyses interrompues repartent — la file vit en mémoire,
+        //     un morceau importé puis l'app fermée restait sinon bloqué.
+        .task {
+            let context = container.mainContext
+            MusicLibraryController.adoptProjectMusic(context: context)
+            MusicLibraryController.shared.resumePending(context: context)
+        }
     }
 }
 

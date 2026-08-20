@@ -50,7 +50,7 @@ struct StorageView: View {
                     StorageManager.clearExports()
                     refresh()
                 }
-                row("Musiques de projets supprimés", size: orphanMusicSize) {
+                row("Fichiers musicaux orphelins", size: orphanMusicSize) {
                     guard guardOrExplain() else { return }
                     clearOrphanMusic()
                     refresh()
@@ -63,7 +63,7 @@ struct StorageView: View {
                 }
             }
             Section {
-                Text("Les vidéos originales de votre photothèque ne sont jamais supprimées par ClipFlow. Supprimer les proxys est sans risque : ils se régénèrent automatiquement. Supprimer une plage en cache peut rendre un passage non exportable hors ligne.")
+                Text("Vos morceaux importés se gèrent dans la Bibliothèque de l'écran Montage — ils ne sont pas touchés ici. Les vidéos originales de votre photothèque ne sont jamais supprimées par ClipFlow. Supprimer les proxys est sans risque : ils se régénèrent automatiquement. Supprimer une plage en cache peut rendre un passage non exportable hors ligne.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -106,16 +106,21 @@ struct StorageView: View {
         try? modelContext.save()
     }
 
-    /// Fichiers de Music/ qu'aucun projet ne réclame — reliquat des projets
-    /// supprimés avant que la suppression n'emporte leur musique.
+    /// Fichiers de Music/ que la BIBLIOTHÈQUE ne connaît pas.
+    ///
+    /// ⚠️ La référence est la bibliothèque (`MusicTrack`), PAS les projets.
+    /// Comparer aux `project.musicFilename` effacerait tous les morceaux
+    /// importés mais pas encore utilisés dans un montage — c'est-à-dire la
+    /// bibliothèque elle-même. Ne restent ici que de vrais reliquats :
+    /// fichiers laissés par une version antérieure ou par un import
+    /// interrompu.
     private func orphanMusicFiles() -> [URL] {
-        let descriptor = FetchDescriptor<ClipProject>()
-        let referenced = Set((try? modelContext.fetch(descriptor))?
-            .compactMap(\.musicFilename) ?? [])
+        let descriptor = FetchDescriptor<MusicTrack>()
+        let known = Set((try? modelContext.fetch(descriptor))?.map(\.filename) ?? [])
         let contents = (try? FileManager.default.contentsOfDirectory(
             at: MusicStore.musicDirectory, includingPropertiesForKeys: [.fileSizeKey]
         )) ?? []
-        return contents.filter { !referenced.contains($0.lastPathComponent) }
+        return contents.filter { !known.contains($0.lastPathComponent) }
     }
 
     private func clearOrphanMusic() {

@@ -81,21 +81,28 @@ struct MontageView: View {
             if let filename = project.musicFilename {
                 startAnalysis(filename: filename)
             } else if !autoImporterLaunched {
-                // ZÉRO clic : arriver ici sans musique ouvre le sélecteur —
-                // APRÈS la fin de la transition du fullScreenCover : présenté
-                // pendant l'animation, le sélecteur est silencieusement avalé
-                // par SwiftUI et l'écran semble mort.
+                // ZÉRO clic : arriver ici sans musique ouvre LA BIBLIOTHÈQUE
+                // — devenue le parcours principal. Elle montre les morceaux
+                // déjà là, et son écran vide propose l'import. Ouvrir le
+                // sélecteur de fichiers directement court-circuitait la
+                // banque et pouvait entrer en concurrence avec elle : deux
+                // modaux, dont un avalé en silence.
+                //
+                // Après la transition du fullScreenCover : présenté pendant
+                // l'animation, un modal est silencieusement ignoré et l'écran
+                // paraît mort.
                 autoImporterLaunched = true
                 Task {
                     try? await Task.sleep(for: .milliseconds(700))
-                    if project.musicFilename == nil { showFileImporter = true }
+                    if project.musicFilename == nil { showLibrary = true }
                 }
             }
         }
         .sheet(isPresented: $showLibrary) {
             NavigationStack {
-                MusicLibraryView { localURL, result in
-                    importFromLibrary(localURL: localURL, result: result)
+                MusicLibraryView(density: density,
+                                 currentFilename: project.musicFilename) { track in
+                    useTrack(track)
                 }
             }
         }
@@ -139,7 +146,7 @@ struct MontageView: View {
                     Button {
                         showLibrary = true
                     } label: {
-                        Label("Bibliothèque en ligne", systemImage: "globe")
+                        Label("Ma bibliothèque", systemImage: "music.note.list")
                             .padding(.horizontal, 8)
                     }
                     .buttonStyle(.glassProminent)
@@ -147,7 +154,7 @@ struct MontageView: View {
                     Button {
                         showFileImporter = true
                     } label: {
-                        Label("Fichier local", systemImage: "folder")
+                        Label("Importer un fichier", systemImage: "folder")
                             .padding(.horizontal, 8)
                     }
                     .buttonStyle(.glass)
@@ -175,10 +182,17 @@ struct MontageView: View {
         }
     }
 
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    /// En PAYSAGE, la hauteur utile fond : en-tête, forme d'onde, densité et
+    /// barre basse à taille fixe ne laissaient qu'une soixantaine de points à
+    /// la visionneuse. Les éléments accessoires se compactent.
+    private var isCompactHeight: Bool { verticalSizeClass == .compact }
+
     @ViewBuilder
     private var readyContent: some View {
         if let map = beatMap {
-            VStack(spacing: 12) {
+            VStack(spacing: isCompactHeight ? 6 : 12) {
                 header(map: map)
 
                 // Aperçu vidéo — la composition elle-même, jouée sur place.
@@ -209,13 +223,13 @@ struct MontageView: View {
                     onScrub: { moveWindow(to: $0, commit: false) },
                     onScrubEnd: { moveWindow(to: $0, commit: true) }
                 )
-                .frame(height: 96)
+                .frame(height: isCompactHeight ? 56 : 96)
                 .padding(.horizontal, 12)
                 // Déplacer la fenêtre pendant un export reconstruirait le plan
                 // sous les pieds de la session — verrouillé.
                 .allowsHitTesting(!isExporting)
 
-                densityBar
+                if !isCompactHeight { densityBar }
 
                 bottomBar
             }
@@ -255,16 +269,6 @@ struct MontageView: View {
                      : "coupes : \(range.min)–\(range.max) ms · rush requis : ≥ \(range.sourceMin)–\(range.sourceMax) ms")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
-            }
-            // CRÉDIT DE LICENCE (CC-BY) : visible tant que le titre l'exige —
-            // un tap le montre en entier, à coller dans la description de la
-            // vidéo publiée.
-            if let attribution = project.musicAttribution {
-                Text(attribution)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .onTapGesture { errorMessage = attribution }
             }
         }
         .foregroundStyle(.secondary)
@@ -352,10 +356,10 @@ struct MontageView: View {
             Button {
                 showLibrary = true
             } label: {
-                Image(systemName: "globe")
+                Image(systemName: "music.note.list")
             }
             .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 46))
-            .accessibilityLabel("Bibliothèque en ligne")
+            .accessibilityLabel("Ma bibliothèque")
             .disabled(isExporting)
 
             Button {
@@ -489,29 +493,26 @@ struct MontageView: View {
 
     // MARK: - Musique
 
-    /// Titre venu de la bibliothèque : fichier déjà local, crédit conservé.
-    private func importFromLibrary(localURL: URL, result: MusicSearchResult) {
+    /// Morceau choisi dans la BIBLIOTHÈQUE : son fichier est déjà là et son
+    /// analyse est en cache. Le projet ne fait que le désigner — aucune copie,
+    /// aucune attente. C'est tout l'intérêt de la bibliothèque.
+    private func useTrack(_ track: MusicTrack) {
         guard !isExporting else {
             errorMessage = "Export du montage en cours — changez de musique une fois l'export terminé."
-            try? FileManager.default.removeItem(at: localURL)
             return
         }
-        do {
-            let filename = try MusicStore.adoptDownloadedFile(at: localURL)
-            if let old = project.musicFilename {
-                MusicStore.deleteMusic(filename: old)
-            }
-            project.musicFilename = filename
-            project.musicTitle = "\(result.title) — \(result.creator)"
-            project.musicAttribution = result.attribution.isEmpty ? nil : result.attribution
-            project.montageStartCentiseconds = nil
-            try? modelContext.save()
-            startAnalysis(filename: filename)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        // Le fichier appartient à la BIBLIOTHÈQUE, pas au projet : on ne
+        // supprime PAS l'ancien morceau, d'autres projets s'en servent.
+        project.musicFilename = track.filename
+        project.musicTitle = track.title
+        project.montageStartCentiseconds = nil
+        try? modelContext.save()
+        startAnalysis(filename: track.filename)
     }
 
+    /// Import direct d'un fichier depuis Fichiers : il rejoint la
+    /// bibliothèque (donc réutilisable ensuite) et devient la musique du
+    /// projet.
     private func importMusic(from url: URL) {
         // L'export lit le fichier musical : le remplacer maintenant le
         // supprimerait sous la session.
@@ -519,23 +520,33 @@ struct MontageView: View {
             errorMessage = "Export du montage en cours — changez de musique une fois l'export terminé."
             return
         }
-        do {
-            // Copier la NOUVELLE musique d'abord ; l'ancienne n'est supprimée
-            // qu'après le succès. Dans l'autre ordre, une copie qui échoue
-            // (fichier iCloud non téléchargé, disque plein) laissait le
-            // projet pointer vers un fichier déjà effacé — musique perdue.
-            let filename = try MusicStore.importMusic(from: url)
-            if let old = project.musicFilename {
-                MusicStore.deleteMusic(filename: old)
+        stage = .analyzing
+        analysisTask?.cancel()
+        analysisTask = Task {
+            do {
+                // UNE seule analyse : le contrôleur importe ET analyse, puis
+                // rend le morceau. Passer par la file l'aurait fait décoder
+                // une deuxième fois en parallèle, ici et là-bas.
+                let track = try await MusicLibraryController.shared
+                    .importAndAnalyze(url: url, context: modelContext)
+                guard !Task.isCancelled else { return }
+                guard track.isAnalyzed else {
+                    stage = .needsMusic
+                    errorMessage = track.analysisError
+                        ?? "Ce morceau n'a pas pu être analysé. Il reste dans la bibliothèque : vous pouvez le relancer depuis la liste."
+                    return
+                }
+                project.musicFilename = track.filename
+                project.musicTitle = track.title
+                project.montageStartCentiseconds = nil
+                try? modelContext.save()
+                startAnalysis(filename: track.filename)
+            } catch is CancellationError {
+                // Écran quitté : rien à signaler.
+            } catch {
+                stage = .needsMusic
+                errorMessage = "Import impossible : \(error.localizedDescription)"
             }
-            project.musicFilename = filename
-            project.musicTitle = url.deletingPathExtension().lastPathComponent
-            project.musicAttribution = nil // fichier personnel : pas de crédit imposé
-            project.montageStartCentiseconds = nil // nouvelle musique = départ auto
-            try? modelContext.save()
-            startAnalysis(filename: filename)
-        } catch {
-            errorMessage = "Import impossible : \(error.localizedDescription)"
         }
     }
 
@@ -584,6 +595,12 @@ struct MontageView: View {
             } catch is CancellationError {
                 // Écran quitté pendant l'analyse : rien à faire.
             } catch {
+                // DÉTACHER la musique du projet : la garder faisait rejouer
+                // le même échec à chaque ouverture du montage, sans issue.
+                // Le fichier reste dans la bibliothèque, relançable de là.
+                project.musicFilename = nil
+                project.musicTitle = nil
+                try? modelContext.save()
                 stage = .needsMusic
                 errorMessage = error.localizedDescription
             }
