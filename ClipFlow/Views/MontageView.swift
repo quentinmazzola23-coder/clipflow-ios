@@ -39,6 +39,7 @@ struct MontageView: View {
     @State private var clipSources: [Int: URL] = [:]
     @State private var windowStart: Double = 0
     @State private var showFileImporter = false
+    @State private var showLibrary = false
     @State private var autoImporterLaunched = false
     @State private var errorMessage: String?
     @State private var exportToast: String?
@@ -71,9 +72,22 @@ struct MontageView: View {
             if let filename = project.musicFilename {
                 startAnalysis(filename: filename)
             } else if !autoImporterLaunched {
-                // ZÉRO clic : arriver ici sans musique ouvre le sélecteur.
+                // ZÉRO clic : arriver ici sans musique ouvre le sélecteur —
+                // APRÈS la fin de la transition du fullScreenCover : présenté
+                // pendant l'animation, le sélecteur est silencieusement avalé
+                // par SwiftUI et l'écran semble mort.
                 autoImporterLaunched = true
-                showFileImporter = true
+                Task {
+                    try? await Task.sleep(for: .milliseconds(700))
+                    if project.musicFilename == nil { showFileImporter = true }
+                }
+            }
+        }
+        .sheet(isPresented: $showLibrary) {
+            NavigationStack {
+                MusicLibraryView { localURL, result in
+                    importFromLibrary(localURL: localURL, result: result)
+                }
             }
         }
         .onDisappear {
@@ -101,14 +115,23 @@ struct MontageView: View {
             } description: {
                 Text("Le rythme de la musique découpera vos \(project.passages.count) clips automatiquement.")
             } actions: {
-                Button {
-                    showFileImporter = true
-                } label: {
-                    Text("Choisir un fichier")
-                        .padding(.horizontal, 8)
+                VStack(spacing: 10) {
+                    Button {
+                        showLibrary = true
+                    } label: {
+                        Label("Bibliothèque en ligne", systemImage: "globe")
+                            .padding(.horizontal, 8)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .tint(Theme.accent)
+                    Button {
+                        showFileImporter = true
+                    } label: {
+                        Label("Fichier local", systemImage: "folder")
+                            .padding(.horizontal, 8)
+                    }
+                    .buttonStyle(.glass)
                 }
-                .buttonStyle(.glassProminent)
-                .tint(Theme.accent)
             }
 
         case .analyzing:
@@ -183,19 +206,47 @@ struct MontageView: View {
     }
 
     private func header(map: BeatMap) -> some View {
-        HStack(spacing: 14) {
-            Label(String(format: "%.0f BPM", map.bpm), systemImage: "metronome")
-            if let plan {
-                Label("\(plan.placements.count)/\(project.passages.count) clips",
-                      systemImage: "film.stack")
-                Label(formatDuration(plan.totalDuration.seconds), systemImage: "timer")
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 14) {
+                Label(String(format: "%.0f BPM", map.bpm), systemImage: "metronome")
+                if let plan {
+                    Label("\(plan.placements.count)/\(project.passages.count) clips",
+                          systemImage: "film.stack")
+                    Label(formatDuration(plan.totalDuration.seconds), systemImage: "timer")
+                }
+                Spacer()
             }
-            Spacer()
+            .font(.footnote.monospacedDigit())
+            // CRÉDIT DE LICENCE (CC-BY) : visible tant que le titre l'exige —
+            // un tap le montre en entier, à coller dans la description de la
+            // vidéo publiée.
+            if let attribution = project.musicAttribution {
+                Text(attribution)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .onTapGesture { errorMessage = attribution }
+            }
         }
-        .font(.footnote.monospacedDigit())
         .foregroundStyle(.secondary)
         .padding(.horizontal, 16)
         .padding(.top, 6)
+    }
+
+    /// Erreurs de PARCOURS UTILISATEUR — chacune dit si c'est un cas d'usage
+    /// (et quoi faire) ou un défaut de l'app (et qu'il faut le signaler).
+    private enum MontageUserError: Error, LocalizedError {
+        case noPulse
+
+        var errorDescription: String? {
+            switch self {
+            case .noPulse:
+                return "Aucune pulsation régulière détectée dans ce morceau. "
+                    + "Cela arrive sur les titres sans percussions marquées (ambiance, piano seul) "
+                    + "ou si le fichier est en réalité silencieux. "
+                    + "Choisissez un titre avec un kick net — le montage se cale dessus."
+            }
+        }
     }
 
     private var isExporting: Bool {
@@ -209,12 +260,21 @@ struct MontageView: View {
     private var bottomBar: some View {
         HStack(spacing: 12) {
             Button {
-                showFileImporter = true
+                showLibrary = true
             } label: {
-                Image(systemName: "music.note")
+                Image(systemName: "globe")
             }
             .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 46))
-            .accessibilityLabel("Changer de musique")
+            .accessibilityLabel("Bibliothèque en ligne")
+            .disabled(isExporting)
+
+            Button {
+                showFileImporter = true
+            } label: {
+                Image(systemName: "folder")
+            }
+            .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 46))
+            .accessibilityLabel("Fichier local")
             .disabled(isExporting)
 
             Button {
@@ -253,6 +313,24 @@ struct MontageView: View {
 
     // MARK: - Musique
 
+    /// Titre venu de la bibliothèque : fichier déjà local, crédit conservé.
+    private func importFromLibrary(localURL: URL, result: MusicSearchResult) {
+        do {
+            let filename = try MusicStore.adoptDownloadedFile(at: localURL)
+            if let old = project.musicFilename {
+                MusicStore.deleteMusic(filename: old)
+            }
+            project.musicFilename = filename
+            project.musicTitle = "\(result.title) — \(result.creator)"
+            project.musicAttribution = result.attribution.isEmpty ? nil : result.attribution
+            project.montageStartCentiseconds = nil
+            try? modelContext.save()
+            startAnalysis(filename: filename)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     private func importMusic(from url: URL) {
         do {
             // Copier la NOUVELLE musique d'abord ; l'ancienne n'est supprimée
@@ -265,6 +343,7 @@ struct MontageView: View {
             }
             project.musicFilename = filename
             project.musicTitle = url.deletingPathExtension().lastPathComponent
+            project.musicAttribution = nil // fichier personnel : pas de crédit imposé
             project.montageStartCentiseconds = nil // nouvelle musique = départ auto
             try? modelContext.save()
             startAnalysis(filename: filename)
@@ -285,14 +364,16 @@ struct MontageView: View {
                     let url = MusicStore.url(forMusicFilename: filename)
                     // Décodage + FFT HORS acteur principal : plusieurs
                     // secondes de calcul, l'interface doit rester vivante.
+                    // Analyse à la CADENCE NATIVE du fichier — aucun
+                    // rééchantillonnage à rater.
                     let analyzed = try await Task.detached(priority: .userInitiated) {
-                        let samples = try await MusicDecoder.monoSamples(of: url)
+                        let decoded = try await MusicDecoder.monoSamples(of: url)
                         return BeatAnalyzer.analyze(
-                            samples: samples, sampleRate: MusicDecoder.analysisSampleRate
+                            samples: decoded.samples, sampleRate: decoded.sampleRate
                         )
                     }.value
                     guard let analyzed else {
-                        throw MusicDecoderError.readFailed("aucune pulsation détectable")
+                        throw MontageUserError.noPulse
                     }
                     MusicStore.saveBeatMap(analyzed, musicFilename: filename)
                     map = analyzed

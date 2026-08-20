@@ -123,6 +123,9 @@ final class ClipProject {
     /// nil = utiliser le départ SUGGÉRÉ par l'analyse (cluster de drops).
     /// Persisté : déplacer la fenêtre puis revenir au projet ne perd rien.
     var montageStartCentiseconds: Int?
+    /// Crédit de licence du titre (bibliothèque en ligne, CC-BY) — à coller
+    /// dans la description de la vidéo publiée. nil pour un fichier personnel.
+    var musicAttribution: String?
 
     @Relationship(deleteRule: .cascade, inverse: \Rush.project)
     var rushes: [Rush] = []

@@ -7,6 +7,7 @@
 
 import SwiftUI
 import SwiftData
+import AVFAudio
 
 @main
 struct ClipFlowApp: App {
@@ -34,6 +35,14 @@ struct ClipFlowApp: App {
         // Rendus orphelins (crash entre rendu et enregistrement Photos) :
         // purge au lancement — aucune file ne tourne encore à cet instant.
         StorageManager.clearExports()
+
+        // CATÉGORIE AUDIO .playback, ET C'EST IMPORTANT. Sans elle, la
+        // catégorie par défaut (.soloAmbient) OBÉIT AU COMMUTATEUR SONNERIE :
+        // téléphone en silencieux → aperçu du montage et lecture des rushes
+        // muets, sans la moindre erreur. Une app de montage vidéo est un
+        // lecteur multimédia : elle joue même en mode silencieux, comme
+        // YouTube ou CapCut.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
     }
 
     var body: some Scene {

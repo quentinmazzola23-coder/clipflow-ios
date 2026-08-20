@@ -11,6 +11,20 @@
 
 import Foundation
 
+enum MusicStoreError: Error, LocalizedError {
+    case copyFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .copyFailed(let details):
+            return "La copie du fichier musical a échoué. "
+                + "Cause la plus fréquente : un fichier iCloud pas encore téléchargé sur ce téléphone "
+                + "(ouvrez l'app Fichiers, touchez le morceau pour le télécharger, puis réessayez). "
+                + "Détail : \(details)"
+        }
+    }
+}
+
 enum MusicStore {
 
     static var musicDirectory: URL {
@@ -37,7 +51,39 @@ enum MusicStore {
         let filename = UUID().uuidString + "." + (pickedURL.pathExtension.isEmpty
                                                   ? "m4a" : pickedURL.pathExtension)
         let destination = musicDirectory.appendingPathComponent(filename)
-        try FileManager.default.copyItem(at: pickedURL, to: destination)
+
+        // Lecture COORDONNÉE : NSFileCoordinator déclenche le téléchargement
+        // iCloud du fichier et attend qu'il soit là avant de livrer l'URL —
+        // la copie directe échouait sur tout morceau non téléchargé.
+        var coordinationError: NSError?
+        var copyError: Error?
+        NSFileCoordinator().coordinate(readingItemAt: pickedURL, options: [],
+                                       error: &coordinationError) { readableURL in
+            do {
+                try FileManager.default.copyItem(at: readableURL, to: destination)
+            } catch {
+                copyError = error
+            }
+        }
+        if let coordinationError {
+            throw MusicStoreError.copyFailed(coordinationError.localizedDescription)
+        }
+        if let copyError {
+            throw MusicStoreError.copyFailed(copyError.localizedDescription)
+        }
+        return filename
+    }
+
+    /// Enregistre un fichier DÉJÀ LOCAL (téléchargé depuis la bibliothèque).
+    static func adoptDownloadedFile(at localURL: URL) throws -> String {
+        let filename = UUID().uuidString + "." + (localURL.pathExtension.isEmpty
+                                                  ? "mp3" : localURL.pathExtension)
+        let destination = musicDirectory.appendingPathComponent(filename)
+        do {
+            try FileManager.default.moveItem(at: localURL, to: destination)
+        } catch {
+            throw MusicStoreError.copyFailed(error.localizedDescription)
+        }
         return filename
     }
 

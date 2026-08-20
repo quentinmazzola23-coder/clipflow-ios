@@ -20,6 +20,7 @@ SOURCES=(
   "ClipFlow/Montage/TempoEstimator.swift"
   "ClipFlow/Montage/BeatAnalyzer.swift"
   "ClipFlow/Montage/MontagePlanner.swift"
+  "ClipFlow/Montage/MusicLibraryAPI.swift"
   "ClipFlow/Core/TimeMath.swift"
   "ClipFlow/Interpolation/FrameInterpolationEngine.swift"
   "ClipFlow/Interpolation/PassthroughRetimeEngine.swift"
