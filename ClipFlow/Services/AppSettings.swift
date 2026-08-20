@@ -49,6 +49,36 @@ enum AppSettings {
         }
     }
 
+    /// Correspondance réglage booléen → clé globale. Sert à n'écrire QUE la
+    /// clé réellement modifiée (voir `captureFlag`).
+    private static let flagKeys: [ReferenceWritableKeyPath<ClipProject, Bool>: String] = [
+        \.touchAnchorIsCenter: Key.touchCenter,
+        \.autoExportOnValidate: Key.autoExport,
+        \.previewLight: Key.previewLight,
+        \.opticalFlowEnabled: Key.opticalFlow,
+        \.albumPerProject: Key.albumPerProject,
+    ]
+
+    /// Écrit UNE SEULE clé globale.
+    ///
+    /// À utiliser partout où le projet touché n'a pas été aligné sur les
+    /// réglages globaux au préalable — typiquement le menu ⋯ de la liste, qui
+    /// agit sur un projet peut-être jamais rouvert. `capture(from:)` y
+    /// réécrivait les sept clés à partir de valeurs figées : régler la durée
+    /// dans un projet puis basculer un simple interrupteur sur la ligne d'un
+    /// autre faisait revenir la durée globale en arrière, sans rien dire.
+    static func captureFlag(_ keyPath: ReferenceWritableKeyPath<ClipProject, Bool>,
+                            value: Bool) {
+        guard let key = flagKeys[keyPath] else { return }
+        defaults.set(value, forKey: key)
+    }
+
+    /// Écrit les deux clés de durée (valeur fixe + mode « fin du rush »).
+    static func captureDuration(centiseconds: Int, toRushEnd: Bool) {
+        defaults.set(centiseconds, forKey: Key.finalDuration)
+        defaults.set(toRushEnd, forKey: Key.durationToRushEnd)
+    }
+
     /// Capture les réglages du projet comme nouveaux réglages globaux
     /// (appelé après toute modification).
     static func capture(from project: ClipProject) {

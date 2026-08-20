@@ -300,7 +300,12 @@ struct ProjectEditorView: View {
                     .transition(.opacity)
             }
         }
-        .onChange(of: RenderQueueController.shared.snapshot.isRunning) { wasRunning, isRunning in
+        // DRAPEAU SÉPARÉ, pas `snapshot.isRunning` : lire `snapshot` ici
+        // déclarait une dépendance d'observation sur la structure entière —
+        // qui change à chaque image rendue — et reconstruisait TOUT l'éditeur
+        // pendant un export. C'est le défaut du menu ⋯ qui remonte en haut,
+        // que l'isolation de la pastille seule ne suffisait pas à tuer.
+        .onChange(of: RenderQueueController.shared.isRunningFlag) { wasRunning, isRunning in
             let snapshot = RenderQueueController.shared.snapshot
             if wasRunning, !isRunning, snapshot.finishedJobs > 0 {
                 let failures = snapshot.failedJobs > 0 ? " · \(snapshot.failedJobs) échec(s)" : ""
@@ -312,6 +317,15 @@ struct ProjectEditorView: View {
                 }
             }
         }
+        // Toute feuille COUPE la lecture de l'éditeur : sans cela, la boucle
+        // de sélection continuait à jouer son et image sous la feuille, et se
+        // superposait au lecteur de la Relecture — deux bandes-son mêlées.
+        .onChange(of: showReview) { _, presented in if presented { playback.pause() } }
+        .onChange(of: showGrid) { _, presented in if presented { playback.pause() } }
+        .onChange(of: showExports) { _, presented in if presented { playback.pause() } }
+        .onChange(of: showMontage) { _, presented in if presented { playback.pause() } }
+        .onChange(of: showPicker) { _, presented in if presented { playback.pause() } }
+        .onChange(of: showCustomDuration) { _, presented in if presented { playback.pause() } }
         .sheet(isPresented: $showReview) {
             NavigationStack { ReviewView(project: project) }
         }
@@ -688,7 +702,18 @@ struct ProjectEditorView: View {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 durationMenu
-                Toggle("Toucher = centre de la sélection", isOn: $project.touchAnchorIsCenter)
+                // Liaison explicite comme les autres interrupteurs : écrire
+                // directement le modèle ne sauvegardait rien ET n'écrivait
+                // aucune clé globale — le réglage revenait en arrière tout
+                // seul à la réouverture du projet.
+                Toggle("Toucher = centre de la sélection", isOn: Binding(
+                    get: { project.touchAnchorIsCenter },
+                    set: { newValue in
+                        project.touchAnchorIsCenter = newValue
+                        AppSettings.captureFlag(\.touchAnchorIsCenter, value: newValue)
+                        touch()
+                    }
+                ))
                 Toggle("Stats développeur", isOn: Binding(
                     get: { devStatsEnabled },
                     set: { enabled in
@@ -977,6 +1002,25 @@ struct ProjectEditorView: View {
         seek = ProgrammaticSeek(token: seekCounter, time: center)
     }
 
+    /// Le mode « fin du rush » s'applique-t-il à la sélection COURANTE ?
+    ///
+    /// En création, c'est le réglage du projet. En ÉDITION d'un clip déjà
+    /// validé, c'est la nature du clip qui décide : un clip de 1,3 s posé au
+    /// milieu d'un rush ne doit pas s'étirer jusqu'à la fin parce que le
+    /// réglage a changé depuis. Sans cette distinction, ajuster un ancien clip
+    /// d'une image le faisait sauter à toute la durée restante du rush, et
+    /// « Mettre à jour » figeait ça en silence.
+    private var selectionFollowsRushEnd: Bool {
+        guard editingPassageID != nil else { return project.durationToRushEnd }
+        guard let index = selectionRushIndex, let range = selectionRange else {
+            return project.durationToRushEnd
+        }
+        let rush = project.orderedRushes[index]
+        let fps = rush.nominalFrameRate > 1 ? rush.nominalFrameRate : 30
+        // Le clip touche-t-il la fin du rush (à une image près) ?
+        return abs(CMTimeRangeGetEnd(range).seconds - rush.duration.seconds) < 1 / fps
+    }
+
     private func handleSelectionDrag(_ deltaSeconds: Double) {
         guard let index = selectionRushIndex, let range = selectionRange else { return }
         let rush = project.orderedRushes[index]
@@ -985,7 +1029,7 @@ struct ProjectEditorView: View {
         // sélection : sa fin reste collée au bout du rush. La déplacer à
         // longueur constante la décollerait de la fin, ce qui contredirait le
         // mode choisi.
-        let moved = project.durationToRushEnd
+        let moved = selectionFollowsRushEnd
             ? SelectionEngine.moveOpenEnd(range, by: delta,
                                           rushDuration: rush.duration,
                                           minimumDuration: minimumSourceDuration(for: rush))
@@ -1010,7 +1054,7 @@ struct ProjectEditorView: View {
         let rush = project.orderedRushes[index]
         let fps = rush.nominalFrameRate > 1 ? rush.nominalFrameRate : 30
         let frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps.rounded()))
-        if project.durationToRushEnd {
+        if selectionFollowsRushEnd {
             selectionRange = SelectionEngine.moveOpenEnd(
                 range,
                 by: CMTimeMultiply(frameDuration, multiplier: Int32(frames)),
@@ -1237,6 +1281,40 @@ struct ProjectEditorView: View {
     /// Découpe passthrough manuelle : AVAssetReader (échantillons compressés)
     /// → AVAssetWriter (sourceFormatHint). Retourne le PTS source du premier
     /// échantillon écrit (= zéro du fichier produit), ou nil en cas d'échec.
+    /// Écrit tous les échantillons restants du lecteur dans l'entrée du
+    /// writer, un à la fois. Retourne le nombre écrit.
+    ///
+    /// Séparée pour que l'appelant puisse annuler writer ET lecteur d'un seul
+    /// `catch` : une annulation au milieu de l'écriture laissait sinon un
+    /// AVAssetWriter vivant en état `.writing` sur un fichier supprimé.
+    nonisolated private static func appendAll(from output: AVAssetReaderTrackOutput,
+                                              to input: AVAssetWriterInput,
+                                              writer: AVAssetWriter) async throws -> Int {
+        var count = 0
+        while let sample = output.copyNextSampleBuffer() {
+            try Task.checkCancellation()
+            // Attente BORNÉE : un encodeur qui n'accepte plus rien figerait la
+            // mise en cache indéfiniment, sans message.
+            let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+            while !input.isReadyForMoreMediaData {
+                if writer.status == .failed || ContinuousClock.now > deadline {
+                    throw RemuxError.writerStalled
+                }
+                try await Task.sleep(for: .milliseconds(4))
+            }
+            guard input.append(sample) else { throw RemuxError.appendRefused }
+            count += 1
+        }
+        return count
+    }
+
+    /// Échecs internes du remux — jamais montrés tels quels : l'appelant
+    /// retourne nil et le message utilisateur vient de `cacheSourceRange`.
+    private enum RemuxError: Error {
+        case writerStalled
+        case appendRefused
+    }
+
     nonisolated private static func remuxRange(source: URL,
                                               destination: URL,
                                               start: CMTime,
@@ -1256,15 +1334,34 @@ struct ProjectEditorView: View {
             reader.add(output)
             guard reader.startReading() else { return nil }
 
-            // Le lecteur passthrough livre depuis l'image de synchronisation
-            // nécessaire au décodage : on écrit TOUT et on mémorise le PTS
-            // minimal réellement écrit.
-            var samples: [CMSampleBuffer] = []
+            // DEUX PASSES, MÉMOIRE BORNÉE — ET C'EST INDISPENSABLE.
+            //
+            // L'écriture exige de connaître le PTS minimal AVANT le premier
+            // append (startSession). Or le lecteur passthrough livre en ordre
+            // de DÉCODAGE : avec des images B, le premier échantillon livré
+            // n'est pas forcément le plus précoce à l'affichage. L'ancienne
+            // version retenait donc TOUS les échantillons compressés dans un
+            // tableau pour trouver ce minimum — invisible sur un clip de 1,3 s,
+            // fatal en mode « jusqu'à la fin du rush » : une plage de trois
+            // minutes en 4K60 HEVC, c'est 1 à 2 Go d'échantillons vivants
+            // simultanément, donc l'app tuée par le système. Et comme le
+            // passage était déjà enregistré, la mise en cache repartait à
+            // chaque ouverture du projet : boucle de plantage.
+            //
+            // Première passe : parcourir pour trouver le minimum, en RELÂCHANT
+            // chaque échantillon aussitôt (aucune accumulation). Seconde
+            // passe : relire et écrire au fil de l'eau. Le coût est une
+            // lecture disque supplémentaire — sans décodage, c'est du transfert
+            // pur — contre une empreinte mémoire constante quelle que soit la
+            // durée. Aucune hypothèse sur la profondeur de réordonnancement.
             var minPTS = CMTime.positiveInfinity
+            var sampleCount = 0
             while let sample = output.copyNextSampleBuffer() {
+                try Task.checkCancellation()
                 let pts = CMSampleBufferGetPresentationTimeStamp(sample)
                 if pts.isValid, CMTimeCompare(pts, minPTS) < 0 { minPTS = pts }
-                samples.append(sample)
+                sampleCount += 1
+                // `sample` meurt à la fin de l'itération : rien ne s'accumule.
             }
             // STATUT DU LECTEUR : `copyNextSampleBuffer` renvoie nil aussi bien
             // à la fin normale du flux QUE sur erreur. Sans ce contrôle, une
@@ -1273,7 +1370,15 @@ struct ProjectEditorView: View {
             // original ayant été purgé, la perte était définitive et
             // silencieuse.
             guard reader.status == .completed else { return nil }
-            guard !samples.isEmpty, minPTS != .positiveInfinity else { return nil }
+            guard sampleCount > 0, minPTS != .positiveInfinity else { return nil }
+
+            // Seconde passe : un lecteur neuf sur la même plage.
+            let writeReader = try AVAssetReader(asset: asset)
+            writeReader.timeRange = CMTimeRange(start: start, end: end)
+            let writeOutput = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+            writeOutput.alwaysCopiesSampleData = false
+            writeReader.add(writeOutput)
+            guard writeReader.startReading() else { return nil }
 
             let writer = try AVAssetWriter(outputURL: destination, fileType: .mov)
             let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil,
@@ -1286,21 +1391,27 @@ struct ProjectEditorView: View {
             guard writer.startWriting() else { return nil }
             writer.startSession(atSourceTime: minPTS)
 
-            for sample in samples {
-                // Attente BORNÉE : un encodeur qui n'accepte plus rien figerait
-                // la mise en cache indéfiniment, sans message.
-                let deadline = ContinuousClock.now.advanced(by: .seconds(30))
-                while !input.isReadyForMoreMediaData {
-                    if writer.status == .failed || ContinuousClock.now > deadline {
-                        writer.cancelWriting()
-                        return nil
-                    }
-                    try await Task.sleep(for: .milliseconds(4))
-                }
-                guard input.append(sample) else {
-                    writer.cancelWriting()
-                    return nil
-                }
+            // Écriture AU FIL DE L'EAU : un échantillon vivant à la fois.
+            //
+            // ANNULATION PROPRE. `retryMissingCaches` tourne dans un `.task`,
+            // donc annulé dès qu'on quitte l'éditeur — geste banal. Sans ce
+            // bloc, l'annulation remontait au `catch` général et le writer
+            // partait en déallocation en état `.writing`, pendant que
+            // l'appelant supprimait son fichier de sortie.
+            let writtenCount: Int
+            do {
+                writtenCount = try await appendAll(from: writeOutput, to: input, writer: writer)
+            } catch {
+                writer.cancelWriting()
+                writeReader.cancelReading()
+                throw error
+            }
+            // La seconde passe doit livrer AUTANT d'échantillons que la
+            // première : sinon la plage cachée est tronquée, et elle servira
+            // de source d'export après « Val. + Suppr. ».
+            guard writeReader.status == .completed, writtenCount == sampleCount else {
+                writer.cancelWriting()
+                return nil
             }
             input.markAsFinished()
             await writer.finishWriting()
@@ -1327,8 +1438,9 @@ struct ProjectEditorView: View {
     /// Le seul garde-fou conservé est technique : supprimer un fichier pendant
     /// qu'un rendu le lit casserait l'export en cours.
     private func releaseSourcesNow() {
-        guard !RenderQueueController.shared.isBusy() else {
-            errorMessage = "Export en cours — libération possible une fois la file terminée (un fichier en cours de lecture ne doit pas être supprimé)."
+        // Garde UNIFIÉ : couvre la file clip-par-clip ET l'export du montage.
+        if let reason = MediaAvailabilityService.blockingReason() {
+            errorMessage = reason
             return
         }
         let freed = MediaAvailabilityService.releaseSources(in: project)

@@ -17,6 +17,7 @@ struct ReviewView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var playback = ProxyPlaybackEngine()
+    @State private var blockedMessage: String?
     @State private var playAllTask: Task<Void, Never>?
     @State private var currentPassageID: PersistentIdentifier?
 
@@ -70,6 +71,14 @@ struct ReviewView: View {
             }
             .listStyle(.plain)
         }
+        .alert("Action impossible", isPresented: Binding(
+            get: { blockedMessage != nil },
+            set: { if !$0 { blockedMessage = nil } }
+        )) {
+            Button("OK") { blockedMessage = nil }
+        } message: {
+            Text(blockedMessage ?? "")
+        }
         .navigationTitle("Relecture")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -109,6 +118,11 @@ struct ReviewView: View {
                 let seconds = passage.sourceDuration.seconds
                 try? await Task.sleep(for: .seconds(seconds))
             }
+            // ÉPILOGUE SEULEMENT SI LA TÂCHE VIT ENCORE. Annulée (l'utilisateur
+            // a tapé un passage précis), sa continuation reprend APRÈS que la
+            // nouvelle lecture a démarré : ce `pause()` coupait alors le
+            // passage qu'on venait de lancer, et effaçait son surlignage.
+            guard !Task.isCancelled else { return }
             playback.pause()
             currentPassageID = nil
             playAllTask = nil
@@ -123,6 +137,11 @@ struct ReviewView: View {
     }
 
     private func delete(_ passage: Passage) {
+        // Sa plage cachée peut être en cours de lecture par un rendu.
+        if let reason = MediaAvailabilityService.blockingReason() {
+            blockedMessage = reason
+            return
+        }
         if currentPassageID == passage.persistentModelID { stopPlayAll() }
         if let cached = passage.cachedRangeRelativePath {
             try? FileManager.default.removeItem(

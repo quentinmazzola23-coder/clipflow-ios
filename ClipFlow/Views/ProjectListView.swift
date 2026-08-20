@@ -20,6 +20,15 @@ struct ProjectListView: View {
     /// Chemin de navigation possédé ici : « Nouveau projet » pousse
     /// directement l'éditeur du projet créé (zéro tap intermédiaire).
     @State private var navigationPath: [PersistentIdentifier] = []
+    @State private var blockedMessage: String?
+
+    /// Un rendu (clips ou montage) tourne-t-il ? Les suppressions de projet
+    /// sont interdites tant que c'est vrai.
+    private var isAnyExportRunning: Bool {
+        RenderQueueController.shared.isRunningFlag
+            || RenderQueueController.shared.hasPendingFlag
+            || MontageExportController.shared.isExporting
+    }
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -59,6 +68,10 @@ struct ProjectListView: View {
                     } label: {
                         Label("Supprimer", systemImage: "trash")
                     }
+                    // Supprimer pendant un rendu détruisait les fichiers que
+                    // le moteur lisait ET les entités SwiftData qu'il écrivait
+                    // encore à la fin de chaque clip : plantage garanti.
+                    .disabled(isAnyExportRunning)
                 }
             }
         }
@@ -94,6 +107,14 @@ struct ProjectListView: View {
         }
         .sheet(isPresented: $showStorage) {
             NavigationStack { StorageView() }
+        }
+        .alert("Action impossible", isPresented: Binding(
+            get: { blockedMessage != nil },
+            set: { if !$0 { blockedMessage = nil } }
+        )) {
+            Button("OK") { blockedMessage = nil }
+        } message: {
+            Text(blockedMessage ?? "")
         }
     }
 
@@ -158,7 +179,12 @@ struct ProjectListView: View {
                    isOn: settingBinding(project, \.opticalFlowEnabled))
             Toggle("Album Photos par projet", isOn: settingBinding(project, \.albumPerProject))
             Button {
-                guard !RenderQueueController.shared.isBusy() else { return }
+                // Garde UNIFIÉ (file de clips + export montage), et l'échec
+                // est DIT : le silence laissait croire à un bouton mort.
+                if let reason = MediaAvailabilityService.blockingReason() {
+                    blockedMessage = reason
+                    return
+                }
                 _ = MediaAvailabilityService.releaseSources(in: project)
                 try? modelContext.save()
             } label: {
@@ -196,7 +222,10 @@ struct ProjectListView: View {
                     project.finalDurationCentiseconds = centiseconds
                 }
                 try? modelContext.save()
-                AppSettings.capture(from: project)
+                AppSettings.captureDuration(
+                    centiseconds: project.finalDurationCentiseconds,
+                    toRushEnd: project.durationToRushEnd
+                )
             }
         )
     }
@@ -209,7 +238,10 @@ struct ProjectListView: View {
             set: { newValue in
                 project[keyPath: keyPath] = newValue
                 try? modelContext.save()
-                AppSettings.capture(from: project)
+                // UNE SEULE clé écrite : ce projet n'a pas forcément été
+                // aligné sur les réglages globaux, tout recapturer depuis lui
+                // ferait reculer les réglages faits ailleurs.
+                AppSettings.captureFlag(keyPath, value: newValue)
             }
         )
     }
@@ -218,6 +250,18 @@ struct ProjectListView: View {
     /// disque explicite (sources copiées + plages cachées) — sinon fuite
     /// d'espace silencieuse à chaque projet supprimé.
     private func deleteProjectAndFiles(_ project: ClipProject) {
+        // GARDE DANS LA FONCTION, pas seulement sur le bouton : un balayage
+        // complet déclenche l'action sans passer par l'état `disabled`, et un
+        // bouton grisé n'explique rien. Ici l'utilisateur apprend CE QUI bloque.
+        if let reason = MediaAvailabilityService.blockingReason() {
+            blockedMessage = reason
+            return
+        }
+        // Les passages de ce projet quittent la file AVANT la suppression :
+        // leurs identifiants survivraient sinon à des entités détruites.
+        RenderQueueController.shared.forget(
+            passageIDs: project.passages.map(\.persistentModelID)
+        )
         for rush in project.rushes {
             if let path = rush.localSourceRelativePath {
                 try? FileManager.default.removeItem(at: StorageManager.url(forSourceRelativePath: path))
@@ -227,6 +271,13 @@ struct ProjectListView: View {
             if let path = passage.cachedRangeRelativePath {
                 try? FileManager.default.removeItem(at: StorageManager.url(forCachedRangeRelativePath: path))
             }
+        }
+        // La MUSIQUE aussi : sans cette ligne, chaque projet supprimé laissait
+        // son fichier audio et sa carte de rythme orphelins dans Application
+        // Support — invisibles dans l'écran Stockage, impurgeables, et
+        // sauvegardés sur iCloud par-dessus le marché.
+        if let music = project.musicFilename {
+            MusicStore.deleteMusic(filename: music)
         }
         modelContext.delete(project)
         try? modelContext.save()

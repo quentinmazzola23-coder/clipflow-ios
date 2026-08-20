@@ -35,9 +35,33 @@ struct RenderQueueSnapshot: Sendable {
 final class RenderQueueController {
 
     private(set) var snapshot = RenderQueueSnapshot()
+
+    /// Drapeau « la file tourne », PROPRIÉTÉ À PART de `snapshot`.
+    ///
+    /// Indispensable : `snapshot` change plusieurs fois par seconde (la
+    /// progression). Toute vue qui lisait `snapshot.isRunning` — même pour
+    /// un simple `onChange` — déclarait donc une dépendance d'observation sur
+    /// la structure ENTIÈRE et se reconstruisait à chaque image rendue. C'est
+    /// ce qui ramenait le défaut du menu ⋯ qui remonte en haut pendant un
+    /// export, malgré l'isolation de la pastille de progression.
+    /// Cette propriété-ci ne change que deux fois par export.
+    private(set) var isRunningFlag = false
     private var container: ModelContainer?
     private var worker: Task<Void, Never>?
-    private var pendingPassageIDs: [PersistentIdentifier] = []
+    private var pendingPassageIDs: [PersistentIdentifier] = [] {
+        didSet { hasPendingFlag = !pendingPassageIDs.isEmpty }
+    }
+
+    /// « Des passages attendent d'être rendus », propriété SÉPARÉE et
+    /// observable — comme `isRunningFlag`, pour que les vues consultent l'état
+    /// de la file sans dépendre de la progression.
+    ///
+    /// Indispensable au garde de suppression : une file EN PAUSE a
+    /// `isRunningFlag == false` mais des passages toujours en attente. Se fier
+    /// au seul drapeau d'exécution laissait supprimer le projet, ce qui
+    /// détruisait des `Passage` dont les identifiants restaient dans la file —
+    /// accès à des entités SwiftData mortes à la reprise.
+    private(set) var hasPendingFlag = false
     /// Passage retiré de la file mais ni fini ni échoué (rendu en cours) —
     /// sans lui, totalJobs sous-compte de 1 pendant chaque rendu.
     private var inFlightCount = 0
@@ -77,6 +101,20 @@ final class RenderQueueController {
 
     /// Des passages du rush donné sont-ils en cours ou en attente de rendu ?
     /// (garde anti-course : suppression de fichier pendant une lecture).
+    /// Retire de la file les passages d'un projet qu'on s'apprête à supprimer.
+    /// Sans cela leurs identifiants survivaient à la suppression, et la
+    /// reprise déréférençait des entités détruites.
+    func forget(passageIDs: [PersistentIdentifier]) {
+        guard !passageIDs.isEmpty else { return }
+        let removed = Set(passageIDs)
+        pendingPassageIDs.removeAll { removed.contains($0) }
+        snapshot.totalJobs = max(0, snapshot.totalJobs - removed.count)
+    }
+
+    /// Vrai si un rendu clip-par-clip tourne ou attend.
+    ///
+    /// NE COUVRE PAS l'export du montage : voir `MediaAvailabilityService`
+    /// pour le garde complet, à consulter avant toute suppression de fichier.
     func isBusy() -> Bool {
         snapshot.isRunning || !pendingPassageIDs.isEmpty
     }
@@ -220,10 +258,12 @@ final class RenderQueueController {
             return
         }
         snapshot.isRunning = true
+        isRunningFlag = true
         ThermalMonitor.shared.setRenderingActive(true)
         startActivityIfNeeded()
         defer {
             snapshot.isRunning = false
+            isRunningFlag = false
             snapshot.currentPassageName = nil
             snapshot.currentClipNumber = 0
             ThermalMonitor.shared.setRenderingActive(false)

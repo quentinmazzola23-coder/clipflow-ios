@@ -12,6 +12,28 @@ import AVFoundation
 
 enum MediaAvailabilityService {
 
+    /// GARDE UNIQUE avant toute suppression de fichier média.
+    ///
+    /// Il existe DEUX producteurs qui lisent des fichiers pendant des minutes :
+    /// la file d'export clip-par-clip et l'export du montage. Chaque garde
+    /// écrit à la main n'en consultait qu'un — d'où des suppressions qui
+    /// arrachaient les sources sous une session d'export en cours, avec un
+    /// échec invisible à l'arrivée. Tout garde passe désormais par ici.
+    ///
+    /// Retourne nil si l'opération est sûre, sinon la raison à afficher.
+    @MainActor
+    static func blockingReason() -> String? {
+        if RenderQueueController.shared.isBusy() {
+            return "Export de clips en cours — cette action supprimerait des fichiers en cours de lecture. Réessayez une fois la file terminée."
+        }
+        if MontageExportController.shared.isExporting {
+            let name = MontageExportController.shared.projectName.map { " (\($0))" } ?? ""
+            return "Export du montage en cours\(name) — cette action supprimerait des fichiers en cours de lecture. Réessayez une fois l'export terminé."
+        }
+        return nil
+    }
+
+
     /// Réévalue la disponibilité d'un rush d'après l'état du disque.
     /// (Plus de proxys : la copie source locale est l'unique média de lecture.)
     static func evaluate(rush: Rush) -> RushAvailability {

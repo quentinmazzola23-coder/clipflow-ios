@@ -95,8 +95,15 @@ enum PhotoExportService {
     @discardableResult
     static func saveToPhotos(fileURL: URL, projectName: String? = nil) async throws -> String? {
         try await ensureAuthorization()
+        // ACCÈS LIMITÉ : PhotoKit interdit alors de créer ou de retrouver un
+        // album, mais autorise l'ajout d'un asset. Sans ce cas, chaque clip
+        // était RENDU EN ENTIER (des minutes de calcul) puis échouait à
+        // l'enregistrement, et la relance automatique refaisait trois fois le
+        // même rendu voué à l'échec. Ici la vidéo arrive bien dans Photos —
+        // simplement pas rangée dans un album.
+        let limitedAccess = PHPhotoLibrary.authorizationStatus(for: .readWrite) == .limited
         let title = projectName.map { albumTitle(forProjectNamed: $0) } ?? albumPrefix
-        let album = try await ensureAlbum(titled: title)
+        let album = limitedAccess ? nil : try await ensureAlbum(titled: title)
 
         var assetIdentifier: String?
         do {
@@ -106,7 +113,13 @@ enum PhotoExportService {
                 // Ne PAS déplacer le fichier : suppression manuelle après confirmation.
                 options.shouldMoveFile = false
                 request.addResource(with: .video, fileURL: fileURL, options: options)
-                if let placeholder = request.placeholderForCreatedAsset,
+                // L'identifiant est relevé AVANT toute question d'album : en
+                // accès limité il n'y a pas d'album, et le laisser dans la
+                // condition faisait rendre nil alors que la vidéo était bien
+                // créée — la trace PhotoKit du passage était perdue.
+                let placeholder = request.placeholderForCreatedAsset
+                assetIdentifier = placeholder?.localIdentifier
+                if let album, let placeholder,
                    let albumRequest = PHAssetCollectionChangeRequest(for: album) {
                     albumRequest.addAssets([placeholder] as NSArray)
                     assetIdentifier = placeholder.localIdentifier

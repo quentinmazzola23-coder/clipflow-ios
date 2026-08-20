@@ -29,7 +29,6 @@ struct MontageView: View {
         case needsMusic
         case analyzing
         case ready
-        case exporting(Double)
     }
 
     @State private var stage: Stage = .needsMusic
@@ -77,6 +76,7 @@ struct MontageView: View {
             }
         }
         .onAppear {
+            announceExportOutcome()
             // Musique déjà en place : réanalyse (cache) sans aucun tap.
             if let filename = project.musicFilename {
                 startAnalysis(filename: filename)
@@ -103,6 +103,16 @@ struct MontageView: View {
             analysisTask?.cancel()
             player?.pause()
             stopAudition()
+            // Observateur de fin de lecture : retiré à la sortie, sinon un
+            // observateur ET son AVPlayer fuyaient à chaque visite de l'écran.
+            if let endObserver {
+                NotificationCenter.default.removeObserver(endObserver)
+                self.endObserver = nil
+            }
+        }
+        // Résultat d'un export terminé pendant l'absence : annoncé au retour.
+        .onChange(of: MontageExportController.shared.lastOutcomeToken) { _, _ in
+            announceExportOutcome()
         }
         .alert("Montage", isPresented: Binding(
             get: { errorMessage != nil },
@@ -160,7 +170,7 @@ struct MontageView: View {
                 Spacer()
             }
 
-        case .ready, .exporting:
+        case .ready:
             readyContent
         }
     }
@@ -178,13 +188,19 @@ struct MontageView: View {
                     } else {
                         RoundedRectangle(cornerRadius: 12)
                             .fill(.black.opacity(0.6))
-                        Text(plan.map { "\($0.placements.count) clips prêts" } ?? "")
+                        Text(planSummary)
+                            .font(.footnote)
+                            .multilineTextAlignment(.center)
                             .foregroundStyle(.secondary)
+                            .padding(.horizontal, 24)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .padding(.horizontal, 12)
+                // Le commentaire de la barre basse promet que TOUT est
+                // verrouillé pendant l'export : le lecteur aussi.
+                .allowsHitTesting(!isExporting)
 
                 BeatWaveformView(
                     map: map,
@@ -256,6 +272,31 @@ struct MontageView: View {
         .padding(.top, 6)
     }
 
+    /// Ce que contient le plan — et, s'il est VIDE, POURQUOI.
+    ///
+    /// Sans ce texte, une densité trop lente pour les clips disponibles
+    /// affichait « 0/78 clips », un bouton Aperçu grisé et rien d'autre :
+    /// l'utilisateur ne pouvait pas deviner qu'il suffisait de resserrer la
+    /// densité. Le diagnostic est construit avec des chiffres déjà calculés.
+    private var planSummary: String {
+        guard let plan else { return "" }
+        if !plan.placements.isEmpty {
+            return "\(plan.placements.count) clips prêts"
+        }
+        if project.passages.isEmpty {
+            return "Aucun clip validé dans ce projet — revenez au dérushage pour en valider."
+        }
+        guard let range = slotRangeMilliseconds else {
+            return "Aucun créneau à cette position — déplacez la fenêtre vers le début du morceau."
+        }
+        if plan.skippedClipIDs.isEmpty {
+            return "Aucun clip exploitable ici : leurs fichiers n'ont pas pu être ouverts."
+        }
+        return "\(plan.skippedClipIDs.count) clip(s) écarté(s) : à cette densité, chaque coupe demande "
+            + "\(range.sourceMin) ms de rush, plus que ce que contiennent vos clips. "
+            + "Choisissez un cran plus rapide (à droite) — ou revalidez des clips plus longs."
+    }
+
     /// Écarts de coupe du plan courant, en millisecondes entières, avec la
     /// durée SOURCE à prélever par clip (durée finale × vitesse du projet).
     private var slotRangeMilliseconds: (min: Int, max: Int, sourceMin: Int, sourceMax: Int)? {
@@ -285,9 +326,11 @@ struct MontageView: View {
         }
     }
 
+    /// L'export vit dans un SERVICE PARTAGÉ, pas dans cette vue : fermer
+    /// l'écran ne l'arrête pas, et le rouvrir retrouve son état au lieu de
+    /// repartir avec tous les verrous ouverts.
     private var isExporting: Bool {
-        if case .exporting = stage { return true }
-        return false
+        MontageExportController.shared.isExporting
     }
 
     private var density: CutDensity {
@@ -335,14 +378,21 @@ struct MontageView: View {
 
             Spacer()
 
-            if case .exporting(let progress) = stage {
-                // Style linéaire : sur iOS, le style circulaire avec `value`
-                // rend un simple sablier indéterminé — la fraction disparaît.
-                ProgressView(value: progress)
-                    .frame(width: 90)
-                Text("\(Int(progress * 100)) %")
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.secondary)
+            if isExporting {
+                // VUE ISOLÉE : la progression change plusieurs fois par
+                // seconde. La lire ici reconstruirait tout l'écran de montage
+                // à chaque image encodée.
+                MontageExportProgressView()
+                // SORTIE DE SECOURS. Un export long sans moyen de l'arrêter
+                // enferme l'utilisateur : plus de changement de musique, plus
+                // de réglage, et rien d'autre à faire qu'attendre.
+                Button {
+                    MontageExportController.shared.cancel()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 40))
+                .accessibilityLabel("Annuler l'export")
             } else {
                 Button {
                     exportMontage()
@@ -441,6 +491,11 @@ struct MontageView: View {
 
     /// Titre venu de la bibliothèque : fichier déjà local, crédit conservé.
     private func importFromLibrary(localURL: URL, result: MusicSearchResult) {
+        guard !isExporting else {
+            errorMessage = "Export du montage en cours — changez de musique une fois l'export terminé."
+            try? FileManager.default.removeItem(at: localURL)
+            return
+        }
         do {
             let filename = try MusicStore.adoptDownloadedFile(at: localURL)
             if let old = project.musicFilename {
@@ -458,6 +513,12 @@ struct MontageView: View {
     }
 
     private func importMusic(from url: URL) {
+        // L'export lit le fichier musical : le remplacer maintenant le
+        // supprimerait sous la session.
+        guard !isExporting else {
+            errorMessage = "Export du montage en cours — changez de musique une fois l'export terminé."
+            return
+        }
         do {
             // Copier la NOUVELLE musique d'abord ; l'ancienne n'est supprimée
             // qu'après le succès. Dans l'autre ordre, une copie qui échoue
@@ -646,38 +707,42 @@ struct MontageView: View {
         guard let plan, let filename = project.musicFilename else { return }
         stopPreview()
         stopAudition()
-        stage = .exporting(0)
-        Task {
-            do {
-                let montage = try await MontageComposer.build(
-                    plan: plan,
-                    sources: clipSources,
-                    musicURL: MusicStore.url(forMusicFilename: filename)
-                )
-                let name = "Montage — \(project.name).mov"
-                let fileURL = try await MontageComposer.export(montage, outputFilename: name) { progress in
-                    Task { @MainActor in
-                        if case .exporting = stage { stage = .exporting(progress) }
-                    }
-                }
-                let projectName = project.albumPerProject ? project.name : nil
-                _ = try await PhotoExportService.saveToPhotos(fileURL: fileURL,
-                                                              projectName: projectName)
-                try? FileManager.default.removeItem(at: fileURL)
-                if isExporting { stage = .ready }
-                let token = UUID()
-                toastToken = token
-                withAnimation { exportToast = "Montage enregistré dans Photos 🎉" }
+        MontageExportController.shared.start(
+            plan: plan,
+            sources: clipSources,
+            musicURL: MusicStore.url(forMusicFilename: filename),
+            outputFilename: "Montage — \(project.name).mov",
+            albumName: project.albumPerProject ? project.name : nil,
+            projectName: project.name
+        )
+    }
+
+    /// Annonce le résultat d'un export — y compris terminé pendant que
+    /// l'écran était fermé (le service le conserve jusqu'à consommation).
+    private func announceExportOutcome() {
+        let controller = MontageExportController.shared
+        // Le résultat porte le nom du projet qui l'a lancé : sans ce contrôle,
+        // un montage exporté depuis un AUTRE projet aurait été annoncé ici.
+        guard let outcome = controller.lastOutcome,
+              controller.lastOutcomeProject == project.name else { return }
+        controller.consumeOutcome()
+        switch outcome {
+        case .saved:
+            let token = UUID()
+            toastToken = token
+            withAnimation { exportToast = "Montage enregistré dans Photos 🎉" }
+            Task {
                 try? await Task.sleep(for: .seconds(3))
                 // Un export suivant a pu reposter un toast : seul le SIEN
                 // a le droit de l'effacer.
                 if toastToken == token {
                     withAnimation { exportToast = nil }
                 }
-            } catch {
-                if isExporting { stage = .ready }
-                errorMessage = error.localizedDescription
             }
+        case .failed(let message):
+            errorMessage = message
+        case .cancelled:
+            break // abandon volontaire : rien à annoncer
         }
     }
 

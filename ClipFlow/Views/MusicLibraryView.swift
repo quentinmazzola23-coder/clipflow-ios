@@ -24,6 +24,8 @@ struct MusicLibraryView: View {
     @State private var errorMessage: String?
     /// Note visible quand la recherche est passée par la source de repli.
     @State private var fallbackNote: String?
+    /// Tâche de téléchargement — annulée si la feuille se ferme.
+    @State private var downloadTask: Task<Void, Never>?
     @State private var downloadingID: String?
     @State private var previewingID: String?
     @State private var previewPlayer: AVPlayer?
@@ -95,6 +97,10 @@ struct MusicLibraryView: View {
         }
         .onDisappear {
             searchTask?.cancel()
+            // Téléchargement abandonné avec la feuille : sans cette annulation,
+            // il revenait plus tard imposer son titre par-dessus la musique
+            // choisie entre-temps.
+            downloadTask?.cancel()
             previewPlayer?.pause()
         }
         .onAppear {
@@ -174,7 +180,10 @@ struct MusicLibraryView: View {
         isSearching = true
         hasSearched = true
         searchTask = Task {
-            defer { isSearching = false }
+            // Le spinner n'appartient qu'à la tâche EN COURS : une recherche
+            // annulée qui l'éteignait faisait afficher « Aucun titre trouvé »
+            // pendant que la suivante travaillait encore.
+            defer { if !Task.isCancelled { isSearching = false } }
             do {
                 // Toute la mécanique (trois lignes de défense : Openverse,
                 // Openverse en UA navigateur, Internet Archive) vit dans
@@ -215,7 +224,8 @@ struct MusicLibraryView: View {
         previewPlayer?.pause()
         previewingID = nil
         downloadingID = result.id
-        Task {
+        downloadTask?.cancel()
+        downloadTask = Task {
             defer { downloadingID = nil }
             do {
                 let (temporary, response) = try await URLSession.shared.download(
@@ -230,6 +240,14 @@ struct MusicLibraryView: View {
                     .appendingPathComponent(UUID().uuidString)
                     .appendingPathExtension(ext)
                 try? FileManager.default.moveItem(at: temporary, to: named)
+                // Feuille fermée entre-temps : ne PAS livrer. Sinon le
+                // téléchargement d'un titre abandonné revenait 30 s plus tard
+                // écraser la musique choisie depuis — elle changeait toute
+                // seule sous les yeux de l'utilisateur.
+                guard !Task.isCancelled else {
+                    try? FileManager.default.removeItem(at: named)
+                    return
+                }
                 onPicked(named, result)
                 dismiss()
             } catch let error as URLError {
