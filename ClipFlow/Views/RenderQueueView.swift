@@ -54,7 +54,7 @@ struct RenderQueueView: View {
                     // laisser un « 0/N » figé sans explication.
                     if queue.isStalled {
                         VStack(alignment: .leading, spacing: 6) {
-                            Label("File à l'arrêt alors que des passages attendent.",
+                            Label("File à l'arrêt alors que des clips attendent.",
                                   systemImage: "exclamationmark.triangle")
                                 .font(.caption)
                                 .foregroundStyle(.orange)
@@ -94,7 +94,7 @@ struct RenderQueueView: View {
                         .map(\.persistentModelID)
                     queue.enqueue(passageIDs: notExported)
                 } label: {
-                    Label("Exporter tous les passages restants (\(pendingPassages.count))",
+                    Label("Exporter tous les clips restants (\(pendingPassages.count))",
                           systemImage: "square.and.arrow.up.on.square")
                 }
                 .disabled(pendingPassages.isEmpty)
@@ -149,7 +149,7 @@ struct RenderQueueView: View {
         HStack {
             VStack(alignment: .leading) {
                 Text(passage.exportedFilename
-                     ?? "Passage \(passage.validationIndex + 1)")
+                     ?? "Clip \(passage.validationIndex + 1)")
                     .font(.subheadline)
                 if let error = passage.lastExportError {
                     Text(error).font(.caption2).foregroundStyle(.red)

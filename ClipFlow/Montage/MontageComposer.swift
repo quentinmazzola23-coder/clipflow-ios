@@ -36,7 +36,7 @@ enum MontageComposerError: Error, LocalizedError {
         case .exportFailed(let details):
             return "Export du montage impossible : \(details)"
         case .emptyPlan:
-            return "Aucun clip à monter — validez des passages d'abord."
+            return "Aucun clip à monter — validez des clips d'abord."
         }
     }
 }

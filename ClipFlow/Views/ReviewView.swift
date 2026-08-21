@@ -46,7 +46,7 @@ struct ReviewView: View {
                 .buttonStyle(.glassProminent)
                 .tint(Theme.accent)
                 Spacer()
-                Text("\(reviewOrder.count) passage(s)")
+                Text("\(reviewOrder.count) clip(s)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

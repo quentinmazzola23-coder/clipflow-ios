@@ -316,7 +316,7 @@ private struct ProjectRow: View {
                 .font(.headline)
             HStack(spacing: 12) {
                 Label("\(project.rushes.count) rushes", systemImage: "film")
-                Label("\(project.passages.count) sélections", systemImage: "scissors")
+                Label("\(project.passages.count) clips", systemImage: "scissors")
                 let exported = project.passages.filter { $0.exportState == .exported }.count
                 if exported > 0 {
                     Label("\(exported) exportés", systemImage: "checkmark.circle")

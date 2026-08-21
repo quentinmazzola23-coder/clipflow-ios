@@ -63,7 +63,7 @@ struct StorageView: View {
                 }
             }
             Section {
-                Text("Vos morceaux importés se gèrent dans la Bibliothèque de l'écran Montage — ils ne sont pas touchés ici. Les vidéos originales de votre photothèque ne sont jamais supprimées par ClipFlow. Supprimer les proxys est sans risque : ils se régénèrent automatiquement. Supprimer une plage en cache peut rendre un passage non exportable hors ligne.")
+                Text("Vos morceaux importés se gèrent dans la Bibliothèque de l'écran Montage — ils ne sont pas touchés ici. Les vidéos originales de votre photothèque ne sont jamais supprimées par ClipFlow. Supprimer les proxys est sans risque : ils se régénèrent automatiquement. Supprimer une plage en cache peut rendre un clip non exportable hors ligne.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

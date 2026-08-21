@@ -531,7 +531,7 @@ struct ProjectEditorView: View {
             Spacer()
             // Progression globale du triage.
             let treated = project.orderedRushes.filter { !$0.passages.isEmpty }.count
-            Text("\(treated)/\(project.rushes.count) traités · \(project.passages.count) passages")
+            Text("\(treated)/\(project.rushes.count) rushes traités · \(project.passages.count) clips")
                 .font(.footnote.monospacedDigit())
                 .foregroundStyle(treated == project.rushes.count && !project.rushes.isEmpty ? .green : .secondary)
         }
@@ -715,95 +715,120 @@ struct ProjectEditorView: View {
             .disabled(project.passages.isEmpty)
         }
         ToolbarItem(placement: .topBarTrailing) {
+            // MENU ORGANISÉ PAR MOMENT D'USAGE, et non par nature technique.
+            //
+            // Tout vivait ici à plat : réglages, repérage, relecture, exports,
+            // entretien. Revenir sur l'app après trois semaines, c'était ne
+            // plus savoir ce qu'elle sait faire. Les sections suivent l'ordre
+            // réel du travail — on dérushe, puis on revoit, puis on exporte —
+            // et les libellés nomment l'ACTION plutôt que l'objet : « Revoir
+            // mes clips » se comprend sans avoir à deviner ce qu'était une
+            // « relecture des passages ».
             Menu {
-                durationMenu
-                // Liaison explicite comme les autres interrupteurs : écrire
-                // directement le modèle ne sauvegardait rien ET n'écrivait
-                // aucune clé globale — le réglage revenait en arrière tout
-                // seul à la réouverture du projet.
-                Toggle("Toucher = centre de la sélection", isOn: Binding(
-                    get: { project.touchAnchorIsCenter },
-                    set: { newValue in
-                        project.touchAnchorIsCenter = newValue
-                        AppSettings.captureFlag(\.touchAnchorIsCenter, value: newValue)
-                        touch()
-                    }
-                ))
-                Toggle("Stats développeur", isOn: Binding(
-                    get: { devStatsEnabled },
-                    set: { enabled in
-                        devStatsEnabled = enabled
-                        enabled ? DevStatsMonitor.shared.start() : DevStatsMonitor.shared.stop()
-                    }
-                ))
-                Toggle("Aperçu léger (540p, + fluide)", isOn: Binding(
-                    get: { project.previewLight },
-                    set: { newValue in
-                        project.previewLight = newValue
-                        playback.lightPreview = newValue
-                        playback.applyPreviewQualityChange()
-                        touch()
-                    }
-                ))
-                // Flux optique : désactivé par défaut. Activé, il FABRIQUE les
-                // images intermédiaires (mouvement plus fluide) et peut donc
-                // fabriquer des artefacts ; désactivé, chaque image du ralenti
-                // est une vraie image du rush, répétée.
-                Toggle("Flux optique (fluide, peut créer des artefacts)", isOn: Binding(
-                    get: { project.opticalFlowEnabled },
-                    set: { newValue in
-                        project.opticalFlowEnabled = newValue
-                        touch()
-                    }
-                ))
-                Toggle("Album Photos par projet", isOn: Binding(
-                    get: { project.albumPerProject },
-                    set: { newValue in
-                        project.albumPerProject = newValue
-                        touch()
-                    }
-                ))
-                // MOMENTS FORTS — proposition, jamais décision : l'app repère
-                // où ça bouge plus que d'habitude, le choix reste à l'œil.
-                Button {
-                    analyzeCurrentRush()
-                } label: {
-                    Label(analyzingRushKey == nil ? "Repérer les moments forts (ce rush)" : "Analyse en cours…",
-                          systemImage: "waveform.badge.magnifyingglass")
-                }
-                .disabled(analyzingRushKey != nil || currentRush == nil)
-                if !globalMarkers.isEmpty {
+                Section("Pendant le dérushage") {
+                    durationMenu
+                    // MOMENTS FORTS — proposition, jamais décision : l'app
+                    // repère où ça bouge plus que d'habitude, le choix reste
+                    // à l'œil.
                     Button {
-                        jumpToNextPeak()
+                        analyzeCurrentRush()
                     } label: {
-                        Label("Aller au moment suivant (\(globalMarkers.count))", systemImage: "forward.end.alt")
+                        Label(analyzingRushKey == nil
+                              ? "Repérer les moments forts de ce rush"
+                              : "Analyse en cours…",
+                              systemImage: "waveform.badge.magnifyingglass")
                     }
-                    Button(role: .destructive) {
-                        clearMotionPeaks()
+                    .disabled(analyzingRushKey != nil || currentRush == nil)
+                    if !globalMarkers.isEmpty {
+                        Button {
+                            jumpToNextPeak()
+                        } label: {
+                            Label("Aller au moment fort suivant (\(globalMarkers.count))",
+                                  systemImage: "forward.end.alt")
+                        }
+                        Button(role: .destructive) {
+                            clearMotionPeaks()
+                        } label: {
+                            Label("Effacer les moments repérés", systemImage: "xmark.circle")
+                        }
+                    }
+                }
+
+                Section("Quand les clips sont faits") {
+                    Button {
+                        showReview = true
                     } label: {
-                        Label("Effacer les repères", systemImage: "xmark.circle")
+                        Label("Revoir mes clips (\(project.passages.count))",
+                              systemImage: "play.rectangle.on.rectangle")
+                    }
+                    Button {
+                        showExports = true
+                    } label: {
+                        Label("Envoyer mes clips dans Photos",
+                              systemImage: "square.and.arrow.up")
                     }
                 }
-                Button {
-                    releaseSourcesNow()
+
+                // Réglages en SOUS-MENU : ils se touchent rarement, et les
+                // laisser à plat noyait les actions du jour sous quatre
+                // interrupteurs.
+                Menu {
+                    Toggle("Toucher = centre de la sélection", isOn: Binding(
+                        get: { project.touchAnchorIsCenter },
+                        set: { newValue in
+                            project.touchAnchorIsCenter = newValue
+                            AppSettings.captureFlag(\.touchAnchorIsCenter, value: newValue)
+                            touch()
+                        }
+                    ))
+                    Toggle("Aperçu léger (540p, plus fluide)", isOn: Binding(
+                        get: { project.previewLight },
+                        set: { newValue in
+                            project.previewLight = newValue
+                            playback.lightPreview = newValue
+                            playback.applyPreviewQualityChange()
+                            touch()
+                        }
+                    ))
+                    // Flux optique : désactivé par défaut. Activé, il FABRIQUE
+                    // les images intermédiaires (mouvement plus fluide) et peut
+                    // donc fabriquer des artefacts ; désactivé, chaque image du
+                    // ralenti est une vraie image du rush, répétée.
+                    Toggle("Flux optique (fluide, peut créer des artefacts)", isOn: Binding(
+                        get: { project.opticalFlowEnabled },
+                        set: { newValue in
+                            project.opticalFlowEnabled = newValue
+                            touch()
+                        }
+                    ))
+                    Toggle("Album Photos par projet", isOn: Binding(
+                        get: { project.albumPerProject },
+                        set: { newValue in
+                            project.albumPerProject = newValue
+                            touch()
+                        }
+                    ))
+                    Toggle("Stats développeur", isOn: Binding(
+                        get: { devStatsEnabled },
+                        set: { enabled in
+                            devStatsEnabled = enabled
+                            enabled ? DevStatsMonitor.shared.start() : DevStatsMonitor.shared.stop()
+                        }
+                    ))
                 } label: {
-                    let releasable = MediaAvailabilityService.releasableSources(in: project)
-                        .reduce(Int64(0)) { $0 + $1.bytes }
-                    Label("Libérer l'espace (\(StorageManager.formatBytes(releasable)))",
-                          systemImage: "internaldrive")
+                    Label("Réglages", systemImage: "slider.horizontal.3")
                 }
-                Button {
-                    showReview = true
-                } label: {
-                    Label("Relecture des passages (\(project.passages.count))", systemImage: "play.rectangle.on.rectangle")
-                }
-                Button {
-                    showExports = true
-                } label: {
-                    Label("Exports", systemImage: "square.and.arrow.up")
-                }
-                // Suivi de version — entrée informative, peu contrastée.
+
                 Section {
+                    Button {
+                        releaseSourcesNow()
+                    } label: {
+                        let releasable = MediaAvailabilityService.releasableSources(in: project)
+                            .reduce(Int64(0)) { $0 + $1.bytes }
+                        Label("Libérer \(StorageManager.formatBytes(releasable)) d'espace",
+                              systemImage: "internaldrive")
+                    }
+                    // Suivi de version — entrée informative, peu contrastée.
                     Text("v\(BuildInfo.version) (\(BuildInfo.build)) · \(BuildInfo.stamp)")
                         .font(.caption2)
                 }
@@ -923,7 +948,7 @@ struct ProjectEditorView: View {
         let treated = rushes.map { !$0.passages.isEmpty }
         guard let target = TriageNavigation.nextUntreatedIndex(after: currentRushIndex, treated: treated) else {
             if !rushes.isEmpty {
-                errorMessage = "Tous les rushes ont au moins un passage validé. 🎉"
+                errorMessage = "Tous les rushes ont au moins un clip validé. 🎉"
             }
             return
         }
@@ -1253,7 +1278,7 @@ struct ProjectEditorView: View {
         // source — l'utilisateur doit le savoir avant toute libération.
         Task {
             if await !cacheSourceRange(for: passage, rush: rush) {
-                errorMessage = "Mise en cache de la plage impossible pour ce passage — conservez le rush (l'export utilisera la copie source complète)."
+                errorMessage = "Mise en cache de la plage impossible pour ce clip — conservez le rush (l'export utilisera la copie source complète)."
             }
         }
     }
@@ -1277,7 +1302,7 @@ struct ProjectEditorView: View {
                 )
             }
             guard allCached else {
-                errorMessage = "Un autre passage de ce rush n'a pas encore sa plage cachée — rush conservé."
+                errorMessage = "Un autre clip de ce rush n'a pas encore sa plage cachée — rush conservé."
                 return
             }
             // Purge à mesure : toutes les plages du rush étant cachées, les
@@ -1300,7 +1325,7 @@ struct ProjectEditorView: View {
         guard let rush = currentRush else { return }
         let pending = project.passages.filter { $0.rush === rush && $0.cachedRangeRelativePath == nil }
         guard pending.isEmpty else {
-            errorMessage = "\(pending.count) passage(s) de ce rush n'ont pas encore leur plage cachée — rush conservé (leur export deviendrait impossible)."
+            errorMessage = "\(pending.count) clip(s) de ce rush n'ont pas encore leur plage cachée — rush conservé (leur export deviendrait impossible)."
             return
         }
         selectionRange = nil

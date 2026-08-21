@@ -41,6 +41,14 @@ struct MontageView: View {
     @State private var showFileImporter = false
     @State private var showLibrary = false
     @State private var showOverlays = false
+    /// Les chiffres de planification sont-ils dépliés ?
+    ///
+    /// L'en-tête portait cinq informations en permanence (BPM, clips, durée,
+    /// écarts de coupe, rush requis) au-dessus d'un aperçu, d'une forme d'onde
+    /// et de dix boutons. À force, plus rien ne ressortait. Les deux chiffres
+    /// qu'on consulte pour CHOISIR une musique restent accessibles d'un tap
+    /// sur le BPM, et se referment ensuite.
+    @State private var showPlanningDetail = false
     /// Motif de fermeture forcée de l'écran d'incrustations, remis à
     /// l'utilisateur UNE FOIS LA FEUILLE REFERMÉE.
     ///
@@ -349,21 +357,35 @@ struct MontageView: View {
 
     private func header(map: BeatMap) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 14) {
-                Label(String(format: "%.0f BPM", map.bpm), systemImage: "metronome")
-                if let plan {
-                    Label("\(plan.placements.count)/\(project.passages.count) clips",
-                          systemImage: "film.stack")
-                    Label(formatDuration(plan.totalDuration.seconds), systemImage: "timer")
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { showPlanningDetail.toggle() }
+            } label: {
+                HStack(spacing: 14) {
+                    Label(String(format: "%.0f BPM", map.bpm), systemImage: "metronome")
+                    if let plan {
+                        Label("\(plan.placements.count)/\(project.passages.count) clips",
+                              systemImage: "film.stack")
+                        Label(formatDuration(plan.totalDuration.seconds), systemImage: "timer")
+                    }
+                    // Chevron DISCRET : il signale que la ligne se déplie sans
+                    // ajouter un bouton de plus à un écran déjà chargé.
+                    Image(systemName: showPlanningDetail ? "chevron.up" : "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Spacer()
                 }
-                Spacer()
+                .font(.footnote.monospacedDigit())
+                .contentShape(Rectangle())
             }
-            .font(.footnote.monospacedDigit())
+            .buttonStyle(.plain)
+            .accessibilityLabel(showPlanningDetail
+                                ? "Masquer les écarts de coupe"
+                                : "Afficher les écarts de coupe")
             // L'INFORMATION DE PLANIFICATION : la durée de chaque clip au cran
             // choisi, et la longueur de rush nécessaire (à 0,5×, le double est
             // prélevé… non : la moitié est prélevée — durée finale × vitesse).
             // C'est ce qui permet de choisir la musique AVANT de dérusher.
-            if let range = slotRangeMilliseconds {
+            if showPlanningDetail, let range = slotRangeMilliseconds {
                 Text(range.min == range.max
                      ? "coupes : \(range.min) ms · rush requis par clip : ≥ \(range.sourceMin) ms"
                      : "coupes : \(range.min)–\(range.max) ms · rush requis : ≥ \(range.sourceMin)–\(range.sourceMax) ms")
@@ -619,22 +641,41 @@ struct MontageView: View {
     /// le fichier que la session d'export est en train de lire.
     private var bottomBar: some View {
         HStack(spacing: 12) {
-            Button {
-                showLibrary = true
+            // SOURCE & HABILLAGE réunis sous un seul bouton. La barre
+            // portait cinq entrées de front, dont trois qu'on ne touche
+            // qu'une fois par montage — choisir la musique, aller la chercher
+            // dans un fichier, poser un logo. Les regrouper rend visible ce
+            // qu'on fait vraiment en boucle : écouter, puis exporter.
+            Menu {
+                Button {
+                    showLibrary = true
+                } label: {
+                    Label("Choisir une musique", systemImage: "music.note.list")
+                }
+                Button {
+                    showFileImporter = true
+                } label: {
+                    Label("Importer un fichier audio", systemImage: "folder")
+                }
+                Button {
+                    prepareOverlayShape(imageToo: true)
+                    showOverlays = true
+                } label: {
+                    Label(overlayCount > 0
+                          ? "Incrustations (\(overlayCount))"
+                          : "Ajouter un logo ou un texte",
+                          systemImage: "textformat")
+                }
+                .disabled(plan?.placements.isEmpty ?? true)
             } label: {
-                Image(systemName: "music.note.list")
+                Image(systemName: "slider.horizontal.below.rectangle")
+                    .font(.title3)
+                    .foregroundStyle(overlayCount > 0 ? Theme.accent : .secondary)
+                    .frame(width: 46, height: 46)
+                    .glassEffect(.regular.interactive(), in: Circle())
+                    .contentShape(Circle())
             }
-            .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 46))
-            .accessibilityLabel("Ma bibliothèque")
-            .disabled(isExporting)
-
-            Button {
-                showFileImporter = true
-            } label: {
-                Image(systemName: "folder")
-            }
-            .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 46))
-            .accessibilityLabel("Fichier local")
+            .accessibilityLabel("Source et habillage")
             .disabled(isExporting)
 
             Button {
@@ -674,20 +715,6 @@ struct MontageView: View {
                 .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 40))
                 .accessibilityLabel("Annuler l'export")
             } else {
-                Button {
-                    prepareOverlayShape(imageToo: true)
-                    showOverlays = true
-                } label: {
-                    Image(systemName: overlayCount > 0
-                          ? "textformat.size.larger" : "textformat")
-                }
-                .buttonStyle(GlassIconButtonStyle(
-                    tint: overlayCount > 0 ? Theme.accent : .secondary, diameter: 46))
-                .accessibilityLabel(overlayCount > 0
-                                    ? "Incrustations (\(overlayCount))"
-                                    : "Ajouter une incrustation")
-                .disabled(plan?.placements.isEmpty ?? true)
-
                 Button {
                     exportMontage()
                 } label: {
