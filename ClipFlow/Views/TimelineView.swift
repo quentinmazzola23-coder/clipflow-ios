@@ -36,7 +36,11 @@ struct TimelineSegment: Equatable {
 
 /// Plage à surligner (sélection courante ou passage validé).
 struct TimelineOverlay: Equatable {
-    enum Kind: Equatable { case currentSelection, validated }
+    /// `.exported` distingue un clip DEJA parti dans Photos d'un clip
+    /// seulement valide. Sans cette nuance il fallait ouvrir la file d'export
+    /// pour savoir ou on en etait : sur soixante-dix clips, c'est la question
+    /// qu'on se pose le plus souvent.
+    enum Kind: Equatable { case currentSelection, validated, exported }
     var kind: Kind
     var globalStart: Double
     var duration: Double
@@ -473,6 +477,13 @@ final class TimelineUIView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
                 layer.backgroundColor = UIColor.systemYellow.withAlphaComponent(0.18).cgColor
             case .validated:
                 layer.backgroundColor = UIColor.systemGreen.withAlphaComponent(0.25).cgColor
+            case .exported:
+                // Meme teinte, plus SOUTENUE, plus un liset : la parente reste
+                // lisible d'un coup d'oeil (les deux sont valides) alors qu'un
+                // changement de couleur aurait suggere deux natures distinctes.
+                layer.backgroundColor = UIColor.systemGreen.withAlphaComponent(0.55).cgColor
+                layer.borderColor = UIColor.systemGreen.cgColor
+                layer.borderWidth = 1.5
             }
             layer.frame = CGRect(
                 x: x(forTime: overlay.globalStart), y: 14,

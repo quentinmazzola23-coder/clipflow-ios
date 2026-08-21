@@ -54,6 +54,24 @@ final class ClipProject {
     var createdAt: Date = Date.now
     var updatedAt: Date = Date.now
 
+    /// Le sélecteur de rushes s'est-il déjà ouvert TOUT SEUL pour ce projet ?
+    ///
+    /// Persisté sur le projet, pas dans un état de vue : le drapeau de session
+    /// se réarmait à chaque réouverture, si bien qu'un projet dont on avait
+    /// supprimé les rushes au fil du dérushage rouvrait la photothèque en
+    /// pleine figure. L'ouverture automatique est une commodité de PREMIÈRE
+    /// ouverture — après, c'est une intrusion.
+    var didAutoOpenPicker: Bool = false
+
+    /// Derniere position de la tete de lecture, en centiemes de seconde de
+    /// temps GLOBAL de timeline. -1 = jamais posee.
+    ///
+    /// Rouvrir un projet de vingt-cinq rushes repartait au debut : il fallait
+    /// refaire defiler jusqu'au dernier rush traite, a chaque session. Stockee
+    /// en centiemes comme le reste des durees de l'app, pour rester dans
+    /// l'arithmetique rationnelle et ne pas trainer un Double a virgule.
+    var playheadCentiseconds: Int = -1
+
     // Paramètres de sélection / export.
     /// Durée FINALE (après ralentissement), en centièmes de seconde. 130 = 1,30 s.
     var finalDurationCentiseconds: Int = 130

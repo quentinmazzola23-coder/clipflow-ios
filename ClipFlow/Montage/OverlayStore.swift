@@ -90,6 +90,26 @@ enum OverlayStore {
         return filename
     }
 
+    /// Duplique un fichier image sous un nouveau nom, et le rend.
+    ///
+    /// Sert aux préréglages : chaque propriétaire — projet ou préréglage — a
+    /// SA copie. Partager un fichier obligerait à compter les références, et
+    /// une erreur de comptage se paierait en images disparues sans un mot.
+    /// Rend `nil` si la source est introuvable, pour que l'appelant enregistre
+    /// une incrustation sans image plutôt qu'un renvoi vers le vide.
+    static func duplicateImage(filename: String) -> String? {
+        let source = url(forImageNamed: filename)
+        guard FileManager.default.fileExists(atPath: source.path) else { return nil }
+        let copy = UUID().uuidString + "." + (source.pathExtension.isEmpty
+                                              ? "png" : source.pathExtension)
+        do {
+            try FileManager.default.copyItem(at: source, to: url(forImageNamed: copy))
+            return copy
+        } catch {
+            return nil
+        }
+    }
+
     static func deleteImage(filename: String) {
         try? FileManager.default.removeItem(at: url(forImageNamed: filename))
     }

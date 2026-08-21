@@ -69,6 +69,7 @@ struct OverlayEditorView: View {
     @State private var draftText = ""
     /// Calque en cours de RETOUCHE. `nil` = l'alerte crée un nouveau calque.
     @State private var editingTextLayer: OverlayLayer?
+    @State private var showPresets = false
     @State private var message: String?
     /// Position au DÉBUT du glissement, en fractions, PAR CALQUE.
     ///
@@ -171,6 +172,17 @@ struct OverlayEditorView: View {
             Button("OK") { message = nil }
         } message: {
             Text(message ?? "")
+        }
+        .sheet(isPresented: $showPresets) {
+            NavigationStack {
+                OverlayPresetSheet(project: project,
+                                   videoRatio: Double(backdropRatio))
+            }
+        }
+        // Poser un préréglage remplace les calques : la sélection courante
+        // désignerait alors un objet supprimé.
+        .onChange(of: showPresets) { _, presented in
+            if !presented { selectedLayer = nil }
         }
     }
 
@@ -391,6 +403,17 @@ struct OverlayEditorView: View {
             .opacity(shapeIsKnown ? 1 : 0.35)
             .accessibilityLabel(selected?.kind == .text
                                 ? "Modifier le texte" : "Ajouter un texte")
+
+            // PRÉRÉGLAGES : reposer une configuration entière — « texte
+            // d'intro sur le premier clip, filigrane partout » — sur un
+            // nouveau projet, sans tout replacer à la main.
+            Button {
+                showPresets = true
+            } label: {
+                Image(systemName: "square.stack.3d.up")
+            }
+            .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 46))
+            .accessibilityLabel("Préréglages d'incrustations")
 
             Spacer()
 

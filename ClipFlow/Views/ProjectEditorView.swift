@@ -214,7 +214,7 @@ struct ProjectEditorView: View {
             guard let rush = passage.rush,
                   let index = project.orderedRushes.firstIndex(where: { $0 === rush }) else { continue }
             result.append(TimelineOverlay(
-                kind: .validated,
+                kind: passage.exportState == .exported ? .exported : .validated,
                 globalStart: segmentStart(rushIndex: index) + passage.start.seconds,
                 duration: passage.sourceDuration.seconds
             ))
@@ -414,14 +414,54 @@ struct ProjectEditorView: View {
             playback.onTick = { time in
                 handlePlaybackTick(time)
             }
-            // Projet vide (fraîchement créé ou non) : le sélecteur Photos
-            // s'ouvre de lui-même — zéro tap entre « Nouveau projet » et le
-            // choix des rushes. Une seule fois par apparition, jamais pendant
-            // une importation en cours.
             // Repères déjà calculés : rétablis sans rien réanalyser.
             loadCachedPeaks()
-            if !autoPickerLaunched && project.rushes.isEmpty && importer.progress == nil {
+            // REPRISE DE LA POSITION. Les segments viennent d'être bâtis,
+            // donc le temps global mémorisé a de nouveau un sens. Borné à la
+            // durée réelle : des rushes ont pu être supprimés depuis, et une
+            // tête de lecture au-delà de la fin ne montrerait rien.
+            if project.playheadCentiseconds >= 0, let last = segments.last {
+                let total = last.startOffset + last.duration
+                let saved = Double(project.playheadCentiseconds) / 100
+                if total > 0, saved > 0.05,
+                   let index = rushIndex(atGlobalTime: min(saved, total - 0.05)) {
+                    let target = min(saved, max(0, total - 0.05))
+                    playhead = target
+                    // La timeline se recale par le même chemin que la
+                    // navigation manuelle, et le lecteur charge le rush voulu
+                    // — SANS lancer la lecture : on rouvre sur une image, pas
+                    // sur une boucle qui démarre toute seule.
+                    seekCounter += 1
+                    seek = ProgrammaticSeek(token: seekCounter, time: target)
+                    playback.load(rush: project.orderedRushes[index])
+                    playback.seek(to: CMTime(seconds: target - segmentStart(rushIndex: index),
+                                             preferredTimescale: 600))
+                }
+            }
+            // Projet ANTÉRIEUR au marqueur : s'il porte la moindre trace de
+            // travail, on le tient pour déjà ouvert. Sans cela, la photothèque
+            // s'ouvrirait une dernière fois sur un projet en cours, à la
+            // première mise à jour qui introduit ce champ.
+            if !project.didAutoOpenPicker
+                && (!project.passages.isEmpty || !project.overlays.isEmpty
+                    || project.musicFilename != nil) {
+                project.didAutoOpenPicker = true
+                try? modelContext.save()
+            }
+            // PREMIÈRE ouverture du projet SEULEMENT : le sélecteur Photos
+            // s'ouvre de lui-même, pour qu'il n'y ait aucun tap entre
+            // « Nouveau projet » et le choix des rushes.
+            //
+            // Le marqueur vit SUR LE PROJET, pas dans un état de vue. Un
+            // drapeau de session se réarmait à chaque réouverture : un projet
+            // dont on avait supprimé les rushes au fil du dérushage rouvrait la
+            // photothèque en pleine figure, à chaque fois. Rendre le service
+            // une fois est utile ; le répéter est une intrusion.
+            if !project.didAutoOpenPicker && !autoPickerLaunched
+                && project.rushes.isEmpty && importer.progress == nil {
                 autoPickerLaunched = true
+                project.didAutoOpenPicker = true
+                try? modelContext.save()
                 showPicker = true
             }
         }
@@ -431,6 +471,10 @@ struct ProjectEditorView: View {
             playback.pause()
             analysisTask?.cancel()
             analysisTask = nil
+            // La position est notée POUR CE PROJET, afin de rouvrir là où on
+            // s'est arrêté plutôt qu'au début.
+            project.playheadCentiseconds = Int((playhead * 100).rounded())
+            try? modelContext.save()
         }
     }
 

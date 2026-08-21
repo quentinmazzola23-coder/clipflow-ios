@@ -27,7 +27,7 @@ struct ClipFlowApp: App {
             )
             container = try ModelContainer(
                 for: ClipProject.self, Rush.self, Passage.self, MusicTrack.self,
-                     OverlayLayer.self,
+                     OverlayLayer.self, OverlayPreset.self, OverlayPresetEntry.self,
                 configurations: configuration
             )
         } catch {
