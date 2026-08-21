@@ -38,6 +38,7 @@ struct ProjectEditorView: View {
     // Navigation temporelle. Le positionnement externe passe par un jeton
     // one-shot (voir ProgrammaticSeek).
     @State private var playhead: Double = 0
+    @State private var undo = DeletionUndo()
     @State private var seek: ProgrammaticSeek?
     @State private var seekCounter = 0
 
@@ -283,6 +284,17 @@ struct ProjectEditorView: View {
                 }
                 controlBar(isLandscape: isLandscape)
             }
+            // BANDEAU D'ANNULATION, posé en surimpression au-dessus de la
+            // barre de commandes : à portée de pouce, sans jamais pousser la
+            // mise en page — un bandeau qui décale l'écran ferait rater le
+            // geste suivant.
+            .overlay(alignment: .bottom) {
+                if let pending = undo.pending {
+                    UndoBannerView(pending: pending) { undo.undo() }
+                        .padding(.bottom, isLandscape ? 8 : 74)
+                }
+            }
+            .animation(.snappy(duration: 0.22), value: undo.pending?.id)
         }
         .navigationTitle(project.name)
         .navigationBarTitleDisplayMode(.inline)
@@ -416,54 +428,9 @@ struct ProjectEditorView: View {
             }
             // Repères déjà calculés : rétablis sans rien réanalyser.
             loadCachedPeaks()
-            // REPRISE DE LA POSITION. Les segments viennent d'être bâtis,
-            // donc le temps global mémorisé a de nouveau un sens. Borné à la
-            // durée réelle : des rushes ont pu être supprimés depuis, et une
-            // tête de lecture au-delà de la fin ne montrerait rien.
-            if project.playheadCentiseconds >= 0, let last = segments.last {
-                let total = last.startOffset + last.duration
-                let saved = Double(project.playheadCentiseconds) / 100
-                if total > 0, saved > 0.05,
-                   let index = rushIndex(atGlobalTime: min(saved, total - 0.05)) {
-                    let target = min(saved, max(0, total - 0.05))
-                    playhead = target
-                    // La timeline se recale par le même chemin que la
-                    // navigation manuelle, et le lecteur charge le rush voulu
-                    // — SANS lancer la lecture : on rouvre sur une image, pas
-                    // sur une boucle qui démarre toute seule.
-                    seekCounter += 1
-                    seek = ProgrammaticSeek(token: seekCounter, time: target)
-                    playback.load(rush: project.orderedRushes[index])
-                    playback.seek(to: CMTime(seconds: target - segmentStart(rushIndex: index),
-                                             preferredTimescale: 600))
-                }
-            }
-            // Projet ANTÉRIEUR au marqueur : s'il porte la moindre trace de
-            // travail, on le tient pour déjà ouvert. Sans cela, la photothèque
-            // s'ouvrirait une dernière fois sur un projet en cours, à la
-            // première mise à jour qui introduit ce champ.
-            if !project.didAutoOpenPicker
-                && (!project.passages.isEmpty || !project.overlays.isEmpty
-                    || project.musicFilename != nil) {
-                project.didAutoOpenPicker = true
-                try? modelContext.save()
-            }
-            // PREMIÈRE ouverture du projet SEULEMENT : le sélecteur Photos
-            // s'ouvre de lui-même, pour qu'il n'y ait aucun tap entre
-            // « Nouveau projet » et le choix des rushes.
-            //
-            // Le marqueur vit SUR LE PROJET, pas dans un état de vue. Un
-            // drapeau de session se réarmait à chaque réouverture : un projet
-            // dont on avait supprimé les rushes au fil du dérushage rouvrait la
-            // photothèque en pleine figure, à chaque fois. Rendre le service
-            // une fois est utile ; le répéter est une intrusion.
-            if !project.didAutoOpenPicker && !autoPickerLaunched
-                && project.rushes.isEmpty && importer.progress == nil {
-                autoPickerLaunched = true
-                project.didAutoOpenPicker = true
-                try? modelContext.save()
-                showPicker = true
-            }
+            restorePlayhead()
+            markLegacyProjectAsOpened()
+            openPickerOnFirstUse()
         }
         .onDisappear {
             // Retour à la liste des projets : la lecture s'arrête toujours,
@@ -471,6 +438,10 @@ struct ProjectEditorView: View {
             playback.pause()
             analysisTask?.cancel()
             analysisTask = nil
+            // Un sursis ne survit pas à l'écran qui l'affichait : sans le
+            // bandeau, plus rien ne pourrait l'annuler et l'objet resterait
+            // masqué sans jamais être effacé.
+            undo.consumeNow()
             // La position est notée POUR CE PROJET, afin de rouvrir là où on
             // s'est arrêté plutôt qu'au début.
             project.playheadCentiseconds = Int((playhead * 100).rounded())
@@ -959,6 +930,68 @@ struct ProjectEditorView: View {
         jump(toRushIndex: target)
     }
 
+    // MARK: - Ouverture du projet
+    //
+    // Ces trois traitements vivaient DANS `onAppear`. Le corps a fini par
+    // dépasser ce que le vérificateur de types de Swift démêle en temps
+    // raisonnable, et il refusait alors de compiler sans rien dire du fond.
+    // Les sortir les rend aussi lisibles un par un.
+
+    /// Rouvre le projet LÀ OÙ on s'était arrêté.
+    ///
+    /// Les segments viennent d'être bâtis, donc le temps global mémorisé a de
+    /// nouveau un sens. Borné à la durée réelle : des rushes ont pu être
+    /// supprimés depuis, et une tête de lecture au-delà de la fin ne montrerait
+    /// rien.
+    private func restorePlayhead() {
+        guard project.playheadCentiseconds >= 0, let last = segments.last else { return }
+        let total = last.startOffset + last.duration
+        let saved = Double(project.playheadCentiseconds) / 100
+        guard total > 0, saved > 0.05 else { return }
+        let target = min(saved, max(0, total - 0.05))
+        guard let index = rushIndex(atGlobalTime: target) else { return }
+        playhead = target
+        // La timeline se recale par le même chemin que la navigation manuelle,
+        // et le lecteur charge le rush voulu — SANS lancer la lecture : on
+        // rouvre sur une image, pas sur une boucle qui démarre toute seule.
+        seekCounter += 1
+        seek = ProgrammaticSeek(token: seekCounter, time: target)
+        playback.load(rush: project.orderedRushes[index])
+        playback.seek(to: CMTime(seconds: target - segmentStart(rushIndex: index),
+                                 preferredTimescale: 600))
+    }
+
+    /// Projet ANTÉRIEUR au marqueur d'ouverture : s'il porte la moindre trace
+    /// de travail, on le tient pour déjà ouvert.
+    ///
+    /// Sans cela, la photothèque s'ouvrirait une dernière fois sur un projet en
+    /// cours, à la première mise à jour qui introduit ce champ.
+    private func markLegacyProjectAsOpened() {
+        guard !project.didAutoOpenPicker else { return }
+        guard !project.passages.isEmpty || !project.overlays.isEmpty
+                || project.musicFilename != nil else { return }
+        project.didAutoOpenPicker = true
+        try? modelContext.save()
+    }
+
+    /// PREMIÈRE ouverture seulement : le sélecteur Photos s'ouvre de lui-même,
+    /// pour qu'il n'y ait aucun tap entre « Nouveau projet » et le choix des
+    /// rushes.
+    ///
+    /// Le marqueur vit SUR LE PROJET, pas dans un état de vue. Un drapeau de
+    /// session se réarmait à chaque réouverture : un projet dont on avait
+    /// supprimé les rushes au fil du dérushage rouvrait la photothèque en
+    /// pleine figure, à chaque fois. Rendre le service une fois est utile ;
+    /// le répéter est une intrusion.
+    private func openPickerOnFirstUse() {
+        guard !project.didAutoOpenPicker, !autoPickerLaunched,
+              project.rushes.isEmpty, importer.progress == nil else { return }
+        autoPickerLaunched = true
+        project.didAutoOpenPicker = true
+        try? modelContext.save()
+        showPicker = true
+    }
+
     /// Positionne la timeline sur un rush et lance sa lecture en boucle
     /// (arrivée via bouton uniquement — jamais pendant un scrubbing manuel).
     private func jump(toRushIndex target: Int) {
@@ -1024,16 +1057,23 @@ struct ProjectEditorView: View {
         guard let id = editingPassageID,
               let passage = modelContext.model(for: id) as? Passage else { return }
         playback.pause()
-        if let cached = passage.cachedRangeRelativePath {
-            try? FileManager.default.removeItem(
-                at: StorageManager.url(forCachedRangeRelativePath: cached)
-            )
-        }
-        modelContext.delete(passage)
+        passage.isPendingDeletion = true
         touch()
         editingPassageID = nil
         selectionRange = nil
         selectionRushIndex = nil
+        undo.schedule(label: "Clip supprimé") {
+            if let cached = passage.cachedRangeRelativePath {
+                try? FileManager.default.removeItem(
+                    at: StorageManager.url(forCachedRangeRelativePath: cached)
+                )
+            }
+            modelContext.delete(passage)
+            try? modelContext.save()
+        } restore: {
+            passage.isPendingDeletion = false
+            try? modelContext.save()
+        }
     }
 
     /// Recentre la timeline sur le milieu de la sélection courante.
@@ -1273,13 +1313,27 @@ struct ProjectEditorView: View {
     /// leurs plages cachées.
     private func deleteRush(_ rush: Rush) {
         playback.pause()
-        if let path = rush.localSourceRelativePath {
-            try? FileManager.default.removeItem(at: StorageManager.url(forSourceRelativePath: path))
-        }
-        modelContext.delete(rush)
+        // MISE EN SURSIS, pas suppression : le rush et son fichier restent en
+        // place, masqués, le temps qu'un « Annuler » puisse encore les
+        // rappeler. Effacer le fichier tout de suite rendrait le retour
+        // impossible, quoi qu'on fasse ensuite du modèle.
+        rush.isPendingDeletion = true
         touch()
         rebuildSegments()
         playback.load(rush: currentRush)
+        undo.schedule(label: "Rush supprimé") {
+            if let path = rush.localSourceRelativePath {
+                try? FileManager.default.removeItem(
+                    at: StorageManager.url(forSourceRelativePath: path))
+            }
+            modelContext.delete(rush)
+            try? modelContext.save()
+        } restore: {
+            rush.isPendingDeletion = false
+            try? modelContext.save()
+            rebuildSegments()
+            playback.load(rush: currentRush)
+        }
     }
 
     /// Copie passthrough (sans réencodage) de la plage sélectionnée + marge.

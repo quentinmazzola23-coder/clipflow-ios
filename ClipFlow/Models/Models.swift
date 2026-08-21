@@ -169,16 +169,40 @@ final class ClipProject {
     }
 
     /// Rushes triés dans l'ordre chronologique établi à l'importation.
-    var orderedRushes: [Rush] { rushes.sorted { $0.orderIndex < $1.orderIndex } }
+    /// Rushes visibles, triés — les suppressions EN ATTENTE sont exclues ici,
+    /// à la source.
+    ///
+    /// Filtrer dans les vues aurait décalé les index de rush, dont dépend tout
+    /// le calcul de temps global de la timeline. En passant par l'accesseur,
+    /// l'app entière voit la même liste et l'arithmétique reste cohérente.
+    var orderedRushes: [Rush] {
+        rushes.filter { !$0.isPendingDeletion }.sorted { $0.orderIndex < $1.orderIndex }
+    }
 
-    /// Passages triés par ordre de validation.
-    var orderedPassages: [Passage] { passages.sorted { $0.validationIndex < $1.validationIndex } }
+    /// Passages triés par ordre de validation, hors suppressions en attente.
+    var orderedPassages: [Passage] {
+        passages.filter { !$0.isPendingDeletion }
+            .sorted { $0.validationIndex < $1.validationIndex }
+    }
 }
 
 // MARK: - Rush
 
 @Model
 final class Rush {
+
+    /// Suppression EN ATTENTE : l'objet et ses fichiers existent encore, mais
+    /// l'app fait comme s'ils n'existaient plus.
+    ///
+    /// C'est ce qui rend « Annuler » possible sans boîte de confirmation. La
+    /// demande était « zéro confirmation » et elle est juste — les
+    /// confirmations ralentissent tout — mais supprimer était alors définitif
+    /// et instantané : un geste de travers coûtait le travail. La bonne réponse
+    /// à « pas de confirmation » n'est pas « pas de filet », c'est
+    /// l'annulation : on agit tout de suite, on peut revenir pendant quelques
+    /// secondes. Passé le délai, la suppression est consommée pour de bon.
+    var isPendingDeletion: Bool = false
+
     /// Position chronologique dans le projet.
     var orderIndex: Int = 0
 
@@ -237,6 +261,9 @@ final class Rush {
 @Model
 final class Passage {
     /// Ordre de validation — détermine l'ordre de relecture et la numérotation.
+    /// Suppression EN ATTENTE — voir `Rush.isPendingDeletion`.
+    var isPendingDeletion: Bool = false
+
     var validationIndex: Int = 0
 
     /// Début de la sélection DANS le rush source (temps source, avant ralenti).
