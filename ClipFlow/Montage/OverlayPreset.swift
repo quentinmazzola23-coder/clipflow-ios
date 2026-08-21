@@ -82,6 +82,7 @@ final class OverlayPresetEntry {
     var centerX: Double = 0.5
     var centerY: Double = 0.5
     var relativeWidth: Double = 0.3
+    var opacity: Double = 1
     var anchorIndex: Int = -1
     var anchorVideoRatio: Double = 0
 

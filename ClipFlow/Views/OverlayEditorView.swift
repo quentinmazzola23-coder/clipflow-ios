@@ -260,6 +260,9 @@ struct OverlayEditorView: View {
                 }
             }
         }
+        // L'opacité s'applique au DESSIN seul : le liseré de sélection reste
+        // franc, sinon un calque réglé à 10 % deviendrait impossible à viser.
+        .opacity(layer.opacity)
         .overlay {
             if isSelected {
                 RoundedRectangle(cornerRadius: 4)

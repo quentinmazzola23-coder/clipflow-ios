@@ -73,6 +73,8 @@ final class MontageExportController {
                sources: [Int: URL],
                musicURL: URL,
                overlays: [ResolvedOverlay] = [],
+               outputFormat: MontageOutputFormat = .auto,
+               cropToFill: Bool = true,
                outputFilename: String,
                albumName: String?,
                projectName: String) {
@@ -86,7 +88,9 @@ final class MontageExportController {
             do {
                 let montage = try await MontageComposer.build(
                     plan: plan, sources: sources, musicURL: musicURL,
-                    overlays: overlays, forExport: true
+                    overlays: overlays,
+                    outputFormat: outputFormat, cropToFill: cropToFill,
+                    forExport: true
                 )
                 try Task.checkCancellation()
                 let fileURL = try await MontageComposer.export(

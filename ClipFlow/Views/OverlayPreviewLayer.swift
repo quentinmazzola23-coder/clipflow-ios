@@ -41,6 +41,7 @@ struct OverlayPreviewLayer: View {
             ZStack(alignment: .topLeading) {
                 ForEach(visibleOverlays(), id: \.stackOrder) { overlay in
                     content(overlay, videoWidth: videoRect.width)
+                        .opacity(overlay.opacity)
                         .position(
                             x: videoRect.width * overlay.centerX,
                             y: videoRect.height * overlay.centerY

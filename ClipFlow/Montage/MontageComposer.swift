@@ -61,6 +61,8 @@ enum MontageComposer {
                       sources: [Int: URL],
                       musicURL: URL,
                       overlays: [ResolvedOverlay] = [],
+                      outputFormat: MontageOutputFormat = .auto,
+                      cropToFill: Bool = true,
                       forExport: Bool = false) async throws -> MontageComposition {
         guard !plan.placements.isEmpty else { throw MontageComposerError.emptyPlan }
 
@@ -114,11 +116,17 @@ enum MontageComposer {
                 loadedTracks[url] = info
             }
 
-            // Taille de rendu = celle du PREMIER clip, orientation appliquée.
-            // Les clips suivants sont cadrés dedans (remplissage centré).
+            // TAILLE DE RENDU : 4K dans le format CHOISI, jamais celle du
+            // premier clip. Elle se déduisait de lui, ce qui allait tant que
+            // tous les rushes partageaient une orientation — dès qu'on en
+            // mélange, le format du fichier dépendait de quel clip la musique
+            // avait mis en tête. Le premier clip ne sert plus qu'à trancher le
+            // mode automatique.
             let oriented = info.size.applying(info.transform)
             let orientedSize = CGSize(width: abs(oriented.width), height: abs(oriented.height))
-            if renderSize == .zero { renderSize = orientedSize }
+            if renderSize == .zero {
+                renderSize = outputFormat.renderSize(sourceOriented: orientedSize)
+            }
 
             // Trou entre le curseur et le créneau (créneau dégénéré filtré en
             // amont) : comblé par du vide plutôt qu'un désalignement — les
@@ -175,7 +183,8 @@ enum MontageComposer {
             )
 
             layerInstruction.setTransform(
-                fillTransform(size: info.size, transform: info.transform, into: renderSize),
+                fillTransform(size: info.size, transform: info.transform,
+                              into: renderSize, cropToFill: cropToFill),
                 at: placement.timelineStart
             )
             cursor = CMTimeAdd(placement.timelineStart, placement.timelineDuration)
@@ -218,10 +227,13 @@ enum MontageComposer {
         let videoComposition = AVMutableVideoComposition()
         videoComposition.instructions = [instruction]
         videoComposition.renderSize = renderSize
-        // 30 i/s : les sources 60 i/s ralenties 0,5× produisent une image
-        // nouvelle toutes les 1/30 s — encoder plus vite ne ferait que
-        // dupliquer des images dans le fichier.
-        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        // 60 i/s, demandé explicitement, avec la conséquence assumée : un clip
+        // ralenti 0,5× depuis une source 60 i/s ne produit une image NOUVELLE
+        // qu'une fois sur deux, et l'encodeur duplique l'autre. Le fichier est
+        // donc plus lourd sans être plus fluide sur ces passages-là — mais il
+        // sort en 60 i/s partout, ce qu'attendent les plateformes, et les
+        // passages non ralentis y gagnent réellement.
+        videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
 
         // INCRUSTATIONS — UNIQUEMENT sur le chemin d'EXPORT.
         //
@@ -244,15 +256,23 @@ enum MontageComposer {
 
     /// Transformation « remplir le cadre » : orientation native appliquée,
     /// mise à l'échelle au REMPLISSAGE (jamais de bandes noires), centrage.
+    /// - `cropToFill` : vrai = REMPLIR le cadre en rognant les bords ; faux =
+    ///   CONTENIR l'image entière, donc des bandes noires. Le remplissage est
+    ///   le défaut : sur un montage vertical fait de rushes 16:9, contenir
+    ///   laisse deux bandes qui occupent plus de la moitié de la hauteur.
     static func fillTransform(size: CGSize,
                               transform: CGAffineTransform,
-                              into renderSize: CGSize) -> CGAffineTransform {
+                              into renderSize: CGSize,
+                              cropToFill: Bool = true) -> CGAffineTransform {
         let oriented = size.applying(transform)
         let orientedSize = CGSize(width: abs(oriented.width), height: abs(oriented.height))
         guard orientedSize.width > 0, orientedSize.height > 0 else { return transform }
 
-        let scale = max(renderSize.width / orientedSize.width,
-                        renderSize.height / orientedSize.height)
+        let scale = cropToFill
+            ? max(renderSize.width / orientedSize.width,
+                  renderSize.height / orientedSize.height)
+            : min(renderSize.width / orientedSize.width,
+                  renderSize.height / orientedSize.height)
         // 1. Orientation native. 2. Recalage de l'origine (une rotation met
         //    des coordonnées négatives). 3. Échelle. 4. Centrage.
         var result = transform

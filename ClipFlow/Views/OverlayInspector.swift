@@ -91,6 +91,7 @@ struct OverlayInspector: View {
                 sizeControl
             }
 
+            opacityControl
             scopeControl
         }
     }
@@ -205,6 +206,31 @@ struct OverlayInspector: View {
                  : "Taille de police")
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
+        }
+    }
+
+    // MARK: - Opacité
+
+    private var opacityControl: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Opacité")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(Int(layer.opacity * 100)) %")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Slider(
+                value: $layer.opacity,
+                in: 0.05...1.0,
+                // Plancher à 5 % et non 0 : une incrustation totalement
+                // transparente est indiscernable d'une incrustation absente,
+                // et on la chercherait longtemps.
+                onEditingChanged: { editing in if !editing { commit() } }
+            )
+            .tint(Theme.accent)
         }
     }
 

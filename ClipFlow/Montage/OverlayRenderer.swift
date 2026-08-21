@@ -90,6 +90,7 @@ enum OverlayRenderer {
         layer.frame = frame(width: width, height: height,
                             overlay: overlay, renderSize: renderSize)
         layer.isOpaque = false
+        layer.opacity = Float(overlay.opacity)
         return layer
     }
 
@@ -120,6 +121,7 @@ enum OverlayRenderer {
         layer.contentsScale = 1
         layer.frame = frame(width: measured.width, height: measured.height,
                             overlay: overlay, renderSize: renderSize)
+        layer.opacity = Float(overlay.opacity)
         return layer
     }
 
@@ -154,10 +156,16 @@ enum OverlayRenderer {
         let start = max(0, overlay.start.seconds)
         let end = min(total, start + overlay.duration.seconds)
 
+        // L'OPACITÉ RÉGLÉE est la valeur « visible » ; la fenêtre de
+        // visibilité bascule entre elle et zéro, jamais entre 1 et zéro. Sans
+        // cela, régler un filigrane à 30 % le faisait réapparaître à 100 % dès
+        // qu'il ne couvrait pas toute la vidéo.
+        let visible = Float(max(0, min(1, overlay.opacity)))
+
         // Couvre tout le montage : aucune animation. Une animation inutile est
         // une occasion d'erreur en moins.
         if start <= 0.001, end >= total - 0.001 {
-            layer.opacity = 1
+            layer.opacity = visible
             return
         }
         guard end > start else { layer.opacity = 0; return }
@@ -166,7 +174,7 @@ enum OverlayRenderer {
         let animation = CAKeyframeAnimation(keyPath: "opacity")
         // Quatre marches : invisible, visible, invisible, et la dernière
         // valeur que `.discrete` exige pour tenir jusqu'à la fin.
-        animation.values = [0, 1, 0, 0]
+        animation.values = [0, visible, 0, 0]
         animation.keyTimes = [
             0,
             NSNumber(value: start / total),

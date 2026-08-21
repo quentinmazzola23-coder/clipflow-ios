@@ -1081,7 +1081,9 @@ struct MontageView: View {
                     plan: plan,
                     sources: sources,
                     musicURL: MusicStore.url(forMusicFilename: filename),
-                    overlays: resolvedOverlays // dessinées par-dessus, pas incrustées ici
+                    overlays: resolvedOverlays, // dessinées par-dessus, pas incrustées ici
+                    outputFormat: project.outputFormat,
+                    cropToFill: project.cropToFillOutput
                 )
                 // La construction dure plusieurs secondes : l'écran a pu être
                 // fermé, ou le plan reconstruit, entre-temps. Installer ce
@@ -1169,6 +1171,8 @@ struct MontageView: View {
             sources: clipSources,
             musicURL: MusicStore.url(forMusicFilename: filename),
             overlays: resolvedOverlays,
+            outputFormat: project.outputFormat,
+            cropToFill: project.cropToFillOutput,
             outputFilename: "Montage — \(project.name).mov",
             albumName: project.albumPerProject ? project.name : nil,
             projectName: project.name

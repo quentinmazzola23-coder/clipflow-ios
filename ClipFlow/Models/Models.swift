@@ -9,6 +9,7 @@
 import Foundation
 import SwiftData
 import CoreMedia
+import CoreGraphics
 
 // MARK: - États
 
@@ -79,6 +80,21 @@ final class ClipProject {
     /// « l'utilisateur l'a retouché depuis » — la seule question qui décide si
     /// le filet de retour doit être renouvelé.
     var overlaySignatureAfterPreset: String = ""
+
+    /// Format du fichier exporte : automatique, 16:9 ou 9:16. Toujours rendu
+    /// en 4K et 60 i/s, quel que soit le choix.
+    ///
+    /// Le cadre se deduisait du PREMIER clip place. Commode tant que tous les
+    /// rushes ont la meme orientation ; des qu'on en melange, le format du
+    /// fichier dependait de quel clip la musique avait mis en tete.
+    var outputFormatRaw: String = MontageOutputFormat.auto.rawValue
+
+    /// Recadrer pour remplir le cadre (vrai) plutot que ceinturer de noir.
+    ///
+    /// Poser une source 16:9 dans un cadre 9:16 laisse par nature deux bandes
+    /// noires enormes. Le recadrage prend la bande centrale : on perd les
+    /// bords, on garde toute la surface utile.
+    var cropToFillOutput: Bool = true
 
     // Paramètres de sélection / export.
     /// Durée FINALE (après ralentissement), en centièmes de seconde. 130 = 1,30 s.
@@ -183,6 +199,23 @@ final class ClipProject {
     /// Filtrer dans les vues aurait décalé les index de rush, dont dépend tout
     /// le calcul de temps global de la timeline. En passant par l'accesseur,
     /// l'app entière voit la même liste et l'arithmétique reste cohérente.
+    var outputFormat: MontageOutputFormat {
+        get { MontageOutputFormat(rawValue: outputFormatRaw) ?? .auto }
+        set { outputFormatRaw = newValue.rawValue }
+    }
+
+    /// Orientations trouvees dans les rushes du projet.
+    var rushFormatSurvey: RushFormatSurvey {
+        var survey = RushFormatSurvey()
+        for rush in visibleRushes {
+            let size = rush.orientedSize
+            guard size.width > 0, size.height > 0 else { continue }
+            if size.height > size.width { survey.portraitCount += 1 }
+            else { survey.landscapeCount += 1 }
+        }
+        return survey
+    }
+
     var orderedRushes: [Rush] {
         rushes.filter { !$0.isPendingDeletion }.sorted { $0.orderIndex < $1.orderIndex }
     }
@@ -240,6 +273,18 @@ final class Rush {
     var fileSizeBytes: Int64 = 0
     /// Rotation en degrés (0/90/180/270), issue de la preferredTransform.
     var rotationDegrees: Int = 0
+
+    /// Taille TELLE QU'ON LA VOIT, rotation appliquee.
+    ///
+    /// `width`/`height` sont les dimensions du capteur : un rush filme en
+    /// vertical avec un iPhone est stocke en 1920x1080 avec une rotation de
+    /// 90 degres. Juger l'orientation sur les seules dimensions brutes le
+    /// classerait en paysage, et le montage se serait cadre a l'envers.
+    var orientedSize: CGSize {
+        let rotated = rotationDegrees % 180 != 0
+        return rotated ? CGSize(width: height, height: width)
+                       : CGSize(width: width, height: height)
+    }
     /// Colorimétrie : "sdr", "hlg", "pq", "appleLog", "dolbyVision", "inconnue".
     var colorimetry: String = "inconnue"
     var is10Bit: Bool = false

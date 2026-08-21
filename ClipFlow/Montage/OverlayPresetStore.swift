@@ -47,6 +47,7 @@ enum OverlayPresetStore {
             entry.centerX = layer.centerX
             entry.centerY = layer.centerY
             entry.relativeWidth = layer.relativeWidth
+            entry.opacity = layer.opacity
             entry.anchorIndex = layer.anchorIndex
             entry.anchorVideoRatio = layer.anchorVideoRatio
             entry.spansWholeMontage = layer.spansWholeMontage
@@ -137,6 +138,7 @@ enum OverlayPresetStore {
             }
             layer.imageAspect = entry.imageAspect
             layer.relativeWidth = entry.relativeWidth
+            layer.opacity = entry.opacity
             layer.anchorIndex = entry.anchorIndex
             layer.centerX = entry.centerX
             layer.centerY = entry.centerY
@@ -238,6 +240,7 @@ enum OverlayPresetStore {
                  String(format: "%.4f", layer.centerX),
                  String(format: "%.4f", layer.centerY),
                  String(format: "%.4f", layer.relativeWidth),
+                 String(format: "%.3f", layer.opacity),
                  String(layer.anchorIndex), String(layer.spansWholeMontage),
                  String(layer.firstClipIndex), String(layer.lastClipIndex)]
                     .joined(separator: "|")

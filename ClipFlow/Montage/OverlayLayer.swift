@@ -59,6 +59,14 @@ final class OverlayLayer {
     /// faisait déborder du cadre, la marge dépendant de la largeur.
     var anchorIndex: Int = -1
 
+    /// Opacite, de 0 (invisible) a 1 (opaque).
+    ///
+    /// Un filigrane se veut discret : a pleine opacite un logo mange l'image,
+    /// et un titre en blanc pur ecrase ce qu'il y a dessous. Aucune animation
+    /// n'est associee — l'incrustation apparait et disparait toujours d'un
+    /// coup, c'est la regle de l'ecran.
+    var opacity: Double = 1
+
     /// Rapport hauteur/largeur de l'image posée, relevé une fois à l'ajout.
     ///
     /// Mémorisé pour que la géométrie se calcule SANS ouvrir le fichier :
@@ -149,6 +157,7 @@ struct ResolvedOverlay: Sendable {
     var imageURL: URL?
     var centerX: Double
     var centerY: Double
+    var opacity: Double
     var relativeWidth: Double
     /// Plage dans le temps du MONTAGE (zéro = première image).
     var start: CMTime

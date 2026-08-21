@@ -209,6 +209,7 @@ enum OverlayStore {
                     imageURL: layer.imageURL,
                     centerX: layer.centerX,
                     centerY: layer.centerY,
+                    opacity: layer.opacity,
                     relativeWidth: layer.relativeWidth,
                     start: start,
                     duration: duration,
