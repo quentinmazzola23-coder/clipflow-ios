@@ -96,6 +96,14 @@ final class ClipProject {
     /// bords, on garde toute la surface utile.
     var cropToFillOutput: Bool = true
 
+    /// Le choix du format a-t-il deja ete propose pour ce projet ?
+    ///
+    /// La feuille s'ouvre apres la premiere importation, quand on decouvre
+    /// les orientations reelles des rushes. La reproposer a chaque import
+    /// serait une confirmation deguisee — le reglage reste accessible dans le
+    /// menu, c'est suffisant.
+    var didAskOutputFormat: Bool = false
+
     // Paramètres de sélection / export.
     /// Durée FINALE (après ralentissement), en centièmes de seconde. 130 = 1,30 s.
     var finalDurationCentiseconds: Int = 130

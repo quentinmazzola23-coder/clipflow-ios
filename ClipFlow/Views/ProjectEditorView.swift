@@ -28,6 +28,7 @@ struct ProjectEditorView: View {
     /// Présentation programmatique du sélecteur Photos (bouton +, illustration
     /// centrale, et ouverture AUTOMATIQUE à l'arrivée dans un projet vide).
     @State private var showPicker = false
+    @State private var showOutputFormat = false
     /// L'ouverture automatique ne se produit qu'une fois par apparition.
     @State private var autoPickerLaunched = false
     private var importer: ImportController { ImportController.shared }
@@ -392,6 +393,9 @@ struct ProjectEditorView: View {
                     }
             }
         }
+        .sheet(isPresented: $showOutputFormat) {
+            OutputFormatSheet(project: project, survey: project.rushFormatSurvey)
+        }
         .sheet(isPresented: $showCustomDuration) {
             CustomDurationSheet(
                 initial: project.finalDuration,
@@ -429,6 +433,7 @@ struct ProjectEditorView: View {
         }
         .onChange(of: importer.completionToken) { _, _ in
             rebuildSegments()
+            proposeOutputFormatIfUseful()
             seekCounter += 1
             seek = ProgrammaticSeek(token: seekCounter, time: playhead)
             playback.load(rush: currentRush)
@@ -782,6 +787,28 @@ struct ProjectEditorView: View {
                     }
                 }
 
+                Section("Format de la vidéo") {
+                    Picker("Format", selection: Binding(
+                        get: { project.outputFormat },
+                        set: { newValue in
+                            project.outputFormat = newValue
+                            touch()
+                        }
+                    )) {
+                        ForEach(MontageOutputFormat.allCases, id: \.self) { format in
+                            Text(format.label).tag(format)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    Toggle("Recadrer plutôt que ceinturer", isOn: Binding(
+                        get: { project.cropToFillOutput },
+                        set: { newValue in
+                            project.cropToFillOutput = newValue
+                            touch()
+                        }
+                    ))
+                }
+
                 Section("Quand les clips sont faits") {
                     Button {
                         showReview = true
@@ -1020,6 +1047,26 @@ struct ProjectEditorView: View {
     private func savePlayhead() {
         project.playheadCentiseconds = Int((playhead * 100).rounded())
         try? modelContext.save()
+    }
+
+    /// Propose le format de sortie APRÈS l'importation, et une seule fois.
+    ///
+    /// La question ne se pose que si les rushes mêlent paysage et vertical :
+    /// avec une orientation unique, le mode automatique donne déjà le bon
+    /// cadre et demander serait une confirmation déguisée. Le réglage reste
+    /// dans le menu pour les cas où l'on veut du vertical à partir de rushes
+    /// tous filmés à plat.
+    private func proposeOutputFormatIfUseful() {
+        guard !project.didAskOutputFormat else { return }
+        let survey = project.rushFormatSurvey
+        guard survey.isMixed else { return }
+        project.didAskOutputFormat = true
+        // Défaut posé sur l'orientation MAJORITAIRE : c'est celui qui recadre
+        // le moins de rushes, et il est déjà juste si l'utilisateur valide
+        // sans réfléchir.
+        if project.outputFormat == .auto { project.outputFormat = survey.majorityFormat }
+        try? modelContext.save()
+        showOutputFormat = true
     }
 
     /// Rouvre le projet LÀ OÙ on s'était arrêté.
