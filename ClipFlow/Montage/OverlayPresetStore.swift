@@ -67,12 +67,13 @@ enum OverlayPresetStore {
     /// Deux règles, toutes deux apprises de la même manière — en constatant ce
     /// qu'on perdait :
     ///
-    /// 1. UN FILET NE S'ÉCRASE PAS. Essayer un préréglage, puis un autre, est
-    ///    le geste normal de cet écran. Si la seconde pose remplaçait le filet,
-    ///    elle y mettrait le premier préréglage — que l'utilisateur possède
-    ///    déjà dans sa liste — et la configuration faite à la main serait
-    ///    perdue, fichiers compris. Le filet ne vaut que pour l'état MANUEL.
-    ///    Il est consommé quand on le repose (voir `apply`).
+    /// 1. LE FILET DÉCRIT LE DERNIER ÉTAT MANUEL, et rien d'autre. Il n'est
+    ///    remplacé que si l'habillage a été RETOUCHÉ depuis la dernière pose.
+    ///    Les deux règles naïves sont fausses toutes les deux : écraser à
+    ///    chaque pose y met le préréglage précédent — que l'utilisateur possède
+    ///    déjà dans sa liste — et ne jamais écraser fige le tout premier état,
+    ///    si bien que « Avant le préréglage » désigne, une session plus tard,
+    ///    quelque chose qui n'a plus rien à voir avec l'avant.
     /// 2. Un projet sans incrustation n'a rien à sauvegarder, mais son ancien
     ///    filet devient PÉRIMÉ : il doit partir, sinon il se ferait passer pour
     ///    le retour en arrière d'un état qu'il ne décrit pas.
@@ -82,10 +83,17 @@ enum OverlayPresetStore {
             $0.isAutoBackup && $0.backupProject === project
         }
         guard !project.overlays.isEmpty else {
-            for old in existing { delete(old, context: context) }
+            for old in existing { context.delete(old) }
+            try? context.save()
             return
         }
-        guard existing.isEmpty else { return }
+        if !existing.isEmpty {
+            // Rien n'a bougé depuis la dernière pose : l'habillage courant EST
+            // un préréglage, le sauvegarder n'apporterait rien et écraserait
+            // le vrai travail manuel.
+            guard signature(of: project) != project.overlaySignatureAfterPreset else { return }
+            for old in existing { context.delete(old) }
+        }
         capture(from: project, name: autoBackupName,
                 isAutoBackup: true, context: context)
     }
@@ -153,6 +161,9 @@ enum OverlayPresetStore {
             layer.project = project
         }
 
+        // Empreinte de CE QUI VIENT D'ÊTRE POSÉ : elle permettra de savoir si
+        // l'utilisateur a retouché à la main avant la pose suivante.
+        project.overlaySignatureAfterPreset = signature(of: project)
         try? context.save()
 
         // Le filet vient d'être reposé : il a joué son rôle. On le retire pour
@@ -174,19 +185,63 @@ enum OverlayPresetStore {
         return (try? context.fetch(descriptor)) ?? []
     }
 
-    /// Supprime un préréglage ET ses fichiers image.
+    /// Supprime un préréglage. Ses fichiers image sont laissés au
+    /// ramasse-miettes.
     ///
-    /// La cascade SwiftData efface les entrées, pas les PNG qu'elles
-    /// désignent : sans ce passage, chaque préréglage supprimé laisserait ses
-    /// images sur le disque, définitivement.
+    /// Les effacer ici paraissait propre, et c'était un piège : consommer le
+    /// filet passe par ce chemin JUSTE APRÈS avoir recopié ses images vers les
+    /// nouveaux calques. Si une recopie avait échoué — disque plein, fichier
+    /// déjà manquant — on détruisait la seule copie restante, exactement la
+    /// perte que `apply` avait pris soin d'écarter deux lignes plus haut.
+    ///
+    /// La règle est donc unique dans toute l'app : SEUL
+    /// `OverlayStore.pruneUnreferencedImages` efface un PNG d'incrustation, au
+    /// lancement, sur un inventaire complet. Un fichier orphelin coûte un peu
+    /// d'espace jusqu'au prochain démarrage ; une image détruite ne revient pas.
     @MainActor
     static func delete(_ preset: OverlayPreset, context: ModelContext) {
-        for entry in preset.entries {
-            if let filename = entry.imageFilename {
-                OverlayStore.deleteImage(filename: filename)
-            }
-        }
         context.delete(preset)
         try? context.save()
+    }
+
+    /// Supprime les filets dont le projet a disparu.
+    ///
+    /// `.nullify` les laisse avec `backupProject == nil` : plus aucun écran ne
+    /// les affiche (la feuille ne montre que le filet du projet courant), donc
+    /// plus personne ne peut les effacer — et leurs entrées continuent de
+    /// référencer leurs PNG, ce qui les protège aussi du ramasse-miettes.
+    /// Invisibles, indestructibles, et occupant de la place à jamais.
+    @MainActor
+    static func purgeOrphanBackups(context: ModelContext) {
+        for ghost in fetchAll(context: context)
+        where ghost.isAutoBackup && ghost.backupProject == nil {
+            context.delete(ghost)
+        }
+        try? context.save()
+    }
+
+    /// Empreinte de l'habillage courant.
+    ///
+    /// Sert à savoir si l'utilisateur a RETOUCHÉ à la main depuis la dernière
+    /// pose de préréglage. Sans elle, il fallait choisir entre deux filets
+    /// également faux : un filet écrasé à chaque pose y mettait le préréglage
+    /// précédent — que l'utilisateur a déjà dans sa liste — et un filet jamais
+    /// écrasé figeait le tout premier état, en continuant de s'appeler
+    /// « Avant le préréglage » une session entière plus tard.
+    @MainActor
+    static func signature(of project: ClipProject) -> String {
+        project.overlays
+            .sorted { $0.stackOrder < $1.stackOrder }
+            .map { layer in
+                [String(layer.stackOrder), layer.kindRaw, layer.text,
+                 layer.imageFilename ?? "",
+                 String(format: "%.4f", layer.centerX),
+                 String(format: "%.4f", layer.centerY),
+                 String(format: "%.4f", layer.relativeWidth),
+                 String(layer.anchorIndex), String(layer.spansWholeMontage),
+                 String(layer.firstClipIndex), String(layer.lastClipIndex)]
+                    .joined(separator: "|")
+            }
+            .joined(separator: "\n")
     }
 }

@@ -107,7 +107,9 @@ struct UndoBannerView: View {
             // La rafale est DITE : sans ce compte, quatre suppressions
             // d'affilée affichaient quatre fois le même libellé, et rien
             // n'indiquait combien restaient récupérables.
-            Text(count > 1 ? "\(pending.label) · \(count) annulables" : pending.label)
+            Text(count > 1
+                 ? "\(pending.label) · \(count) suppressions annulables"
+                 : pending.label)
                 .font(.footnote)
                 .foregroundStyle(.white)
                 .lineLimit(1)

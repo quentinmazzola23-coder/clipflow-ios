@@ -72,6 +72,14 @@ final class ClipProject {
     /// l'arithmetique rationnelle et ne pas trainer un Double a virgule.
     var playheadCentiseconds: Int = -1
 
+    /// Empreinte de l'habillage tel que la dernière pose de préréglage l'a
+    /// laissé. Vide tant qu'aucun préréglage n'a été posé.
+    ///
+    /// Elle sert à distinguer « l'habillage courant vient d'un préréglage » de
+    /// « l'utilisateur l'a retouché depuis » — la seule question qui décide si
+    /// le filet de retour doit être renouvelé.
+    var overlaySignatureAfterPreset: String = ""
+
     // Paramètres de sélection / export.
     /// Durée FINALE (après ralentissement), en centièmes de seconde. 130 = 1,30 s.
     var finalDurationCentiseconds: Int = 130

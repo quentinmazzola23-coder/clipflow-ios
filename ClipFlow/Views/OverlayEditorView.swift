@@ -647,9 +647,9 @@ struct OverlayEditorView: View {
     }
 
     private func remove(_ layer: OverlayLayer) {
-        if let filename = layer.imageFilename {
-            OverlayStore.deleteImage(filename: filename)
-        }
+        // Le fichier est laissé au ramasse-miettes : un préréglage peut en
+        // détenir une copie, et la règle « seul le balayage efface » évite
+        // d'avoir à s'en assurer à chaque point de suppression.
         modelContext.delete(layer)
         try? modelContext.save()
         selectedLayer = nil

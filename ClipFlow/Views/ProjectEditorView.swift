@@ -210,6 +210,19 @@ struct ProjectEditorView: View {
         }
     }
 
+    /// Le clip en cours d'édition existe-t-il encore, et est-il encore
+    /// visible ? La Relecture peut l'avoir mis en sursis pendant qu'on était
+    /// dessus.
+    private func dropEditingIfGone() {
+        guard let id = editingPassageID else { return }
+        let passage = modelContext.model(for: id) as? Passage
+        if passage == nil || passage?.isPendingDeletion == true {
+            editingPassageID = nil
+            selectionRange = nil
+            selectionRushIndex = nil
+        }
+    }
+
     private var overlays: [TimelineOverlay] {
         var result: [TimelineOverlay] = []
         for passage in project.orderedPassages {
@@ -285,13 +298,23 @@ struct ProjectEditorView: View {
                 }
                 controlBar(isLandscape: isLandscape)
             }
-            // BANDEAU D'ANNULATION, posé en surimpression au-dessus de la
-            // barre de commandes : à portée de pouce, sans jamais pousser la
-            // mise en page — un bandeau qui décale l'écran ferait rater le
-            // geste suivant.
-            .safeAreaInset(edge: .bottom, spacing: 0) {
+            // BANDEAU D'ANNULATION posé SUR la barre de commandes, jamais
+            // au-dessus d'elle dans le flux.
+            //
+            // `safeAreaInset` avait l'air plus propre, mais il RÉDUIT la
+            // hauteur disponible : la barre remontait d'une quarantaine de
+            // points à l'apparition du bandeau. Or le cas visé est la rafale —
+            // on écarte quatre rushes de suite au même endroit — et la
+            // deuxième frappe serait tombée sur le bouton voisin. Un filet qui
+            // provoque la faute qu'il doit rattraper ne vaut rien.
+            //
+            // En surimpression, la mise en page ne bouge pas d'un point ; le
+            // bandeau masque brièvement la barre, ce qui est sans conséquence :
+            // il disparaît en cinq secondes et son seul geste est « Annuler ».
+            .overlay(alignment: .bottom) {
                 if let pending = undo.pending {
                     UndoBannerView(pending: pending, count: undo.count) { undo.undo() }
+                        .padding(.bottom, 6)
                 }
             }
             .animation(.snappy(duration: 0.22), value: undo.pending?.id)
@@ -338,7 +361,7 @@ struct ProjectEditorView: View {
         .onChange(of: showMontage) { _, presented in if presented { playback.pause() } }
         .onChange(of: showPicker) { _, presented in if presented { playback.pause() } }
         .onChange(of: showCustomDuration) { _, presented in if presented { playback.pause() } }
-        .sheet(isPresented: $showReview) {
+        .sheet(isPresented: $showReview, onDismiss: dropEditingIfGone) {
             NavigationStack { ReviewView(project: project) }
         }
         .sheet(isPresented: $showGrid) {
@@ -459,7 +482,7 @@ struct ProjectEditorView: View {
     private var playerArea: some View {
         ZStack {
             PlayerLayerView(player: playback.player)
-            if project.rushes.isEmpty && importer.progress == nil {
+            if project.visibleRushes.isEmpty && importer.progress == nil {
                 // L'illustration centrale EST un bouton d'import (même picker
                 // que le + de la barre).
                 Button {
@@ -582,7 +605,7 @@ struct ProjectEditorView: View {
         Button { goToNextUntreatedRush() } label: { Image(systemName: "arrow.right.to.line") }
             .buttonStyle(GlassIconButtonStyle(diameter: 40))
             .accessibilityLabel("Prochain rush non traité")
-            .disabled(project.rushes.isEmpty)
+            .disabled(project.visibleRushes.isEmpty)
             .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
 
         // Image par image sur la sélection.
@@ -708,7 +731,7 @@ struct ProjectEditorView: View {
             } label: {
                 Image(systemName: "square.grid.3x3")
             }
-            .disabled(project.rushes.isEmpty)
+            .disabled(project.visibleRushes.isEmpty)
         }
         ToolbarItem(placement: .topBarTrailing) {
             // ÉTAPE SUIVANTE du flux : dérushage → montage sur la musique.
@@ -778,7 +801,7 @@ struct ProjectEditorView: View {
                 // laisser à plat noyait les actions du jour sous quatre
                 // interrupteurs.
                 Menu {
-                    Toggle("Toucher = centre de la sélection", isOn: Binding(
+                    Toggle("Toucher = centre du clip", isOn: Binding(
                         get: { project.touchAnchorIsCenter },
                         set: { newValue in
                             project.touchAnchorIsCenter = newValue
@@ -1240,8 +1263,6 @@ struct ProjectEditorView: View {
         let rush = project.orderedRushes[index]
 
         let passage = Passage()
-        // Ceinture : aucun chemin ne doit « mettre à jour » un clip condamné.
-        if passage.isPendingDeletion { undo.undo() }
         passage.validationIndex = (project.passages.map(\.validationIndex).max() ?? -1) + 1
         passage.setStart(range.start)
         passage.sourceDurationValue = range.duration.value
@@ -1339,7 +1360,7 @@ struct ProjectEditorView: View {
                 errorMessage = "Plage non mise en cache — rush conservé pour garantir l'export du clip."
                 return
             }
-            let allCached = rush.visiblePassages.allSatisfy { p in
+            let allCached = rush.passages.allSatisfy { p in
                 guard let path = p.cachedRangeRelativePath else { return false }
                 return FileManager.default.fileExists(
                     atPath: StorageManager.url(forCachedRangeRelativePath: path).path
@@ -1411,6 +1432,15 @@ struct ProjectEditorView: View {
             rush.isPendingDeletion = false
             try? modelContext.save()
             rebuildSegments()
+            // La tête de lecture est un temps GLOBAL : réinsérer un rush
+            // décale tous les offsets en aval, donc `playhead` désigne
+            // désormais d'autres images. On la ramène sur le rush qu'elle
+            // regardait.
+            let aimedPlayhead = currentRushIndex.flatMap { index -> (Rush, Double)? in
+                let visible = project.orderedRushes
+                guard index < visible.count else { return nil }
+                return (visible[index], playhead - segmentStart(rushIndex: index))
+            }
             if let aimedRush,
                let moved = project.orderedRushes.firstIndex(where: { $0 === aimedRush }) {
                 selectionRushIndex = moved
@@ -1420,6 +1450,12 @@ struct ProjectEditorView: View {
                 selectionRushIndex = nil
                 selectionRange = nil
                 editingPassageID = nil
+            }
+            if let (watched, offset) = aimedPlayhead,
+               let index = project.orderedRushes.firstIndex(where: { $0 === watched }) {
+                playhead = segmentStart(rushIndex: index) + offset
+                seekCounter += 1
+                seek = ProgrammaticSeek(token: seekCounter, time: playhead)
             }
             playback.load(rush: currentRush)
         }

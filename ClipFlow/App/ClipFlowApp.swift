@@ -42,6 +42,10 @@ struct ClipFlowApp: App {
         // aucun PNG (voir OverlayPresetStore.apply) — c'est le prix à payer
         // pour ne jamais effacer la seule copie d'une image.
         let pruneContext = ModelContext(container)
+        // Filets dont le projet a été supprimé par une version antérieure :
+        // ils sont invisibles et leurs entrées protégeraient leurs PNG du
+        // balayage. À purger AVANT lui, jamais après.
+        OverlayPresetStore.purgeOrphanBackups(context: pruneContext)
         OverlayStore.pruneUnreferencedImages(context: pruneContext)
 
         // CATÉGORIE AUDIO .playback, ET C'EST IMPORTANT. Sans elle, la

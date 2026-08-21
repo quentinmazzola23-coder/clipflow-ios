@@ -125,6 +125,10 @@ struct ReviewView: View {
         playAllTask = Task {
             for passage in passages {
                 guard !Task.isCancelled else { break }
+                // La liste a été capturée au lancement : un clip mis en sursis
+                // entre-temps ne doit plus être joué ni surligné, et sera un
+                // modèle détruit dès que son sursis sera consommé.
+                guard !passage.isPendingDeletion, passage.modelContext != nil else { continue }
                 guard let rush = passage.rush else { continue }
                 currentPassageID = passage.persistentModelID
                 playback.load(rush: rush)

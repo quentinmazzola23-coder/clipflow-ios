@@ -286,6 +286,15 @@ struct ProjectListView: View {
         // morceau appartient à la banque et sert souvent à plusieurs projets.
         // Il se supprime depuis l'écran Bibliothèque, qui prévient alors des
         // projets concernés.
+        // Le FILET de ce projet part avec lui. Sans cela, `.nullify` le laisse
+        // orphelin : aucun écran ne l'affiche, aucun code ne le ramasse, et ses
+        // entrées protègent ses PNG du balayage. Invisible et indestructible.
+        // AVANT le delete : après, la comparaison porterait sur un modèle
+        // invalidé.
+        for preset in OverlayPresetStore.fetchAll(context: modelContext)
+        where preset.isAutoBackup && preset.backupProject === project {
+            modelContext.delete(preset)
+        }
         modelContext.delete(project)
         try? modelContext.save()
         ThumbnailCache.shared.clearMemory()

@@ -79,7 +79,10 @@ final class ImportController {
     private func integrate(_ info: ImportedRushInfo, into project: ClipProject, context: ModelContext) {
         // Doublon : identifiant PhotoKit, ou repli taille+durée+dimensions
         // quand le picker n'a pas fourni d'identifiant.
-        let isDuplicate = project.rushes.contains { existing in
+        // Un rush EN SURSIS ne compte pas comme doublon : le réimporter juste
+        // après l'avoir écarté aurait été refusé en silence, puis le sursis
+        // l'aurait effacé — l'import aurait fait disparaître le rush.
+        let isDuplicate = project.visibleRushes.contains { existing in
             if let id = info.assetIdentifier, let existingID = existing.assetIdentifier {
                 return id == existingID
             }

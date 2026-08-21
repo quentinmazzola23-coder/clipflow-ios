@@ -46,7 +46,7 @@ enum MediaAvailabilityService {
         }
         // Source libérée : plus de lecture possible, mais les passages restent
         // exportables si leurs plages sont cachées.
-        let allCached = !rush.visiblePassages.isEmpty && rush.visiblePassages.allSatisfy { passage in
+        let allCached = !rush.passages.isEmpty && rush.passages.allSatisfy { passage in
             guard let cached = passage.cachedRangeRelativePath else { return false }
             return FileManager.default.fileExists(
                 atPath: StorageManager.url(forCachedRangeRelativePath: cached).path
@@ -62,12 +62,17 @@ enum MediaAvailabilityService {
     static func releasableSources(in project: ClipProject) -> [(rush: Rush, url: URL, bytes: Int64)] {
         // Un rush EN SURSIS n'est pas libérable : effacer sa source rendrait
         // « Annuler » trompeur — le rush reviendrait vide.
+        //
+        // Les CLIPS, eux, sont comptés en entier, sursis compris : un clip
+        // masqué peut revenir, et sa plage n'est peut-être pas cachée. Un
+        // garde de sécurité doit voir ce qui existe, pas ce qui s'affiche —
+        // c'est la seule règle qui rende « Annuler » honnête.
         project.visibleRushes.compactMap { rush in
             guard let path = rush.localSourceRelativePath else { return nil }
             let url = StorageManager.url(forSourceRelativePath: path)
             guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-            guard !rush.visiblePassages.isEmpty else { return nil }
-            let allCached = rush.visiblePassages.allSatisfy { passage in
+            guard !rush.passages.isEmpty else { return nil }
+            let allCached = rush.passages.allSatisfy { passage in
                 guard let cached = passage.cachedRangeRelativePath else { return false }
                 return FileManager.default.fileExists(
                     atPath: StorageManager.url(forCachedRangeRelativePath: cached).path
