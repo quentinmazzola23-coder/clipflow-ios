@@ -129,21 +129,21 @@ enum OverlayStore {
         guard let files = try? fm.contentsOfDirectory(
             at: overlaysDirectory, includingPropertiesForKeys: nil) else { return 0 }
 
+        // LES DEUX LECTURES DOIVENT RÉUSSIR. Une seule qui échoue et la moitié
+        // des fichiers paraîtrait orpheline : si la lecture des entrées de
+        // préréglage tombe alors que celle des calques rend une base vide, on
+        // effacerait toutes les images de tous les préréglages. Un balayage ne
+        // se fait que sur un inventaire COMPLET.
+        guard let layers = try? context.fetch(FetchDescriptor<OverlayLayer>()),
+              let entries = try? context.fetch(FetchDescriptor<OverlayPresetEntry>())
+        else { return 0 }
+
         var referenced = Set<String>()
-        if let layers = try? context.fetch(FetchDescriptor<OverlayLayer>()) {
-            for layer in layers {
-                if let name = layer.imageFilename { referenced.insert(name) }
-            }
+        for layer in layers {
+            if let name = layer.imageFilename { referenced.insert(name) }
         }
-        if let entries = try? context.fetch(FetchDescriptor<OverlayPresetEntry>()) {
-            for entry in entries {
-                if let name = entry.imageFilename { referenced.insert(name) }
-            }
-        }
-        // Une lecture qui échoue rendrait TOUT orphelin : on ne balaie pas sur
-        // une base qu'on n'a pas pu interroger.
-        guard !referenced.isEmpty || (try? context.fetch(FetchDescriptor<OverlayLayer>()))?.isEmpty == true else {
-            return 0
+        for entry in entries {
+            if let name = entry.imageFilename { referenced.insert(name) }
         }
 
         var removed = 0
