@@ -66,6 +66,23 @@ struct OutputFormatSheet: View {
             }
             .tint(Theme.accent)
 
+            Toggle(isOn: Binding(
+                get: { project.upscaleOnExport },
+                set: { newValue in
+                    project.upscaleOnExport = newValue
+                    try? modelContext.save()
+                }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Suréchantillonner à l'export")
+                        .font(.subheadline)
+                    Text(upscaleHint)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .tint(Theme.accent)
+
             Text("Export toujours en 4K, 60 images par seconde.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -81,7 +98,7 @@ struct OutputFormatSheet: View {
             .tint(Theme.accent)
         }
         .padding(20)
-        .presentationDetents([.height(430)])
+        .presentationDetents([.height(520)])
     }
 
     /// Une vignette par format : la forme se juge à l'œil, pas au libellé.
@@ -112,6 +129,19 @@ struct OutputFormatSheet: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// Ce que le suréchantillonnage changera CONCRÈTEMENT, chiffres à l'appui :
+    /// un facteur annoncé vaut mieux qu'une promesse de qualité.
+    private var upscaleHint: String {
+        let factor = project.outputFormat.upscaleFactor(
+            sourceOriented: firstRushSize, cropToFill: project.cropToFillOutput)
+        guard factor >= MontageUpscaler.minimumUsefulFactor else {
+            return "Sans effet ici : vos rushes couvrent déjà la définition de sortie."
+        }
+        return String(format: "Agrandissement ×%.1f — filtre Lanczos et "
+                      + "incrustations dessinées en 4K. L'export prend environ "
+                      + "deux fois plus de temps.", factor)
     }
 
     /// Taille du premier rush, pour résoudre le mode automatique.

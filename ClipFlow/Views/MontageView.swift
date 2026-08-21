@@ -1162,6 +1162,21 @@ struct MontageView: View {
 
     // MARK: - Export
 
+    /// Taille orientée du rush qui fournit le PREMIER clip placé — celle qui
+    /// décide du cadre en mode automatique et du facteur d'agrandissement.
+    ///
+    /// `clipID` est l'INDEX dans `orderedPassages` : c'est ainsi que les
+    /// candidats sont numérotés à la construction du plan.
+    private var firstPlacedRushSize: CGSize {
+        let fallback = project.orderedRushes.first?.orientedSize ?? .zero
+        guard let first = plan?.placements.first else { return fallback }
+        let passages = project.orderedPassages
+        guard first.clipID >= 0, first.clipID < passages.count,
+              let rush = passages[first.clipID].rush else { return fallback }
+        let size = rush.orientedSize
+        return size.width > 0 && size.height > 0 ? size : fallback
+    }
+
     private func exportMontage() {
         guard let plan, let filename = project.musicFilename else { return }
         stopPreview()
@@ -1173,6 +1188,8 @@ struct MontageView: View {
             overlays: resolvedOverlays,
             outputFormat: project.outputFormat,
             cropToFill: project.cropToFillOutput,
+            upscale: project.upscaleOnExport,
+            sourceOriented: firstPlacedRushSize,
             outputFilename: "Montage — \(project.name).mov",
             albumName: project.albumPerProject ? project.name : nil,
             projectName: project.name

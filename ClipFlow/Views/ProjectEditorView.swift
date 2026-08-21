@@ -807,6 +807,13 @@ struct ProjectEditorView: View {
                             touch()
                         }
                     ))
+                    Toggle("Suréchantillonner à l'export", isOn: Binding(
+                        get: { project.upscaleOnExport },
+                        set: { newValue in
+                            project.upscaleOnExport = newValue
+                            touch()
+                        }
+                    ))
                 }
 
                 Section("Quand les clips sont faits") {

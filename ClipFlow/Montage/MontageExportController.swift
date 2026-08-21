@@ -75,6 +75,8 @@ final class MontageExportController {
                overlays: [ResolvedOverlay] = [],
                outputFormat: MontageOutputFormat = .auto,
                cropToFill: Bool = true,
+               upscale: Bool = true,
+               sourceOriented: CGSize = .zero,
                outputFilename: String,
                albumName: String?,
                projectName: String) {
@@ -86,17 +88,52 @@ final class MontageExportController {
 
         task = Task { [weak self] in
             do {
+                // DEUX PASSES ou une seule ?
+                //
+                // Le suréchantillonnage ne vaut une seconde passe d'encodage
+                // que s'il y a vraiment un agrandissement à faire : sur un
+                // montage 4K qui sort en 4K sans recadrage, le facteur vaut 1
+                // et la passe ne ferait que réencoder, plus lentement, pour un
+                // résultat identique.
+                let factor = outputFormat.upscaleFactor(sourceOriented: sourceOriented,
+                                                        cropToFill: cropToFill)
+                let twoPass = upscale && sourceOriented != .zero
+                    && factor >= MontageUpscaler.minimumUsefulFactor
+
                 let montage = try await MontageComposer.build(
                     plan: plan, sources: sources, musicURL: musicURL,
-                    overlays: overlays,
+                    // Les incrustations sont dessinées par la SECONDE passe,
+                    // à la définition finale : les laisser ici les ferait
+                    // agrandir avec l'image, donc flouter.
+                    overlays: twoPass ? [] : overlays,
                     outputFormat: outputFormat, cropToFill: cropToFill,
+                    renderAtNativeSize: twoPass,
                     forExport: true
                 )
                 try Task.checkCancellation()
-                let fileURL = try await MontageComposer.export(
+                // La première passe occupe la première moitié de la barre
+                // quand il y en a deux : sans cela la progression atteindrait
+                // 100 % à mi-chemin et paraîtrait bloquée.
+                let firstPassShare = twoPass ? 0.5 : 1.0
+                var fileURL = try await MontageComposer.export(
                     montage, outputFilename: outputFilename
                 ) { value in
-                    Task { @MainActor in self?.progress = value }
+                    Task { @MainActor in self?.progress = value * firstPassShare }
+                }
+                try Task.checkCancellation()
+
+                if twoPass {
+                    let target = outputFormat.renderSize(sourceOriented: sourceOriented)
+                    let upscaled = try await MontageUpscaler.upscale(
+                        source: fileURL, to: target, overlays: overlays,
+                        frameRate: 60
+                    ) { value in
+                        Task { @MainActor in self?.progress = 0.5 + value * 0.5 }
+                    }
+                    // Le fichier natif a joué son rôle : il ne sert plus qu'à
+                    // occuper de la place.
+                    try? FileManager.default.removeItem(at: fileURL)
+                    fileURL = upscaled
                 }
                 try Task.checkCancellation()
                 _ = try await PhotoExportService.saveToPhotos(fileURL: fileURL,

@@ -66,6 +66,54 @@ enum MontageOutputFormat: String, Codable, CaseIterable, Sendable {
         return sourceOriented.height > sourceOriented.width ? .portrait : .landscape
     }
 
+    /// Taille de rendu qui N'AGRANDIT RIEN : le plus grand cadre du format
+    /// voulu qui tienne dans la source.
+    ///
+    /// C'est la taille de la PREMIÈRE passe quand le suréchantillonnage est
+    /// actif. Composer directement en 4K laisserait AVFoundation agrandir avec
+    /// son filtre bilinéaire, et la seconde passe n'aurait plus rien à
+    /// rattraper — on ne récupère pas du détail perdu, on ne fait que lisser
+    /// un flou déjà là.
+    func nativeRenderSize(sourceOriented: CGSize, cropToFill: Bool) -> CGSize {
+        let target = renderSize(sourceOriented: sourceOriented)
+        guard sourceOriented.width > 0, sourceOriented.height > 0 else { return target }
+        let targetAspect = target.width / target.height
+        let sourceAspect = sourceOriented.width / sourceOriented.height
+
+        let size: CGSize
+        if cropToFill {
+            // Recadrage : le plus grand rectangle du bon rapport DANS la source.
+            size = sourceAspect > targetAspect
+                ? CGSize(width: sourceOriented.height * targetAspect,
+                         height: sourceOriented.height)
+                : CGSize(width: sourceOriented.width,
+                         height: sourceOriented.width / targetAspect)
+        } else {
+            // Ceinturage : le plus petit cadre du bon rapport AUTOUR de la source.
+            size = sourceAspect > targetAspect
+                ? CGSize(width: sourceOriented.width,
+                         height: sourceOriented.width / targetAspect)
+                : CGSize(width: sourceOriented.height * targetAspect,
+                         height: sourceOriented.height)
+        }
+        // Jamais plus grand que la cible : une source 8K n'a pas à produire un
+        // fichier intermédiaire plus lourd que le fichier final.
+        let capped = CGSize(width: min(size.width, target.width),
+                            height: min(size.height, target.height))
+        // Dimensions PAIRES : les encodeurs H.264 et HEVC refusent l'impair, et
+        // l'échec arrive tard, à l'écriture.
+        return CGSize(width: max(2, (capped.width / 2).rounded() * 2),
+                      height: max(2, (capped.height / 2).rounded() * 2))
+    }
+
+    /// Facteur d'agrandissement qu'imposera la seconde passe.
+    func upscaleFactor(sourceOriented: CGSize, cropToFill: Bool) -> Double {
+        let native = nativeRenderSize(sourceOriented: sourceOriented, cropToFill: cropToFill)
+        let target = renderSize(sourceOriented: sourceOriented)
+        guard native.height > 0 else { return 1 }
+        return Double(target.height / native.height)
+    }
+
     /// Rapport largeur/hauteur du rendu.
     func aspect(sourceOriented: CGSize) -> Double {
         let size = renderSize(sourceOriented: sourceOriented)

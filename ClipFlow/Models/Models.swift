@@ -104,6 +104,16 @@ final class ClipProject {
     /// menu, c'est suffisant.
     var didAskOutputFormat: Bool = false
 
+    /// Sureechantillonner a l'export quand le recadrage impose un
+    /// agrandissement.
+    ///
+    /// Recadrer une source 1080p en 9:16 donne 608x1080 : la porter en 4K
+    /// vertical, c'est l'agrandir trois fois et demie. L'agrandissement
+    /// interne d'AVFoundation est bilineaire, d'ou l'aspect mou. La seconde
+    /// passe agrandit au filtre Lanczos et redessine les incrustations a la
+    /// definition finale — au prix d'un second encodage complet.
+    var upscaleOnExport: Bool = true
+
     // Paramètres de sélection / export.
     /// Durée FINALE (après ralentissement), en centièmes de seconde. 130 = 1,30 s.
     var finalDurationCentiseconds: Int = 130

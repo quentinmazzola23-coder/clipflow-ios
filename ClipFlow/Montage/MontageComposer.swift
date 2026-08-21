@@ -63,6 +63,7 @@ enum MontageComposer {
                       overlays: [ResolvedOverlay] = [],
                       outputFormat: MontageOutputFormat = .auto,
                       cropToFill: Bool = true,
+                      renderAtNativeSize: Bool = false,
                       forExport: Bool = false) async throws -> MontageComposition {
         guard !plan.placements.isEmpty else { throw MontageComposerError.emptyPlan }
 
@@ -125,7 +126,14 @@ enum MontageComposer {
             let oriented = info.size.applying(info.transform)
             let orientedSize = CGSize(width: abs(oriented.width), height: abs(oriented.height))
             if renderSize == .zero {
-                renderSize = outputFormat.renderSize(sourceOriented: orientedSize)
+                // Taille NATIVE quand une seconde passe agrandira : composer
+                // directement en 4K laisserait AVFoundation agrandir au filtre
+                // bilinéaire, et le suréchantillonnage n'aurait plus qu'un flou
+                // à lisser.
+                renderSize = renderAtNativeSize
+                    ? outputFormat.nativeRenderSize(sourceOriented: orientedSize,
+                                                    cropToFill: cropToFill)
+                    : outputFormat.renderSize(sourceOriented: orientedSize)
             }
 
             // Trou entre le curseur et le créneau (créneau dégénéré filtré en
