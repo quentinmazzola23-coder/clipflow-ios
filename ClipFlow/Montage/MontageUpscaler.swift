@@ -87,11 +87,20 @@ enum MontageUpscaler {
         }
         reader.add(videoOutput)
 
+        // LECTEUR AUDIO SÉPARÉ, et c'est délibéré. Un même AVAssetReader dont on
+        // vide entièrement une sortie avant de toucher à l'autre se bloque :
+        // il ne décode pas plus loin tant que toutes ses sorties n'avancent
+        // pas. Deux lecteurs indépendants lisent le même fichier sans se gêner.
+        var audioReader: AVAssetReader?
         var audioOutput: AVAssetReaderTrackOutput?
-        if let audioTrack {
+        if let audioTrack, let second = try? AVAssetReader(asset: asset) {
             // Passthrough : la musique n'a aucune raison d'être réencodée.
             let out = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: nil)
-            if reader.canAdd(out) { reader.add(out); audioOutput = out }
+            if second.canAdd(out) {
+                second.add(out)
+                audioReader = second
+                audioOutput = out
+            }
         }
 
         // MARK: Écriture
@@ -134,6 +143,10 @@ enum MontageUpscaler {
             throw MontageUpscalerError.readerFailed(
                 reader.error?.localizedDescription ?? "démarrage refusé")
         }
+        if let audioReader, !audioReader.startReading() {
+            throw MontageUpscalerError.readerFailed(
+                audioReader.error?.localizedDescription ?? "démarrage audio refusé")
+        }
         guard writer.startWriting() else {
             throw MontageUpscalerError.writerFailed(
                 writer.error?.localizedDescription ?? "démarrage refusé")
@@ -145,67 +158,118 @@ enum MontageUpscaler {
         let total = max(duration.seconds, 0.001)
 
         // MARK: Passe vidéo
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            let queue = DispatchQueue(label: "clipflow.upscale.video")
-            videoInput.requestMediaDataWhenReady(on: queue) {
-                while videoInput.isReadyForMoreMediaData {
-                    guard !Task.isCancelled else {
-                        reader.cancelReading(); videoInput.markAsFinished()
-                        cont.resume(throwing: CancellationError()); return
-                    }
-                    guard let sample = videoOutput.copyNextSampleBuffer(),
-                          let buffer = CMSampleBufferGetImageBuffer(sample) else {
-                        videoInput.markAsFinished()
-                        cont.resume(); return
-                    }
-                    let time = CMSampleBufferGetPresentationTimeStamp(sample)
+        //
+        // TROIS PIÈGES, tous corrigés ici après relecture :
+        //
+        // 1. Le bloc de `requestMediaDataWhenReady` est rappelé plusieurs fois
+        //    par AVFoundation. Reprendre la continuation deux fois fait planter
+        //    Swift, sans rattrapage possible — d'où le verrou et le drapeau.
+        // 2. `Task.isCancelled` lu DANS ce bloc vaut toujours faux : le bloc
+        //    court sur une file GCD, hors du contexte de la tâche Swift.
+        //    L'annulation passe donc par un drapeau posé de l'extérieur.
+        // 3. `append` rend un booléen. L'ignorer laissait la boucle tourner
+        //    contre un écrivain mort et produire un fichier tronqué présenté
+        //    comme réussi.
+        let state = UpscaleState()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                let queue = DispatchQueue(label: "clipflow.upscale.video")
+                videoInput.requestMediaDataWhenReady(on: queue) {
+                    while videoInput.isReadyForMoreMediaData {
+                        if state.isCancelled {
+                            reader.cancelReading()
+                            videoInput.markAsFinished()
+                            state.finish(cont, throwing: CancellationError())
+                            return
+                        }
+                        guard let sample = videoOutput.copyNextSampleBuffer(),
+                              let buffer = CMSampleBufferGetImageBuffer(sample) else {
+                            videoInput.markAsFinished()
+                            // Fin de piste OU échec de lecture : seul le statut
+                            // du lecteur les distingue. Sans ce test, une
+                            // lecture interrompue rendait un fichier partiel
+                            // sans que rien ne le signale.
+                            if reader.status == .failed {
+                                state.finish(cont, throwing: MontageUpscalerError.readerFailed(
+                                    reader.error?.localizedDescription ?? "lecture interrompue"))
+                            } else {
+                                state.finish(cont, throwing: nil)
+                            }
+                            return
+                        }
+                        let time = CMSampleBufferGetPresentationTimeStamp(sample)
 
-                    var image = CIImage(cvPixelBuffer: buffer)
-                    // LANCZOS : le filtre d'agrandissement, et la seule raison
-                    // d'être de cette passe.
-                    let scale = targetSize.height / image.extent.height
-                    if abs(scale - 1) > 0.001,
-                       let filter = CIFilter(name: "CILanczosScaleTransform") {
-                        filter.setValue(image, forKey: kCIInputImageKey)
-                        filter.setValue(scale, forKey: kCIInputScaleKey)
-                        filter.setValue(targetSize.width / (image.extent.width * scale),
-                                        forKey: kCIInputAspectRatioKey)
-                        if let scaled = filter.outputImage { image = scaled }
-                    }
+                        var image = CIImage(cvPixelBuffer: buffer)
+                        // LANCZOS : le filtre d'agrandissement, et la seule
+                        // raison d'être de cette passe.
+                        let source = image.extent
+                        if source.width > 0, source.height > 0 {
+                            let scale = targetSize.height / source.height
+                            if abs(scale - 1) > 0.001,
+                               let filter = CIFilter(name: "CILanczosScaleTransform") {
+                                filter.setValue(image, forKey: kCIInputImageKey)
+                                filter.setValue(scale, forKey: kCIInputScaleKey)
+                                filter.setValue(targetSize.width / (source.width * scale),
+                                                forKey: kCIInputAspectRatioKey)
+                                if let scaled = filter.outputImage { image = scaled }
+                            }
+                        }
+                        // L'ORIGINE EST RAMENÉE À ZÉRO. `render(_:to:)` fait
+                        // correspondre l'origine de l'extent au coin du tampon :
+                        // un extent décalé d'une fraction de pixel après mise à
+                        // l'échelle décalerait toute l'image.
+                        if image.extent.origin != .zero {
+                            image = image.transformed(by: CGAffineTransform(
+                                translationX: -image.extent.origin.x,
+                                y: -image.extent.origin.y))
+                        }
 
-                    if let overlayImage = overlayCache.image(at: time.seconds) {
-                        image = overlayImage.composited(over: image)
-                    }
+                        if let overlayImage = overlayCache.image(at: time.seconds) {
+                            image = overlayImage.composited(over: image)
+                        }
 
-                    guard let pool = adaptor.pixelBufferPool else {
-                        reader.cancelReading(); videoInput.markAsFinished()
-                        cont.resume(throwing: MontageUpscalerError.writerFailed(
-                            "réserve de tampons indisponible")); return
+                        guard let pool = adaptor.pixelBufferPool else {
+                            reader.cancelReading(); videoInput.markAsFinished()
+                            state.finish(cont, throwing: MontageUpscalerError.writerFailed(
+                                "réserve de tampons indisponible"))
+                            return
+                        }
+                        var out: CVPixelBuffer?
+                        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out)
+                        guard let outBuffer = out else {
+                            reader.cancelReading(); videoInput.markAsFinished()
+                            state.finish(cont, throwing: MontageUpscalerError.writerFailed(
+                                "tampon de sortie indisponible"))
+                            return
+                        }
+                        context.render(image, to: outBuffer)
+                        guard adaptor.append(outBuffer, withPresentationTime: time) else {
+                            reader.cancelReading(); videoInput.markAsFinished()
+                            state.finish(cont, throwing: MontageUpscalerError.writerFailed(
+                                writer.error?.localizedDescription ?? "image refusée par l'écrivain"))
+                            return
+                        }
+                        onProgress(min(0.99, time.seconds / total))
                     }
-                    var out: CVPixelBuffer?
-                    CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out)
-                    guard let outBuffer = out else {
-                        reader.cancelReading(); videoInput.markAsFinished()
-                        cont.resume(throwing: MontageUpscalerError.writerFailed(
-                            "tampon de sortie indisponible")); return
-                    }
-                    context.render(image, to: outBuffer)
-                    adaptor.append(outBuffer, withPresentationTime: time)
-                    onProgress(min(0.99, time.seconds / total))
                 }
             }
+        } onCancel: {
+            state.cancel()
         }
 
         // MARK: Passe audio
         if let audioInput, let audioOutput {
+            let audioState = UpscaleState()
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 let queue = DispatchQueue(label: "clipflow.upscale.audio")
                 audioInput.requestMediaDataWhenReady(on: queue) {
                     while audioInput.isReadyForMoreMediaData {
-                        guard let sample = audioOutput.copyNextSampleBuffer() else {
-                            audioInput.markAsFinished(); cont.resume(); return
+                        guard let sample = audioOutput.copyNextSampleBuffer(),
+                              audioInput.append(sample) else {
+                            audioInput.markAsFinished()
+                            audioState.finish(cont)
+                            return
                         }
-                        audioInput.append(sample)
                     }
                 }
             }
@@ -226,6 +290,46 @@ enum MontageUpscaler {
         let pixels = Double(size.width * size.height)
         let perPixelPerFrame = 0.09   // HEVC, contenu d'action
         return Int(pixels * Double(fps) * perPixelPerFrame)
+    }
+}
+
+/// Reprise de continuation à UN SEUL COUP, et annulation lisible depuis une
+/// file GCD.
+///
+/// `requestMediaDataWhenReady` rappelle son bloc autant de fois qu'il le faut,
+/// et rien n'empêche deux chemins d'y conclure. Reprendre une
+/// `CheckedContinuation` deux fois fait planter le programme, sans rattrapage
+/// possible : le drapeau et le verrou sont la seule protection.
+private final class UpscaleState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resumed = false
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock(); defer { lock.unlock() }
+        cancelled = true
+    }
+
+    /// Reprend la continuation si personne ne l'a déjà fait.
+    func finish(_ cont: CheckedContinuation<Void, Error>, throwing error: Error?) {
+        lock.lock()
+        guard !resumed else { lock.unlock(); return }
+        resumed = true
+        lock.unlock()
+        if let error { cont.resume(throwing: error) } else { cont.resume() }
+    }
+
+    func finish(_ cont: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        guard !resumed else { lock.unlock(); return }
+        resumed = true
+        lock.unlock()
+        cont.resume()
     }
 }
 
@@ -275,6 +379,15 @@ private final class OverlayImageCache {
         format.scale = 1
         format.opaque = false
         let uiImage = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            // RETOURNEMENT INDISPENSABLE. `OverlayRenderer.frame` calcule ses
+            // positions pour Core Animation, dont l'origine est EN BAS à
+            // gauche (d'où le `1 - centerY`). Le contexte d'UIGraphics a la
+            // sienne en HAUT à gauche : sans ce retournement, une incrustation
+            // posée en haut du cadre serait dessinée en bas dans les montages
+            // suréchantillonnés — et seulement dans ceux-là, ce qui aurait été
+            // long à comprendre.
+            ctx.cgContext.translateBy(x: 0, y: size.height)
+            ctx.cgContext.scaleBy(x: 1, y: -1)
             parent.render(in: ctx.cgContext)
         }
         guard let cgImage = uiImage.cgImage else { return nil }
