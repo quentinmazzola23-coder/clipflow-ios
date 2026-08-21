@@ -1,2 +1,8 @@
 PipelineHarness/Sources/ClipFlowPipeline/*.swift
 .build/
+
+# IPA construite par la CI : recuperee par le skill install-clipflow
+# (fetch_ipa.sh) et gardee identique a la copie de Downloads. La suivre
+# ajoutait 2 Mo de binaire a chaque build, et la valider declenchait un
+# nouveau run — donc une nouvelle release, donc une copie perimee.
+ipa/
