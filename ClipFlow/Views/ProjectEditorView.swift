@@ -428,6 +428,7 @@ struct ProjectEditorView: View {
             }
             // Repères déjà calculés : rétablis sans rien réanalyser.
             loadCachedPeaks()
+            resolveLeftoverDeletions()
             restorePlayhead()
             markLegacyProjectAsOpened()
             openPickerOnFirstUse()
@@ -961,6 +962,32 @@ struct ProjectEditorView: View {
     // dépasser ce que le vérificateur de types de Swift démêle en temps
     // raisonnable, et il refusait alors de compiler sans rien dire du fond.
     // Les sortir les rend aussi lisibles un par un.
+
+    /// RÉTABLIT ce qu'une fin brutale a laissé en sursis.
+    ///
+    /// `isPendingDeletion` est PERSISTÉ : si l'app est tuée pendant les cinq
+    /// secondes de grâce, le rush ou le clip reste masqué — invisible dans
+    /// l'app, jamais effacé du disque, impossible à récupérer. C'est le revers
+    /// exact du mécanisme d'annulation, et il faut le refermer à l'ouverture.
+    ///
+    /// On rétablit plutôt qu'on ne consomme : perdre l'intention de supprimer
+    /// coûte un geste, perdre le rush coûte le travail. Le déséquilibre entre
+    /// les deux erreurs tranche la question.
+    private func resolveLeftoverDeletions() {
+        var restored = false
+        for rush in project.rushes where rush.isPendingDeletion {
+            rush.isPendingDeletion = false
+            restored = true
+        }
+        for passage in project.passages where passage.isPendingDeletion {
+            passage.isPendingDeletion = false
+            restored = true
+        }
+        if restored {
+            try? modelContext.save()
+            rebuildSegments()
+        }
+    }
 
     /// Rouvre le projet LÀ OÙ on s'était arrêté.
     ///
