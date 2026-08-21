@@ -20,10 +20,14 @@ struct ReviewView: View {
     @State private var blockedMessage: String?
     @State private var playAllTask: Task<Void, Never>?
     @State private var currentPassageID: PersistentIdentifier?
+    /// MÊME filet que l'écran de dérushage. Supprimer un clip d'ici était la
+    /// suppression la PLUS coûteuse de l'app — elle emporte le travail de
+    /// sélection ET la plage cachée — et c'était la seule sans retour possible.
+    @State private var undo = DeletionUndo()
 
     /// Ordre de relecture = ordre de capture (rush, puis position dans le rush).
     private var reviewOrder: [Passage] {
-        project.passages.sorted { a, b in
+        project.visiblePassages.sorted { a, b in
             let ra = a.rush?.orderIndex ?? 0
             let rb = b.rush?.orderIndex ?? 0
             if ra != rb { return ra < rb }
@@ -89,7 +93,19 @@ struct ReviewView: View {
                 }
             }
         }
-        .onDisappear { stopPlayAll() }
+        // Le bandeau ne pousse pas la mise en page : il s'insere dans la zone
+        // sure, sous la liste.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let pending = undo.pending {
+                UndoBannerView(pending: pending, count: undo.count) { undo.undo() }
+            }
+        }
+        .animation(.snappy(duration: 0.22), value: undo.pending?.id)
+        .onDisappear {
+            stopPlayAll()
+            // Un sursis ne survit pas a l'ecran qui l'affichait.
+            undo.consumeNow()
+        }
     }
 
     // MARK: - Lecture
@@ -143,13 +159,22 @@ struct ReviewView: View {
             return
         }
         if currentPassageID == passage.persistentModelID { stopPlayAll() }
-        if let cached = passage.cachedRangeRelativePath {
-            try? FileManager.default.removeItem(
-                at: StorageManager.url(forCachedRangeRelativePath: cached)
-            )
-        }
-        modelContext.delete(passage)
+        // MISE EN SURSIS, comme au dérushage : le fichier de plage reste en
+        // place le temps qu'un « Annuler » puisse encore le rappeler.
+        passage.isPendingDeletion = true
         try? modelContext.save()
+        undo.schedule(label: "Clip supprimé") {
+            if let cached = passage.cachedRangeRelativePath {
+                try? FileManager.default.removeItem(
+                    at: StorageManager.url(forCachedRangeRelativePath: cached)
+                )
+            }
+            modelContext.delete(passage)
+            try? modelContext.save()
+        } restore: {
+            passage.isPendingDeletion = false
+            try? modelContext.save()
+        }
     }
 }
 

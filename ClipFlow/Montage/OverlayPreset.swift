@@ -37,6 +37,17 @@ final class OverlayPreset {
     /// revenir en arrière est un simple tap sur un préréglage de plus.
     var isAutoBackup: Bool = false
 
+    /// Projet auquel le filet appartient. `nil` pour un vrai préréglage, qui
+    /// est réutilisable partout.
+    ///
+    /// Sans ce rattachement, un seul filet existait pour l'app entière :
+    /// appliquer un préréglage dans le projet B effaçait celui du projet A — et
+    /// ses fichiers image avec. L'utilisateur revenait dans A, tapait « Avant
+    /// le préréglage » en toute confiance, et récupérait les incrustations de B
+    /// tandis que les siennes avaient disparu pour de bon.
+    @Relationship(deleteRule: .nullify)
+    var backupProject: ClipProject?
+
     @Relationship(deleteRule: .cascade, inverse: \OverlayPresetEntry.preset)
     var entries: [OverlayPresetEntry] = []
 

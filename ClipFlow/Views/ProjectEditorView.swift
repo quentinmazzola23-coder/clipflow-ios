@@ -16,6 +16,7 @@ import AudioToolbox
 struct ProjectEditorView: View {
     @Bindable var project: ClipProject
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.scenePhase) private var scenePhase
 
     // Importation — service partagé (survit à la navigation).
     @State private var pickerItems: [PhotosPickerItem] = []
@@ -288,10 +289,9 @@ struct ProjectEditorView: View {
             // barre de commandes : à portée de pouce, sans jamais pousser la
             // mise en page — un bandeau qui décale l'écran ferait rater le
             // geste suivant.
-            .overlay(alignment: .bottom) {
+            .safeAreaInset(edge: .bottom, spacing: 0) {
                 if let pending = undo.pending {
-                    UndoBannerView(pending: pending) { undo.undo() }
-                        .padding(.bottom, isLandscape ? 8 : 74)
+                    UndoBannerView(pending: pending, count: undo.count) { undo.undo() }
                 }
             }
             .animation(.snappy(duration: 0.22), value: undo.pending?.id)
@@ -433,6 +433,13 @@ struct ProjectEditorView: View {
             markLegacyProjectAsOpened()
             openPickerOnFirstUse()
         }
+        // Le bouton principal ne declenche PAS onDisappear : sans ce relais,
+        // quitter l'app par le bas perdait la position de lecture, alors que
+        // c'est le geste le plus courant pour interrompre une session.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase != .active else { return }
+            savePlayhead()
+        }
         .onDisappear {
             // Retour à la liste des projets : la lecture s'arrête toujours,
             // et une analyse en cours n'a plus de destinataire.
@@ -443,10 +450,7 @@ struct ProjectEditorView: View {
             // bandeau, plus rien ne pourrait l'annuler et l'objet resterait
             // masqué sans jamais être effacé.
             undo.consumeNow()
-            // La position est notée POUR CE PROJET, afin de rouvrir là où on
-            // s'est arrêté plutôt qu'au début.
-            project.playheadCentiseconds = Int((playhead * 100).rounded())
-            try? modelContext.save()
+            savePlayhead()
         }
     }
 
@@ -502,7 +506,7 @@ struct ProjectEditorView: View {
     private var statusBar: some View {
         HStack(spacing: 10) {
             if let rush = currentRush, let index = currentRushIndex {
-                Text("Rush \(index + 1)/\(project.rushes.count)")
+                Text("Rush \(index + 1)/\(project.visibleRushes.count)")
                     .font(.footnote.bold().monospacedDigit())
                 Text(rushDisplayName(rush, index: index))
                     .font(.footnote)
@@ -531,10 +535,10 @@ struct ProjectEditorView: View {
             }
             Spacer()
             // Progression globale du triage.
-            let treated = project.orderedRushes.filter { !$0.passages.isEmpty }.count
-            Text("\(treated)/\(project.rushes.count) rushes traités · \(project.passages.count) clips")
+            let treated = project.orderedRushes.filter { !$0.visiblePassages.isEmpty }.count
+            Text("\(treated)/\(project.visibleRushes.count) rushes traités · \(project.visiblePassages.count) clips")
                 .font(.footnote.monospacedDigit())
-                .foregroundStyle(treated == project.rushes.count && !project.rushes.isEmpty ? .green : .secondary)
+                .foregroundStyle(treated == project.visibleRushes.count && !project.visibleRushes.isEmpty ? .green : .secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -572,7 +576,7 @@ struct ProjectEditorView: View {
         Button { goToRush(offset: 1) } label: { Image(systemName: "chevron.forward.2") }
             .buttonStyle(GlassIconButtonStyle(diameter: 40))
             .accessibilityLabel("Rush suivant")
-            .disabled(currentRushIndex.map { $0 >= project.rushes.count - 1 } ?? true)
+            .disabled(currentRushIndex.map { $0 >= project.visibleRushes.count - 1 } ?? true)
             .keyboardShortcut(.rightArrow, modifiers: [.command])
         // Saut direct au prochain rush sans passage validé.
         Button { goToNextUntreatedRush() } label: { Image(systemName: "arrow.right.to.line") }
@@ -713,7 +717,7 @@ struct ProjectEditorView: View {
             } label: {
                 Image(systemName: "music.note")
             }
-            .disabled(project.passages.isEmpty)
+            .disabled(project.visiblePassages.isEmpty)
         }
         ToolbarItem(placement: .topBarTrailing) {
             // MENU ORGANISÉ PAR MOMENT D'USAGE, et non par nature technique.
@@ -759,7 +763,7 @@ struct ProjectEditorView: View {
                     Button {
                         showReview = true
                     } label: {
-                        Label("Revoir mes clips (\(project.passages.count))",
+                        Label("Revoir mes clips (\(project.visiblePassages.count))",
                               systemImage: "play.rectangle.on.rectangle")
                     }
                     Button {
@@ -946,7 +950,7 @@ struct ProjectEditorView: View {
     /// logique pure dans TriageNavigation — testée unitairement).
     private func goToNextUntreatedRush() {
         let rushes = project.orderedRushes
-        let treated = rushes.map { !$0.passages.isEmpty }
+        let treated = rushes.map { !$0.visiblePassages.isEmpty }
         guard let target = TriageNavigation.nextUntreatedIndex(after: currentRushIndex, treated: treated) else {
             if !rushes.isEmpty {
                 errorMessage = "Tous les rushes ont au moins un clip validé. 🎉"
@@ -987,6 +991,12 @@ struct ProjectEditorView: View {
             try? modelContext.save()
             rebuildSegments()
         }
+    }
+
+    /// Note la position POUR CE PROJET, afin de rouvrir là où on s'est arrêté.
+    private func savePlayhead() {
+        project.playheadCentiseconds = Int((playhead * 100).rounded())
+        try? modelContext.save()
     }
 
     /// Rouvre le projet LÀ OÙ on s'était arrêté.
@@ -1064,7 +1074,12 @@ struct ProjectEditorView: View {
         let local = CMTime(seconds: globalTime - segmentStart(rushIndex: index), preferredTimescale: 600)
         // Tap sur un clip DÉJÀ VALIDÉ → mode édition : la sélection épouse le
         // clip, boucle immédiate ; Suppr. clip / Valider (mise à jour) au menu.
-        if let existing = rush.passages.first(where: {
+        // Un clip EN SURSIS n'existe plus pour l'interface : il n'est plus
+        // dessiné, il ne doit plus être attrapable. Le retaper posait une
+        // sélection sur un clip fantôme ; le re-valider ne levait PAS le
+        // sursis, et il s'effaçait cinq secondes plus tard avec son fichier de
+        // plage. L'annulation passe par le bandeau, jamais par la timeline.
+        if let existing = rush.visiblePassages.first(where: {
             CMTimeRangeContainsTime($0.sourceRange, time: local)
         }) {
             editingPassageID = existing.persistentModelID
@@ -1225,6 +1240,8 @@ struct ProjectEditorView: View {
         let rush = project.orderedRushes[index]
 
         let passage = Passage()
+        // Ceinture : aucun chemin ne doit « mettre à jour » un clip condamné.
+        if passage.isPendingDeletion { undo.undo() }
         passage.validationIndex = (project.passages.map(\.validationIndex).max() ?? -1) + 1
         passage.setStart(range.start)
         passage.sourceDurationValue = range.duration.value
@@ -1322,7 +1339,7 @@ struct ProjectEditorView: View {
                 errorMessage = "Plage non mise en cache — rush conservé pour garantir l'export du clip."
                 return
             }
-            let allCached = rush.passages.allSatisfy { p in
+            let allCached = rush.visiblePassages.allSatisfy { p in
                 guard let path = p.cachedRangeRelativePath else { return false }
                 return FileManager.default.fileExists(
                     atPath: StorageManager.url(forCachedRangeRelativePath: path).path
@@ -1350,7 +1367,7 @@ struct ProjectEditorView: View {
     /// impossible, le fichier source ayant disparu.
     private func deleteRushUnderPlayhead() {
         guard let rush = currentRush else { return }
-        let pending = project.passages.filter { $0.rush === rush && $0.cachedRangeRelativePath == nil }
+        let pending = project.visiblePassages.filter { $0.rush === rush && $0.cachedRangeRelativePath == nil }
         guard pending.isEmpty else {
             errorMessage = "\(pending.count) clip(s) de ce rush n'ont pas encore leur plage cachée — rush conservé (leur export deviendrait impossible)."
             return
@@ -1381,9 +1398,29 @@ struct ProjectEditorView: View {
             modelContext.delete(rush)
             try? modelContext.save()
         } restore: {
+            // La sélection courante désigne un rush PAR INDEX dans
+            // `orderedRushes`. Réinsérer un rush masqué rallonge cette liste et
+            // décale tous les index situés après lui : l'index 2 ne désigne
+            // plus le même rush. Sans ce recalage, « Valider » créait un clip
+            // sur le rush voisin, au timecode d'un autre, sans la moindre
+            // erreur — les images n'avaient simplement rien à voir.
+            let aimedRush = selectionRushIndex.flatMap { index -> Rush? in
+                let visible = project.orderedRushes
+                return index < visible.count ? visible[index] : nil
+            }
             rush.isPendingDeletion = false
             try? modelContext.save()
             rebuildSegments()
+            if let aimedRush,
+               let moved = project.orderedRushes.firstIndex(where: { $0 === aimedRush }) {
+                selectionRushIndex = moved
+            } else if selectionRushIndex != nil {
+                // Le support de la sélection a disparu : on l'abandonne plutôt
+                // que de la laisser désigner autre chose.
+                selectionRushIndex = nil
+                selectionRange = nil
+                editingPassageID = nil
+            }
             playback.load(rush: currentRush)
         }
     }

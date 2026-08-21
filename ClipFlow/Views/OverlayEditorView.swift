@@ -413,6 +413,12 @@ struct OverlayEditorView: View {
                 Image(systemName: "square.stack.3d.up")
             }
             .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 46))
+            // MÊME garde que ses voisins : poser un préréglage recalcule les
+            // ancrages pour la forme du montage. Tant qu'elle est inconnue, ce
+            // calcul se ferait sur un 9:16 supposé, et le résultat serait
+            // enregistré.
+            .disabled(!shapeIsKnown)
+            .opacity(shapeIsKnown ? 1 : 0.35)
             .accessibilityLabel("Préréglages d'incrustations")
 
             Spacer()

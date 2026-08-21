@@ -15,6 +15,7 @@
 //
 
 import Foundation
+import SwiftData
 import CoreMedia
 import UIKit
 
@@ -108,6 +109,48 @@ enum OverlayStore {
         } catch {
             return nil
         }
+    }
+
+    /// Efface les PNG que plus personne ne référence.
+    ///
+    /// Poser un préréglage remplace les calques d'un projet sans toucher à
+    /// leurs fichiers : effacer l'original au moment du remplacement pouvait
+    /// détruire la seule copie si la duplication vers le filet avait échoué —
+    /// disque plein, fichier déjà manquant — et cela se serait fait en silence.
+    /// On préfère laisser des orphelins et les ramasser ici, au lancement,
+    /// quand rien n'est en cours : un peu d'espace perdu se rattrape, une image
+    /// perdue non.
+    ///
+    /// - Returns: le nombre de fichiers effacés.
+    @discardableResult
+    @MainActor
+    static func pruneUnreferencedImages(context: ModelContext) -> Int {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(
+            at: overlaysDirectory, includingPropertiesForKeys: nil) else { return 0 }
+
+        var referenced = Set<String>()
+        if let layers = try? context.fetch(FetchDescriptor<OverlayLayer>()) {
+            for layer in layers {
+                if let name = layer.imageFilename { referenced.insert(name) }
+            }
+        }
+        if let entries = try? context.fetch(FetchDescriptor<OverlayPresetEntry>()) {
+            for entry in entries {
+                if let name = entry.imageFilename { referenced.insert(name) }
+            }
+        }
+        // Une lecture qui échoue rendrait TOUT orphelin : on ne balaie pas sur
+        // une base qu'on n'a pas pu interroger.
+        guard !referenced.isEmpty || (try? context.fetch(FetchDescriptor<OverlayLayer>()))?.isEmpty == true else {
+            return 0
+        }
+
+        var removed = 0
+        for url in files where !referenced.contains(url.lastPathComponent) {
+            if (try? fm.removeItem(at: url)) != nil { removed += 1 }
+        }
+        return removed
     }
 
     static func deleteImage(filename: String) {

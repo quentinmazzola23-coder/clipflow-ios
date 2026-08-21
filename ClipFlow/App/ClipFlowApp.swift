@@ -37,6 +37,13 @@ struct ClipFlowApp: App {
         // purge au lancement — aucune file ne tourne encore à cet instant.
         StorageManager.clearExports()
 
+        // Images d'incrustation devenues orphelines : ramassées ici, quand
+        // rien n'est en cours. Poser un préréglage ne détruit délibérément
+        // aucun PNG (voir OverlayPresetStore.apply) — c'est le prix à payer
+        // pour ne jamais effacer la seule copie d'une image.
+        let pruneContext = ModelContext(container)
+        OverlayStore.pruneUnreferencedImages(context: pruneContext)
+
         // CATÉGORIE AUDIO .playback, ET C'EST IMPORTANT. Sans elle, la
         // catégorie par défaut (.soloAmbient) OBÉIT AU COMMUTATEUR SONNERIE :
         // téléphone en silencieux → aperçu du montage et lecture des rushes

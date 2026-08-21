@@ -179,6 +179,12 @@ final class ClipProject {
         rushes.filter { !$0.isPendingDeletion }.sorted { $0.orderIndex < $1.orderIndex }
     }
 
+    /// Rushes visibles, non triés — pour compter sans trier.
+    var visibleRushes: [Rush] { rushes.filter { !$0.isPendingDeletion } }
+
+    /// Clips visibles, non triés.
+    var visiblePassages: [Passage] { passages.filter { !$0.isPendingDeletion } }
+
     /// Passages triés par ordre de validation, hors suppressions en attente.
     var orderedPassages: [Passage] {
         passages.filter { !$0.isPendingDeletion }
@@ -243,6 +249,17 @@ final class Rush {
     /// détruire ses passages validés — ils s'exportent via leur plage cachée.
     @Relationship(deleteRule: .nullify, inverse: \Passage.rush)
     var passages: [Passage] = []
+
+    /// Clips VISIBLES de ce rush — les suppressions en sursis exclues.
+    ///
+    /// La collection brute reste celle de SwiftData ; tout ce qui compte,
+    /// affiche ou agit doit passer par ici. Un clip masqué qui restait
+    /// attrapable au doigt se laissait re-valider, puis s'effaçait cinq
+    /// secondes plus tard avec son fichier de plage — la validation n'ayant
+    /// jamais levé le sursis.
+    var visiblePassages: [Passage] {
+        passages.filter { !$0.isPendingDeletion }
+    }
 
     init() {}
 

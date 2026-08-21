@@ -31,7 +31,7 @@ struct RushGridView: View {
             }
             .padding(10)
         }
-        .navigationTitle("Rushes (\(project.rushes.count))")
+        .navigationTitle("Rushes (\(project.visibleRushes.count))")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
@@ -78,7 +78,7 @@ private struct RushGridCell: View {
         }
         .overlay(alignment: .topTrailing) {
             // Badge : vert = traité (≥ 1 passage validé).
-            if !rush.passages.isEmpty {
+            if !rush.visiblePassages.isEmpty {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .background(Circle().fill(.white))

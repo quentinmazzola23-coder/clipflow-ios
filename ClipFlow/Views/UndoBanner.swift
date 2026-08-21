@@ -33,17 +33,28 @@ struct PendingDeletion: Identifiable {
     let restore: () -> Void
 }
 
-/// Détient la suppression en sursis et son minuteur.
+/// Détient les suppressions en sursis et leurs minuteurs.
 ///
-/// Une seule à la fois : empiler les annulations demanderait de les présenter
-/// et de les expliquer, pour un besoin que personne n'a. Une nouvelle
-/// suppression consomme la précédente — ce qui est exactement ce que
-/// l'utilisateur signifie en supprimant deux fois de suite.
+/// UNE PILE, et non un emplacement unique. La première version consommait la
+/// suppression précédente dès qu'une nouvelle arrivait, en se justifiant par
+/// « deux suppressions de suite veulent dire que la première était voulue ».
+/// C'était faux : écarter quatre rushes ratés à la file est précisément le
+/// rythme du dérushage, donc le moment où le filet sert le plus. Trois
+/// suppressions passaient définitivement, sans un mot, sous un bandeau qui
+/// affichait toujours le même libellé.
+///
+/// Chaque suppression a donc son propre sursis, et « Annuler » défait la plus
+/// récente — l'ordre naturel quand on revient sur ses pas.
 @Observable
 @MainActor
 final class DeletionUndo {
-    private(set) var pending: PendingDeletion?
-    private var timer: Task<Void, Never>?
+    private(set) var items: [PendingDeletion] = []
+    private var timers: [UUID: Task<Void, Never>] = [:]
+
+    /// La suppression annulable maintenant : la dernière posée.
+    var pending: PendingDeletion? { items.last }
+    /// Combien attendent encore — le bandeau le dit quand il y en a plusieurs.
+    var count: Int { items.count }
 
     /// Délai de grâce. Cinq secondes : le temps de voir le bandeau et de
     /// réagir, sans laisser un état incertain traîner sur l'écran.
@@ -52,47 +63,51 @@ final class DeletionUndo {
     func schedule(label: String,
                   commit: @escaping () -> Void,
                   restore: @escaping () -> Void) {
-        // La précédente est consommée : deux suppressions de suite veulent
-        // dire que la première était voulue.
-        consumeNow()
         let item = PendingDeletion(label: label, commit: commit, restore: restore)
-        pending = item
-        timer = Task { @MainActor in
+        items.append(item)
+        timers[item.id] = Task { @MainActor in
             try? await Task.sleep(for: .seconds(Self.graceSeconds))
-            guard !Task.isCancelled, pending?.id == item.id else { return }
-            pending = nil
+            guard !Task.isCancelled,
+                  let index = items.firstIndex(where: { $0.id == item.id }) else { return }
+            items.remove(at: index)
+            timers[item.id] = nil
             item.commit()
         }
     }
 
     func undo() {
-        guard let item = pending else { return }
-        timer?.cancel()
-        timer = nil
-        pending = nil
+        guard let item = items.popLast() else { return }
+        timers[item.id]?.cancel()
+        timers[item.id] = nil
         item.restore()
     }
 
-    /// Consomme immédiatement ce qui attend — à appeler en quittant l'écran :
-    /// un sursis ne doit pas survivre à la vue qui l'affichait, sinon plus rien
-    /// ne peut l'annuler et l'objet resterait masqué sans jamais être effacé.
+    /// Consomme immédiatement TOUT ce qui attend — à appeler en quittant
+    /// l'écran : un sursis ne doit pas survivre à la vue qui l'affichait, sinon
+    /// plus rien ne peut l'annuler et l'objet resterait masqué sans jamais être
+    /// effacé. Dans l'ordre où les suppressions ont été demandées.
     func consumeNow() {
-        guard let item = pending else { timer?.cancel(); timer = nil; return }
-        timer?.cancel()
-        timer = nil
-        pending = nil
-        item.commit()
+        for timer in timers.values { timer.cancel() }
+        timers.removeAll()
+        let waiting = items
+        items.removeAll()
+        for item in waiting { item.commit() }
     }
 }
 
 /// Bandeau d'annulation, à poser en surimpression au bas d'un écran.
 struct UndoBannerView: View {
     let pending: PendingDeletion
+    /// Nombre total de suppressions encore annulables.
+    var count: Int = 1
     let onUndo: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            Text(pending.label)
+            // La rafale est DITE : sans ce compte, quatre suppressions
+            // d'affilée affichaient quatre fois le même libellé, et rien
+            // n'indiquait combien restaient récupérables.
+            Text(count > 1 ? "\(pending.label) · \(count) annulables" : pending.label)
                 .font(.footnote)
                 .foregroundStyle(.white)
                 .lineLimit(1)

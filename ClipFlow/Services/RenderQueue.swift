@@ -322,7 +322,7 @@ final class RenderQueueController {
             }
 
             // Nom d'export : numéro d'ordre + catégories.
-            let existing = Set(project.passages.compactMap(\.exportedFilename))
+            let existing = Set(project.visiblePassages.compactMap(\.exportedFilename))
             let categoryValues = passage.categories.map { entry in
                 entry.split(separator: ":").last.map(String.init) ?? entry
             }

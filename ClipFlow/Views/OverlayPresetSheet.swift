@@ -35,9 +35,16 @@ struct OverlayPresetSheet: View {
 
     private var currentCount: Int { project.overlays.count }
 
+    /// Préréglages visibles ici : tous les vrais, plus le filet de CE projet.
+    /// Le filet d'un autre projet reposerait des incrustations qu'on n'a jamais
+    /// posées, sous un libellé qui promet le contraire.
+    private var visiblePresets: [OverlayPreset] {
+        presets.filter { !$0.isAutoBackup || $0.backupProject === project }
+    }
+
     var body: some View {
         List {
-            if presets.isEmpty {
+            if visiblePresets.isEmpty {
                 Section {
                     Text("Aucun préréglage. Posez vos incrustations, puis "
                          + "enregistrez-les ici pour les reposer sur un autre projet.")
@@ -46,7 +53,7 @@ struct OverlayPresetSheet: View {
                 }
             }
 
-            ForEach(presets) { preset in
+            ForEach(visiblePresets) { preset in
                 Button {
                     apply(preset)
                 } label: {

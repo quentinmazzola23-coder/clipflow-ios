@@ -29,6 +29,9 @@ enum OverlayPresetStore {
                         context: ModelContext) -> OverlayPreset {
         let preset = OverlayPreset(name: name, isAutoBackup: isAutoBackup)
         context.insert(preset)
+        // Le filet est PROPRE au projet ; un vrai préréglage n'appartient à
+        // personne et se repose partout.
+        if isAutoBackup { preset.backupProject = project }
 
         for layer in project.overlays.sorted(by: { $0.stackOrder < $1.stackOrder }) {
             let entry = OverlayPresetEntry()
@@ -59,18 +62,30 @@ enum OverlayPresetStore {
         return preset
     }
 
-    /// Remplace la sauvegarde automatique par l'état courant du projet.
+    /// Met en place le filet de CE projet, s'il n'en a pas déjà un.
     ///
-    /// Une seule sauvegarde existe à la fois : elle sert de « pas comme ça,
-    /// finalement », pas d'historique. Un empilement demanderait de la ménager
-    /// et de l'expliquer, pour un besoin que personne n'a exprimé.
+    /// Deux règles, toutes deux apprises de la même manière — en constatant ce
+    /// qu'on perdait :
+    ///
+    /// 1. UN FILET NE S'ÉCRASE PAS. Essayer un préréglage, puis un autre, est
+    ///    le geste normal de cet écran. Si la seconde pose remplaçait le filet,
+    ///    elle y mettrait le premier préréglage — que l'utilisateur possède
+    ///    déjà dans sa liste — et la configuration faite à la main serait
+    ///    perdue, fichiers compris. Le filet ne vaut que pour l'état MANUEL.
+    ///    Il est consommé quand on le repose (voir `apply`).
+    /// 2. Un projet sans incrustation n'a rien à sauvegarder, mais son ancien
+    ///    filet devient PÉRIMÉ : il doit partir, sinon il se ferait passer pour
+    ///    le retour en arrière d'un état qu'il ne décrit pas.
     @MainActor
     static func refreshAutoBackup(from project: ClipProject, context: ModelContext) {
-        // Rien à sauvegarder : on ne remplace pas un état utile par du vide.
-        guard !project.overlays.isEmpty else { return }
-        for old in fetchAll(context: context) where old.isAutoBackup {
-            delete(old, context: context)
+        let existing = fetchAll(context: context).filter {
+            $0.isAutoBackup && $0.backupProject === project
         }
+        guard !project.overlays.isEmpty else {
+            for old in existing { delete(old, context: context) }
+            return
+        }
+        guard existing.isEmpty else { return }
         capture(from: project, name: autoBackupName,
                 isAutoBackup: true, context: context)
     }
@@ -95,10 +110,13 @@ enum OverlayPresetStore {
             refreshAutoBackup(from: project, context: context)
         }
 
+        // Les PNG des calques remplacés NE SONT PAS effacés ici. Le filet en
+        // détient des copies, mais une duplication peut avoir échoué (disque
+        // plein, fichier déjà manquant) : effacer l'original détruirait alors
+        // la seule copie, en silence. Les fichiers devenus orphelins sont
+        // ramassés au lancement par `OverlayStore.pruneUnreferencedImages`, ce
+        // qui échange un risque de perte contre un peu d'espace temporaire.
         for layer in project.overlays {
-            if let filename = layer.imageFilename {
-                OverlayStore.deleteImage(filename: filename)
-            }
             context.delete(layer)
         }
 
@@ -136,6 +154,15 @@ enum OverlayPresetStore {
         }
 
         try? context.save()
+
+        // Le filet vient d'être reposé : il a joué son rôle. On le retire pour
+        // que la pose suivante puisse en capturer un neuf — sinon le premier
+        // filet resterait en place à jamais et le retour ne servirait qu'une
+        // fois. APRÈS la recopie et la sauvegarde : `delete` efface aussi ses
+        // PNG, dont les calques viennent de recevoir des copies indépendantes.
+        if preset.isAutoBackup {
+            delete(preset, context: context)
+        }
     }
 
     // MARK: - Gestion

@@ -239,7 +239,7 @@ struct MontageView: View {
             ContentUnavailableView {
                 Label("Choisissez une musique", systemImage: "music.note")
             } description: {
-                Text("Le rythme de la musique découpera vos \(project.passages.count) clips automatiquement.")
+                Text("Le rythme de la musique découpera vos \(project.visiblePassages.count) clips automatiquement.")
             } actions: {
                 VStack(spacing: 10) {
                     Button {
@@ -363,7 +363,7 @@ struct MontageView: View {
                 HStack(spacing: 14) {
                     Label(String(format: "%.0f BPM", map.bpm), systemImage: "metronome")
                     if let plan {
-                        Label("\(plan.placements.count)/\(project.passages.count) clips",
+                        Label("\(plan.placements.count)/\(project.visiblePassages.count) clips",
                               systemImage: "film.stack")
                         Label(formatDuration(plan.totalDuration.seconds), systemImage: "timer")
                     }
@@ -378,9 +378,13 @@ struct MontageView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(showPlanningDetail
-                                ? "Masquer les écarts de coupe"
-                                : "Afficher les écarts de coupe")
+            // Le bouton avale les libellés de ses enfants pour VoiceOver :
+            // sans les redire ici, le BPM, le nombre de clips et la durée
+            // devenaient inaudibles — l'en-tête ne se lisait plus du tout.
+            .accessibilityElement(children: .combine)
+            .accessibilityHint(showPlanningDetail
+                               ? "Masquer les écarts de coupe"
+                               : "Afficher les écarts de coupe")
             // L'INFORMATION DE PLANIFICATION : la durée de chaque clip au cran
             // choisi, et la longueur de rush nécessaire (à 0,5×, le double est
             // prélevé… non : la moitié est prélevée — durée finale × vitesse).
@@ -409,7 +413,7 @@ struct MontageView: View {
         if !plan.placements.isEmpty {
             return "\(plan.placements.count) clips prêts"
         }
-        if project.passages.isEmpty {
+        if project.visiblePassages.isEmpty {
             return "Aucun clip validé dans ce projet — revenez au dérushage pour en valider."
         }
         guard let range = slotRangeMilliseconds else {
@@ -668,15 +672,21 @@ struct MontageView: View {
                 }
                 .disabled(plan?.placements.isEmpty ?? true)
             } label: {
-                Image(systemName: "slider.horizontal.below.rectangle")
+                // Note de musique : c'est le contenu principal du menu, et
+                // l'écran s'ouvre en proposant la bibliothèque — l'icône doit
+                // rappeler par où on revient changer de morceau.
+                Image(systemName: "music.note.list")
                     .font(.title3)
                     .foregroundStyle(overlayCount > 0 ? Theme.accent : .secondary)
                     .frame(width: 46, height: 46)
                     .glassEffect(.regular.interactive(), in: Circle())
                     .contentShape(Circle())
             }
-            .accessibilityLabel("Source et habillage")
+            .accessibilityLabel("Musique et habillage")
             .disabled(isExporting)
+            // Un Menu désactivé ne se grise pas tout seul : le bouton paraissait
+            // actif et ne répondait pas, ce qui se lit comme une panne.
+            .opacity(isExporting ? 0.35 : 1)
 
             Button {
                 togglePreview()
