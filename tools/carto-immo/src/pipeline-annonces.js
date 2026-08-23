@@ -16,7 +16,9 @@ import { log } from './log.js';
  * d'une annonce, pas d'une statistique.
  */
 export async function collecterEtLocaliser(zones, cfg) {
-  const { types = ['house'], max = 200, cacheDir, cadastre = true, rayonContexteM = 300 } = cfg;
+  const {
+    types = ['house'], max = 200, cacheDir, cadastre = true, rayonContexteM = 300, filtres = null,
+  } = cfg;
 
   // ── Relevé ──────────────────────────────────────────────────────────────
   const annonces = [];
@@ -25,12 +27,26 @@ export async function collecterEtLocaliser(zones, cfg) {
     const zone = await trouverZone(z);
     zonesVues.push(zone);
     log.step(`${zone.nom} (${zone.type})`);
-    annonces.push(...(await collecterZone(zone.id, { types, max })));
+    // Le plafond vaut pour la collecte entière, pas par zone.
+    const reste = max - annonces.length;
+    if (reste <= 0) break;
+    annonces.push(...(await collecterZone(zone.id, { types, max: reste })));
   }
 
   // Une même offre peut être diffusée sur plusieurs zones qui se recouvrent.
-  const uniques = [...new Map(annonces.map((a) => [a.id, a])).values()];
+  let uniques = [...new Map(annonces.map((a) => [a.id, a])).values()];
   log.ok(`${uniques.length} annonces relevées`);
+
+  if (filtres) {
+    const avant = uniques.length;
+    const { minPrice, maxPrice, minSurface, propertyTypes } = filtres;
+    uniques = uniques.filter((a) =>
+      (!minPrice || a.prix == null || a.prix >= minPrice) &&
+      (!maxPrice || a.prix == null || a.prix <= maxPrice) &&
+      (!minSurface || a.surface == null || a.surface >= minSurface) &&
+      (!propertyTypes?.length || !a.typeBien || propertyTypes.includes(a.typeBien)));
+    if (uniques.length !== avant) log.info(`${avant - uniques.length} écartées par les filtres`);
+  }
 
   // ── Localisation ────────────────────────────────────────────────────────
   log.step('Localisation par le registre des DPE');

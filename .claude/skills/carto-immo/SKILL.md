@@ -1,6 +1,6 @@
 ---
 name: carto-immo
-description: Lance la veille immobilière — collecte les annonces leboncoin, écarte les biens déjà suivis et les remises en ligne, fait localiser les vraies nouveautés par lacquereur.fr, et produit le rapport du matin, le tableur et la carte interactive. À utiliser quand Quentin demande de lancer la veille, de savoir ce qui est nouveau ce matin, de mettre à jour la carte des biens, de rafraîchir le tableur des annonces, d'analyser une annonce leboncoin précise, ou de programmer l'exécution quotidienne.
+description: Lance la prospection immobilière — collecte les annonces leboncoin, écarte les biens déjà suivis et les remises en ligne, fait localiser les vraies nouveautés par lacquereur.fr, et produit le rapport du matin, le tableur et la carte interactive. À utiliser quand Quentin demande de lancer la veille, de savoir ce qui est nouveau ce matin, de mettre à jour la carte des biens, de rafraîchir le tableur des annonces, d'analyser une annonce leboncoin précise, ou de programmer l'exécution quotidienne.
 ---
 
 # Veille immobilière : leboncoin → lacquereur.fr → carte

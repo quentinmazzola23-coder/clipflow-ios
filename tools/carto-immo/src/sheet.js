@@ -1,51 +1,62 @@
 import fs from 'node:fs';
 import ExcelJS from 'exceljs';
 
+// Colonnes pensées pour la prospection : ce qui décide d'aller frapper à la
+// porte vient d'abord, le détail technique suit, les liens ferment la marche.
 const COLUMNS = [
-  { header: 'Titre', key: 'titre', width: 46 },
-  { header: 'Type', key: 'typeBien', width: 12 },
-  { header: 'Ville', key: 'ville', width: 20 },
-  { header: 'CP', key: 'codePostal', width: 8 },
+  { header: 'Jours en ligne', key: 'joursEnLigne', width: 13 },
   { header: 'Prix', key: 'prix', width: 13, fmt: '#,##0 "€"' },
   { header: '€/m²', key: 'prixM2', width: 10, fmt: '#,##0' },
-  { header: 'Surface', key: 'surface', width: 9, fmt: '0" m²"' },
-  { header: 'Terrain', key: 'terrain', width: 10, fmt: '#,##0" m²"' },
-  { header: 'Pièces', key: 'pieces', width: 8 },
-  { header: 'Ch.', key: 'chambres', width: 6 },
-  { header: 'Adresse estimée', key: 'adresseEstimee', width: 42 },
+  { header: 'Écart marché', key: 'ecartMarcheAffiche', width: 13, fmt: '+0"%";-0"%";0"%"' },
+  { header: 'Commune', key: 'ville', width: 20 },
+  { header: 'Adresse', key: 'adresseEstimee', width: 42 },
   { header: 'Confiance', key: 'niveauConfiance', width: 11 },
+  { header: 'Surface', key: 'surface', width: 9, fmt: '0" m²"' },
+  { header: 'Terrain', key: 'terrain', width: 11, fmt: '#,##0" m²"' },
+  { header: 'Pièces', key: 'pieces', width: 8 },
+  { header: 'DPE', key: 'dpe', width: 6 },
+  { header: 'Parcelle', key: 'parcelle', width: 17 },
+  { header: 'Publiée le', key: 'publieeLe', width: 12 },
+  { header: 'Baisse de prix', key: 'baisseAffichee', width: 14 },
+  { header: 'Statut', key: 'statutLabel', width: 16 },
+  { header: 'Vendeur', key: 'vendeur', width: 16 },
   { header: 'Latitude', key: 'latitude', width: 12, fmt: '0.000000' },
   { header: 'Longitude', key: 'longitude', width: 12, fmt: '0.000000' },
-  { header: 'Parcelle', key: 'parcelle', width: 17 },
-  { header: 'DPE', key: 'dpe', width: 6 },
-  { header: 'GES', key: 'ges', width: 6 },
-  { header: 'Année', key: 'anneeConstruction', width: 8 },
-  { header: 'Publiée le', key: 'publieeLe', width: 12 },
-  { header: 'Jours en ligne', key: 'joursEnLigne', width: 13 },
-  { header: 'Baisses', key: 'nbBaisses', width: 9 },
-  { header: 'Prix initial', key: 'prixInitial', width: 13, fmt: '#,##0 "€"' },
-  { header: 'Baisse', key: 'baissePct', width: 9, fmt: '0.0"%"' },
-  { header: 'Écart marché', key: 'ecartMarchePct', width: 13, fmt: '+0.0"%";-0.0"%";0"%"' },
-  { header: 'Médiane secteur €/m²', key: 'medianeSecteurM2', width: 19, fmt: '#,##0' },
-  { header: 'Fourchette basse', key: 'fourchetteBasse', width: 17, fmt: '#,##0 "€"' },
-  { header: 'Fourchette haute', key: 'fourchetteHaute', width: 17, fmt: '#,##0 "€"' },
-  { header: 'Position', key: 'positionMarche', width: 20 },
-  { header: 'Délai vente commune (j)', key: 'delaiVenteCommuneJours', width: 21 },
-  { header: 'Vendeur', key: 'vendeur', width: 22 },
-  { header: 'Source', key: 'source', width: 10 },
-  { header: 'Statut', key: 'statutLabel', width: 16 },
-  { header: 'Suivi depuis', key: 'premiereApparitionJour', width: 13 },
-  { header: 'Parutions', key: 'nbParutions', width: 10 },
-  { header: 'Annonce', key: 'urlAnnonce', width: 16, link: true, linkText: 'leboncoin' },
-  { header: 'Analyse', key: 'urlAnalyse', width: 16, link: true, linkText: 'lacquereur' },
-  { header: 'Carte', key: 'urlMaps', width: 14, link: true, linkText: 'Google Maps' },
+  { header: 'Annonce', key: 'urlAnnonce', width: 16, link: true },
+  { header: 'Carte', key: 'urlMaps', width: 14, link: true, linkText: 'Maps' },
 ];
+
+/** Champs calculés au moment de l'export. */
+function ligne(rec) {
+  const comparable = rec.ecartMarchePct != null && Math.abs(rec.ecartMarchePct) <= 120;
+  return {
+    ...rec,
+    statutLabel: STATUT_FR[rec.statut] ?? '',
+    // Un écart de plusieurs centaines de pour cent ne compare plus rien :
+    // le bien est sorti de son marché communal.
+    ecartMarcheAffiche: comparable ? rec.ecartMarchePct : null,
+    baisseAffichee: rec.nbBaisses ? 'oui' : '',
+  };
+}
 
 const HEADER_FILL = 'FF1F3A5F';
 const GREEN = 'FF1E7A46';
 const RED = 'FFB3261E';
 const AMBER = 'FF8A6100';
 const BLUE = 'FF0B57D0';
+
+/** Nomme un lien d'après son hôte : « ouvrir » ne dit pas où l'on va. */
+function nomSource(url) {
+  try {
+    const h = new URL(url).hostname.replace(/^www\./, '');
+    if (h.includes('leboncoin')) return 'leboncoin';
+    if (h.includes('bienici')) return "Bien'ici";
+    if (h.includes('seloger')) return 'SeLoger';
+    return h;
+  } catch {
+    return 'ouvrir';
+  }
+}
 
 const STATUT_FR = {
   nouveau: 'nouveau',
@@ -70,37 +81,36 @@ export async function writeSpreadsheet(records, file) {
   head.alignment = { vertical: 'middle', wrapText: true };
 
   for (const rec of records) {
-    const row = ws.addRow({
-      ...rec,
-      statutLabel: STATUT_FR[rec.statut] ?? '',
-      premiereApparitionJour: (rec.premiereApparition ?? '').slice(0, 10),
-      nbParutions: rec.annonces?.length ?? 1,
-    });
+    const row = ws.addRow(ligne(rec));
 
     for (const col of COLUMNS) {
       const cell = row.getCell(col.key);
       if (col.fmt) cell.numFmt = col.fmt;
       if (col.link && cell.value) {
-        cell.value = { text: col.linkText, hyperlink: String(cell.value) };
+        const url = String(cell.value);
+        cell.value = { text: col.linkText ?? nomSource(url), hyperlink: url };
         cell.font = { color: { argb: 'FF0B57D0' }, underline: true };
       }
     }
 
     // Un coup d'œil doit suffire à repérer les annonces négociables.
-    const ecart = row.getCell('ecartMarchePct');
-    if (typeof rec.ecartMarchePct === 'number') {
-      const over = rec.ecartMarchePct > 0;
-      ecart.font = { bold: true, color: { argb: over ? RED : GREEN } };
+    const ecart = row.getCell('ecartMarcheAffiche');
+    if (typeof ecart.value === 'number') {
+      ecart.font = { bold: true, color: { argb: ecart.value > 0 ? RED : GREEN } };
     }
-    const pos = row.getCell('positionMarche');
-    if (rec.positionMarche === 'Sous le marché') pos.font = { color: { argb: GREEN }, bold: true };
-    else if (rec.positionMarche === 'Au-dessus du marché') pos.font = { color: { argb: RED } };
     if (rec.statut === 'nouveau') {
       row.getCell('statutLabel').font = { color: { argb: AMBER }, bold: true };
     } else if (rec.statut === 'republie') {
       row.getCell('statutLabel').font = { color: { argb: BLUE }, bold: true };
-      // Une remise en ligne signale un bien qui ne part pas : c'est négociable.
-      row.getCell('nbParutions').font = { color: { argb: BLUE }, bold: true };
+    }
+
+    // L'ancienneté est le premier signal de prospection : elle doit sauter aux yeux.
+    const j = rec.joursEnLigne;
+    if (typeof j === 'number') {
+      const cell = row.getCell('joursEnLigne');
+      cell.value = rec.ancienneteMinorant ? `≥ ${j}` : j;
+      if (j >= 240) cell.font = { bold: true, color: { argb: RED } };
+      else if (j >= 120) cell.font = { bold: true, color: { argb: AMBER } };
     }
     if (rec.localisationPrecise === false) {
       row.getCell('adresseEstimee').font = { italic: true, color: { argb: 'FF777777' } };
@@ -120,18 +130,17 @@ export async function writeSpreadsheet(records, file) {
 export function writeCsv(records, file) {
   const esc = (v) => {
     if (v === null || v === undefined) return '';
-    const s = String(v).replace(/"/g, '""');
+    // Virgule décimale : avec le point, Excel FR lit 43.52 comme du texte.
+    let s = typeof v === 'number' ? String(v).replace('.', ',') : String(v);
+    // Une cellule commençant par un opérateur serait interprétée comme formule.
+    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+    s = s.replace(/"/g, '""');
     return /[;\n"]/.test(s) ? `"${s}"` : s;
   };
   const lines = [COLUMNS.map((c) => esc(c.header)).join(';')];
   for (const rec of records) {
     lines.push(
-      COLUMNS.map((c) => {
-        if (c.key === 'statutLabel') return esc(STATUT_FR[rec.statut] ?? '');
-        if (c.key === 'premiereApparitionJour') return esc((rec.premiereApparition ?? '').slice(0, 10));
-        if (c.key === 'nbParutions') return esc(rec.annonces?.length ?? 1);
-        return esc(rec[c.key]);
-      }).join(';')
+      COLUMNS.map((c) => esc(ligne(rec)[c.key])).join(';')
     );
   }
   fs.writeFileSync(file, '﻿' + lines.join('\n'), 'utf8');

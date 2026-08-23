@@ -16,7 +16,12 @@ la surface, la consommation et les émissions lèvent le reste. Le rapprochement
 est noté, et **sans candidat qui se détache nettement, l'annonce reste sans
 adresse** : mieux vaut un bien absent de la carte qu'un bien chez le voisin.
 
-L'adresse mène ensuite à la **parcelle cadastrale**, dessinée sur la carte.
+L'adresse mène ensuite à la **parcelle cadastrale**. Le point d'adresse tombe
+souvent au bord de la voie, pas au centre du terrain : prendre la parcelle sous
+le point désignerait la rue ou le voisin. On passe donc par le **bâtiment** —
+la partie la plus sûrement identifiée d'une adresse — et c'est lui qui désigne
+la parcelle. Le terrain annoncé sert de contrôle final : une parcelle bien plus
+grande que lui trahit un point tombé sur une pièce agricole.
 
 ## Deux façons de relever les annonces
 
@@ -146,12 +151,23 @@ Tout arrive dans `data/` :
 
 ### La carte
 
-- Une pastille par bien, avec son prix. **Vert** = sous le marché,
-  **orange** = dans le marché, **rouge** = au-dessus, **gris** = pas d'estimation.
-- Clic sur une pastille ou sur la liste de gauche : la carte cadre **la parcelle
-  cadastrale du bien**, contour tracé, et affiche photo, prix au m², surface,
-  adresse exacte, référence de parcelle et contenance, DPE, écart au marché,
-  ancienneté de l'annonce, liens.
+Elle est faite pour décider d'aller frapper à une porte, pas pour tout savoir.
+
+- Fond **photo aérienne** (orthophotographies IGN) : on voit la maison, la cour,
+  les dépendances, l'accès.
+- Une pastille par bien, avec son **prix**. La couleur dit l'**ancienneté** de
+  l'annonce — bleu sous deux mois, ambre jusqu'à quatre, orange jusqu'à huit,
+  rouge au-delà. C'est le temps passé en vitrine qui dit la disponibilité du
+  vendeur, pas l'écart de prix.
+- La liste est triée du plus ancien au plus récent, les biens déjà traités en fin.
+- Chaque fiche porte trois boutons de suivi — **à prospecter · contacté ·
+  écarté** — conservés dans le navigateur : la carte se régénère chaque matin,
+  ton suivi lui survit.
+- Le bouton **Ouvrir l'annonce** mène directement à l'offre.
+- Clic sur une pastille ou sur la liste : la carte cadre **la parcelle
+  cadastrale du bien**, contour tracé sur la photo, emprise du bâtiment
+  ombrée. La fiche donne l'adresse exacte, la référence de parcelle et sa
+  contenance, l'écart au marché et le DPE.
 - Au zoom parcelle les pastilles laissent la place à de simples points : elles
   masqueraient le contour du terrain, qui est justement ce qu'on vient regarder.
 - Le bloc de filtres est masqué par défaut (`filtresCarte` dans la config) :
@@ -160,8 +176,8 @@ Tout arrive dans `data/` :
 - Les liens portent le nom de leur destination : « Annonce leboncoin »,
   « Analyse », « Cadastre », « Maps ». Un bouton ne peut pas annoncer une
   annonce et mener ailleurs.
-- Le fichier est autonome (Leaflet embarqué) ; seul le fond de carte
-  OpenStreetMap se charge en ligne.
+- Le fichier est autonome (Leaflet embarqué) ; seules les photographies
+  aériennes se chargent en ligne.
 
 **Sur téléphone**, la carte occupe tout l'écran et la liste devient un panneau
 glissant : une poignée le fait passer de replié à mi-hauteur puis grand ouvert,
@@ -171,7 +187,11 @@ hauteur du panneau pour que la parcelle reste visible.
 
 ### Le tableur
 
-Une ligne **par bien**, pas par annonce : prix, €/m², surface, terrain, pièces,
+Une ligne **par bien**, colonnes rangées dans l'ordre de la décision :
+ancienneté, prix, €/m², écart au marché, puis l'adresse et le détail, et enfin
+les liens. L'ancienneté est colorée au-delà de quatre mois.
+
+Contenu : prix, €/m², surface, terrain, pièces,
 **adresse estimée**, indice de confiance, **latitude/longitude**, parcelle
 cadastrale, DPE/GES, ancienneté, nombre de baisses de prix, **écart à la médiane
 DVF du secteur**, fourchette de marché, délai de vente moyen sur la commune,
@@ -243,11 +263,12 @@ Relève les annonces réellement en vente sur le secteur, retrouve leur adresse,
 et écrit deux cartes plus le tableur — sans navigateur, sans compte, sans
 configuration.
 
-`carte-annonces.html` utilise le fond OpenStreetMap. `carte-annonces-autonome.html`
-embarque son propre fond et fonctionne **sans aucune requête sortante** : trois
-échelles qui se relaient, la **France par départements**, les **communes** du
-secteur, puis le **plan cadastral** au zoom parcelle. Faute de requête sortante,
-cette version n'affiche pas les photos des annonces.
+`carte-annonces.html` charge les photographies aériennes de l'IGN.
+`carte-annonces-autonome.html` embarque tout et fonctionne **sans aucune requête
+sortante** : la France par départements et les communes du secteur en vue large,
+les **dalles de photo aérienne** autour de chaque bien au zoom parcelle. Elle
+pèse quelques mégaoctets, et n'affiche pas les photos des annonces, qui sont
+hébergées par le site.
 
 ```bash
 node scripts/carte-annonces.mjs --zone Auch --max 100 --types house,flat --filtres
@@ -262,7 +283,7 @@ régulièrement 503, et les fichiers ne bougent pas.
 npm test
 ```
 
-Trois campagnes, toutes **sans accès réseau** :
+Quatre campagnes, toutes **sans accès réseau** :
 
 - `test/smoke.mjs` — décodage d'une vraie page lacquereur.fr enregistrée,
   normalisation, base locale, tableur, carte.
@@ -270,7 +291,8 @@ Trois campagnes, toutes **sans accès réseau** :
   l'identique, avec baisse de prix, au titre réécrit ; non-confusion de deux
   maisons voisines de même taille ; rattrapage par la parcelle cadastrale ;
   rapport du matin.
-- `test/geoloc.mjs` — appariement annonce ↔ diagnostic : ce qui doit être
+- `test/geoloc.mjs` — géométrie cadastrale (trous, centroïdes, distance au bord)
+  et appariement annonce ↔ diagnostic : ce qui doit être
   accepté (surface annoncée plus large, consommation divergente, commune
   voisine) et surtout ce qui doit être refusé (étiquette climat différente,
   appartement pour une maison, distance excessive).

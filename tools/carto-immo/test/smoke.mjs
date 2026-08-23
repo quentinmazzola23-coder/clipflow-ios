@@ -193,11 +193,21 @@ writeCsv(records, csv);
 const map = writeMap(records, mapFile);
 
 check('le tableur est écrit et non vide', () => assert.ok(fs.statSync(xlsx).size > 5000));
-check('le CSV porte l\'en-tête et les lignes', () => {
+check('le CSV s\'ouvre sur ce qui décide de prospecter', () => {
   const lines = fs.readFileSync(csv, 'utf8').split('\n');
   assert.equal(lines.length, 3);
-  assert.ok(lines[0].startsWith('﻿Titre;'));
+  // L'ancienneté puis le prix : l'ordre des colonnes est celui de la décision.
+  assert.ok(lines[0].startsWith('﻿Jours en ligne;Prix;€/m²;'), lines[0].slice(0, 50));
+  assert.ok(lines[0].includes(';Statut;'));
   assert.ok(lines[1].includes('394000'));
+  assert.ok(lines[1].includes(';nouveau;'), 'le statut est reporté');
+});
+
+check('un écart de prix hors de proportion n\'est pas donné comme comparable', () => {
+  const f = path.join(out, 'atypique.csv');
+  writeCsv([{ ...records[0], ecartMarchePct: 536 }], f);
+  const colonnes = fs.readFileSync(f, 'utf8').split('\n')[1].split(';');
+  assert.equal(colonnes[3], '', 'la colonne écart marché reste vide');
 });
 check('la carte ne place que les biens localisés', () => {
   assert.equal(map.plotted, 1);
@@ -225,12 +235,12 @@ check('la parcelle cadastrale est tracée et détaillée', () => {
     ...records[0],
     parcelle: '78403000AB0604',
     contenance: 372,
-    parcelleGeom: [[[1.8785, 49.0022], [1.8788, 49.0022], [1.8788, 49.0025], [1.8785, 49.0025], [1.8785, 49.0022]]],
+    parcelleGeom: [[[[1.8785, 49.0022], [1.8788, 49.0022], [1.8788, 49.0025], [1.8785, 49.0025], [1.8785, 49.0022]]]],
   }], f);
   const h = fs.readFileSync(f, 'utf8');
   assert.ok(h.includes('"78403000AB0604"'), 'la référence de parcelle est transmise');
   assert.ok(h.includes('49.0025'), 'le contour est transmis');
-  assert.ok(h.includes('au cadastre'), 'la contenance est affichée');
+  assert.ok(h.includes("' m²</span>'"), 'la contenance est affichée');
   assert.ok(h.includes('tracerParcelle'), 'le tracé est présent');
 });
 
@@ -271,8 +281,41 @@ check('un lien vers une autre source ne se fait pas passer pour une annonce', ()
   assert.ok(h.includes('app.dvf.etalab.gouv.fr'));
 });
 
-check('sans fond vectoriel, la carte utilise OpenStreetMap', () => {
-  assert.ok(fs.readFileSync(mapFile, 'utf8').includes('tile.openstreetmap.org'));
+check('par défaut, la carte en ligne est une photo aérienne', () => {
+  const h = fs.readFileSync(mapFile, 'utf8');
+  assert.ok(h.includes('ORTHOIMAGERY.ORTHOPHOTOS'), 'orthophotographie IGN');
+  assert.ok(!h.includes('tile.openstreetmap.org'), 'pas de fond plan résiduel');
+});
+
+check('le fond plan reste disponible', () => {
+  const f = path.join(out, 'carte-plan.html');
+  writeMap(records, f, { fond: 'plan' });
+  const h = fs.readFileSync(f, 'utf8');
+  assert.ok(h.includes('tile.openstreetmap.org'));
+  assert.ok(!h.includes('ORTHOIMAGERY'), 'un seul fond à la fois');
+});
+
+check('la carte garde son propre minZoom malgré les couches', () => {
+  // Sans minZoom explicite, Leaflet adopte celui de la couche la plus
+  // restrictive — la photo embarquée — et refuse de dézoomer sur la France.
+  const h = fs.readFileSync(mapFile, 'utf8');
+  assert.match(h, /L\.map\('map',[^)]*minZoom:\s*5/);
+});
+
+check('la photo aérienne peut être embarquée dans la page', () => {
+  const f = path.join(out, 'carte-photo.html');
+  writeMap([{ ...records[0], codeInsee: '78403' }], f, {
+    basemap: {
+      departements: [],
+      communes: [],
+      attribution: 'IGN',
+      tuiles: { images: { '18/1/2': 'data:image/jpeg;base64,AAAA' }, zoomMin: 16, zoomMax: 18 },
+    },
+  });
+  const h = fs.readFileSync(f, 'utf8');
+  assert.ok(h.includes('CouchePhoto'), 'la couche embarquée est présente');
+  assert.ok(h.includes('"18/1/2"'), 'les dalles sont injectées');
+  assert.ok(!h.includes('data.geopf.fr'), 'aucune requête sortante');
 });
 
 check('la carte est autonome (Leaflet embarqué)', () => {

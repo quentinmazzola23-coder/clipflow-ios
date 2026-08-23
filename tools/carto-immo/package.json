@@ -13,7 +13,8 @@
     "map": "node src/cli.js map",
     "install-browser": "playwright install chromium",
     "test": "node test/smoke.mjs && node test/dedup.mjs && node test/geoloc.mjs && node test/integration.mjs",
-    "annonces": "node scripts/carte-annonces.mjs"
+    "annonces": "node src/cli.js annonces",
+    "carte": "node scripts/carte-annonces.mjs"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

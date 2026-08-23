@@ -9,7 +9,7 @@
  */
 import assert from 'node:assert/strict';
 import { noterDiagnostic } from '../src/geoloc.js';
-import { dansAnneau, metres } from '../src/cadastre.js';
+import { dansAnneau, dansPolygone, aire, centroide, metres, distanceAuBord } from '../src/cadastre.js';
 
 let passed = 0;
 const check = (nom, fn) => { fn(); passed++; console.log(`  ✓ ${nom}`); };
@@ -106,11 +106,49 @@ check('une adresse sans numéro ni rue pèse moins', () => {
 
 // ── Géométrie ─────────────────────────────────────────────────────────────
 
-check('le test point-dans-parcelle est correct', () => {
-  const carre = [[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]];
+const carre = [[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]];
+const trou = [[.4, .4], [.4, .6], [.6, .6], [.6, .4], [.4, .4]];
+
+check('le test point-dans-anneau est correct', () => {
   assert.equal(dansAnneau(0.5, 0.5, carre), true);
   assert.equal(dansAnneau(1.5, 0.5, carre), false);
   assert.equal(dansAnneau(0.5, 1.5, carre), false);
+});
+
+check('une parcelle percée ne contient pas son trou', () => {
+  // Une parcelle en U n'englobe pas ce qu'elle enserre.
+  assert.equal(dansPolygone(0.5, 0.5, [carre, trou]), false);
+  assert.equal(dansPolygone(0.2, 0.2, [carre, trou]), true);
+});
+
+check('l\'aire déduit les trous', () => {
+  const pleine = aire([[carre]]);
+  const percee = aire([[carre, trou]]);
+  assert.ok(percee < pleine);
+  // Le trou fait 4 % du carré.
+  assert.ok(Math.abs(1 - percee / pleine - 0.04) < 0.005, String(percee / pleine));
+});
+
+check('le centroïde ne se laisse pas tirer par les sommets denses', () => {
+  // Rectangle dont un seul côté est densément découpé : la moyenne des sommets
+  // s'y déporte, le centroïde géométrique reste au milieu du terrain.
+  const anneau = [];
+  for (let i = 0; i <= 60; i++) anneau.push([0, i / 60]); // bord gauche subdivisé
+  anneau.push([1, 1], [1, 0], [0, 0]);
+  const c = centroide([[anneau]]);
+  const moyenne = anneau.reduce((a, p) => a + p[0], 0) / anneau.length;
+  assert.ok(moyenne < 0.1, 'la moyenne des sommets vaut ' + moyenne.toFixed(3));
+  assert.ok(c[0] > 0.4 && c[0] < 0.6, 'le centroïde vaut ' + c[0].toFixed(3));
+});
+
+check('la distance au bord est mesurée sur le contour, pas sur le centre', () => {
+  // Parcelle très allongée : un point à son extrémité en est proche par le
+  // bord, loin par le centre.
+  const bande = [[0, 0], [0, 0.0001], [0.01, 0.0001], [0.01, 0], [0, 0]];
+  const parBord = distanceAuBord(0.00005, 0.0102, [[bande]]);
+  const parCentre = metres(0.00005, 0.0102, 0.00005, 0.005);
+  assert.ok(parBord < 30, 'au bord : ' + Math.round(parBord) + ' m');
+  assert.ok(parCentre > 500, 'au centre : ' + Math.round(parCentre) + ' m');
 });
 
 check('la distance en mètres est plausible', () => {

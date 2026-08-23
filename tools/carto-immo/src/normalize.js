@@ -206,7 +206,10 @@ export function normaliserAnnonce(annonce, localisation, marche = {}, { collecte
     dateDpe: annonce.dateDpe ?? null,
 
     publieeLe: annonce.publiee ? String(annonce.publiee).slice(0, 10) : null,
-    joursEnLigne: daysBetween(annonce.publiee, collectedAt),
+    // À défaut de date de publication, la dernière modification donne un
+    // minorant : le bien est en ligne depuis au moins cette date.
+    joursEnLigne: daysBetween(annonce.publiee ?? annonce.modifiee, collectedAt),
+    ancienneteMinorant: !annonce.publiee && !!annonce.modifiee,
     nbBaisses: annonce.prixBaisse ? 1 : 0,
 
     ...marche,

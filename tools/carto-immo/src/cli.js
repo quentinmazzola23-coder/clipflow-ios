@@ -40,7 +40,14 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--config') args.config = argv[++i];
-    else if (a === '--max') args.max = Number(argv[++i]);
+    else if (a === '--max') {
+      const v = Number(argv[++i]);
+      if (!Number.isFinite(v) || v <= 0) {
+        console.error('--max attend un nombre positif.');
+        process.exit(2);
+      }
+      args.max = v;
+    }
     else if (a === '--zone') (args.zones ??= []).push(argv[++i]);
     else if (a === '--headless') args.headless = true;
     else if (a === '--quiet') args.quiet = true;
@@ -54,9 +61,13 @@ function openInBrowser(file) {
     process.platform === 'win32' ? 'cmd' : process.platform === 'darwin' ? 'open' : 'xdg-open';
   const cmdArgs = process.platform === 'win32' ? ['/c', 'start', '', file] : [file];
   try {
-    spawn(cmd, cmdArgs, { detached: true, stdio: 'ignore' }).unref();
+    const proc = spawn(cmd, cmdArgs, { detached: true, stdio: 'ignore' });
+    // spawn signale ses échecs par événement, pas par exception : sans ce
+    // gestionnaire, l'absence d'environnement graphique ferait tomber le process.
+    proc.on('error', () => {});
+    proc.unref();
   } catch {
-    /* pas d'environnement graphique : le chemin affiché suffit */
+    /* rien à faire : le chemin du fichier a été affiché */
   }
 }
 
@@ -255,6 +266,7 @@ async function cmdAnnonces(cfg, args) {
     max: args.max ?? cfg.bienici?.max ?? 200,
     cacheDir: cfg.paths.cache,
     cadastre: cfg.cadastre,
+    filtres: cfg.filters,
   });
 
   // Les annonces sans adresse exacte restent hors carte : on ne place pas un
@@ -270,6 +282,15 @@ async function cmdAnnonces(cfg, args) {
   saveStore(cfg.paths.store, store);
 
   log.ok(`${localisees}/${total} annonces localisées · ${nouveaux} nouvelles en base`);
+
+  // Même rapport que la voie leboncoin : c'est ce qu'on lit en premier.
+  const rapport = construireRapport(
+    { nouveaux: [], republies: [], connus: [] },
+    fiches.filter((f) => f.localisationPrecise && f.statut === 'nouveau')
+  );
+  const texte = ecrireRapport(rapport, cfg.paths.report);
+  console.log('\n' + texte);
+  log.ok(`Rapport  : ${cfg.paths.report}`);
 
   const map = await buildOutputs(cfg, store);
   if (map && cfg.openMapWhenDone) openInBrowser(cfg.paths.map);
@@ -322,8 +343,15 @@ async function main() {
       return void (await buildOutputs(cfg, loadStore(cfg.paths.store)));
     case 'schedule':
       return cmdSchedule(cfg);
-    default:
+    case 'help':
+    case '--help':
+    case '-h':
       console.log(USAGE);
+      return;
+    default:
+      console.error(`Commande inconnue : ${cmd}`);
+      console.log(USAGE);
+      process.exitCode = 2;
   }
 }
 

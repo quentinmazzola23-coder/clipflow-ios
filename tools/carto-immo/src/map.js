@@ -25,6 +25,36 @@ const FOND_OSM = `L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.pn
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
 }).addTo(map);`;
 
+// Orthophotographie de l'IGN : en prospection, on veut voir la maison, la cour,
+// les dépendances et l'accès — pas un plan schématique.
+const FOND_SATELLITE = `L.tileLayer(
+  'https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0' +
+  '&LAYER=ORTHOIMAGERY.ORTHOPHOTOS&STYLE=normal&TILEMATRIXSET=PM&FORMAT=image/jpeg' +
+  '&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}',
+  { maxZoom: 21, maxNativeZoom: 19, attribution: 'Photographies aériennes &copy; IGN' }
+).addTo(map);`;
+
+/** Photo aérienne embarquée, pour la page autonome. */
+const FOND_TUILES = `map.createPane('photo');
+map.getPane('photo').style.zIndex = 250;
+const imagesTuiles = BASEMAP.tuiles.images;
+const CouchePhoto = L.GridLayer.extend({
+  createTile(coords) {
+    const img = document.createElement('img');
+    const src = imagesTuiles[coords.z + '/' + coords.x + '/' + coords.y];
+    // Sans dalle, on laisse voir le fond vectoriel plutôt qu'un carré vide.
+    if (src) img.src = src; else img.style.display = 'none';
+    img.width = img.height = 256;
+    return img;
+  },
+});
+new CouchePhoto({
+  pane: 'photo',
+  minZoom: BASEMAP.tuiles.zoomMin,
+  maxNativeZoom: BASEMAP.tuiles.zoomMax,
+  maxZoom: 21,
+}).addTo(map);`;
+
 // Fond vectoriel embarqué : la page reste lisible sans aucune requête sortante.
 //
 // Trois échelles, chacune prenant le relais de la précédente : la France par
@@ -79,13 +109,13 @@ const ZOOM_CADASTRE = 15;
 // que le DOM ne suit pas, en particulier sur mobile.
 const renduCadastre = L.canvas({ pane: 'tilePane', padding: .4 });
 for (const poly of (BASEMAP.cadastre?.parcelles ?? [])) {
-  L.polygon(poly.map(r => r.map(([x, y]) => [y, x])), {
+  L.polygon(versLatLng(poly), {
     renderer: renduCadastre, pane: 'tilePane', color: '#cfc8ba', weight: 0.7,
     fillColor: '#f6f3ec', fillOpacity: 1, interactive: false,
   }).addTo(cadastre);
 }
 for (const poly of (BASEMAP.cadastre?.batiments ?? [])) {
-  L.polygon(poly.map(r => r.map(([x, y]) => [y, x])), {
+  L.polygon(versLatLng(poly), {
     renderer: renduCadastre, pane: 'tilePane', color: '#b9b0a0', weight: 0.6,
     fillColor: '#ddd6c8', fillOpacity: 1, interactive: false,
   }).addTo(cadastre);
@@ -132,11 +162,12 @@ const escapeJson = (obj) =>
  *   attribution }`. Utile quand la page doit fonctionner sans accès réseau.
  * @param {boolean} [opts.filtres] Affiche le bloc de recherche et de filtres.
  *   À `false`, la carte va droit aux biens et à leur localisation exacte.
+ * @param {'plan'|'satellite'} [opts.fond] Fond des cartes en ligne.
  */
 export function writeMap(
   records,
   file,
-  { title = 'Veille immobilière', note = null, basemap = null, filtres = true } = {}
+  { title = 'Veille immobilière', note = null, basemap = null, filtres = true, fond = 'satellite' } = {}
 ) {
   const points = records
     .filter((r) => Number.isFinite(r.latitude) && Number.isFinite(r.longitude))
@@ -156,7 +187,9 @@ export function writeMap(
       cf: r.niveauConfiance ?? null,
       pr: r.localisationPrecise,
       pcl: r.parcelle ?? null,
+      pcf: r.parcelleConfiance ?? null,
       pg: r.parcelleGeom ?? null,
+      bg: r.batimentGeom ?? null,
       ct: r.contenance ?? null,
       la: r.latitude,
       lo: r.longitude,
@@ -164,6 +197,7 @@ export function writeMap(
       ges: r.ges,
       an: r.anneeConstruction,
       j: r.joursEnLigne,
+      jm: !!r.ancienneteMinorant,
       nb: r.nbBaisses,
       bp: r.baissePct,
       ec: r.ecartMarchePct,
@@ -228,6 +262,9 @@ input[type=search]{padding-left:10px}
 .chip{border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 11px;font-size:12.5px;cursor:pointer;color:var(--muted);user-select:none}
 .chip[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
 #count{padding:9px 18px;font-size:12.5px;color:var(--muted);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+#legende{display:flex;gap:10px;flex-wrap:wrap;padding:9px 18px;border-bottom:1px solid var(--line);font-size:11.5px;color:var(--muted)}
+#legende span{display:flex;align-items:center;gap:5px}
+#legende i{width:10px;height:10px;border-radius:50%;display:inline-block}
 #count .actions{display:flex;gap:14px}
 #count button{border:none;background:none;color:var(--accent);font:inherit;font-size:12.5px;cursor:pointer;text-decoration:underline;padding:0}
 #list{overflow:auto;flex:1;min-height:0}
@@ -238,9 +275,22 @@ input[type=search]{padding-left:10px}
 .card .detail{margin-top:11px;padding-top:11px;border-top:1px solid var(--line)}
 .card img{width:74px;height:56px;object-fit:cover;border-radius:7px;background:#e9e7e1;flex:none}
 .card .noimg{width:74px;height:56px;border-radius:7px;background:#e9e7e1;flex:none}
-.card h3{margin:0 0 3px;font-size:13px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.card .meta{font-size:12px;color:var(--muted)}
-.card .price{font-size:13.5px;font-weight:680;margin-top:2px}
+.card .corps{min-width:0;flex:1}
+.card .ligne1{display:flex;align-items:baseline;gap:8px;font-variant-numeric:tabular-nums}
+.card .prix{font-size:16px;font-weight:700;letter-spacing:-.02em}
+.card .m2{font-size:12px;color:var(--muted)}
+.age{color:#fff;padding:1px 7px;border-radius:999px;font-size:12px}
+.card .jours{margin-left:auto;color:#fff;font-size:11.5px;font-weight:650;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.card .meta{font-size:12px;color:var(--muted);margin-top:2px}
+.card h3{margin:3px 0 0;font-size:12.5px;font-weight:500;color:var(--muted);line-height:1.3;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+.card.contacte{opacity:.55}
+.card.contacte .prix{text-decoration:line-through;text-decoration-thickness:1px}
+.card.ecarte{opacity:.35}
+.suivi{display:flex;gap:6px;margin-top:10px}
+.suivi button{flex:1;border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 6px;font:inherit;font-size:12px;cursor:pointer;color:var(--muted)}
+.suivi button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
+.pop .prospecter{display:block;text-align:center;background:var(--accent);color:#fff;border-radius:9px;padding:10px;font-size:13px;font-weight:600;text-decoration:none;margin-top:11px}
+.pop .prospecter:hover{opacity:.9}
 .tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:5px;margin-left:5px;vertical-align:1px}
 .tag.new{background:#fff3d6;color:var(--amber)}
 .tag.again{background:#e8eefb;color:#0b57d0}
@@ -250,7 +300,7 @@ input[type=search]{padding-left:10px}
 .pin{width:13px;height:13px;border-radius:50%;border:2.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)}
 .pill{width:max-content;white-space:nowrap;color:#fff;font-size:11.5px;font-weight:650;padding:3px 8px;border-radius:999px;border:1.5px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.35)}
 .marker.on{outline:3px solid rgba(31,58,95,.35);outline-offset:2px;border-radius:999px}
-.g{background:var(--green)} .a{background:var(--amber)} .r{background:var(--red)} .n{background:var(--grey)}
+.j0{background:#8b9099} .j1{background:#4a7fb5} .j2{background:#c08a2e} .j3{background:#c25a1e} .j4{background:#b3261e}
 .leaflet-popup-content{margin:0;width:296px!important}
 .leaflet-popup-content-wrapper{border-radius:12px;padding:0;overflow:hidden}
 .pop img{width:100%;height:132px;object-fit:cover;display:block;background:#e9e7e1}
@@ -320,6 +370,7 @@ input[type=search]{padding-left:10px}
       ${note ? `<p class="note">${note}</p>` : ''}
     </header>
     ${filtres ? BLOC_FILTRES : ''}
+    <div id="legende"></div>
     <div id="count"><span></span><span class="actions"><button id="voirtout">Tout voir</button>${filtres ? '<button id="reset">Réinitialiser</button>' : ''}</span></div>
     <div id="list"></div>
     <p id="credits"></p>
@@ -333,19 +384,28 @@ const GENERATED = ${escapeJson(new Date().toISOString())};
 const SANS_COORDS = ${sansCoords};
 const AVEC_FILTRES = ${filtres};
 const AVEC_PHOTOS = ${!basemap};
-const ATTRIBUTION = ${escapeJson(basemap?.attribution ?? '© OpenStreetMap')};
+const ATTRIBUTION = ${escapeJson(
+  basemap?.attribution ?? (fond === 'satellite' ? 'Photographies aériennes © IGN' : '© OpenStreetMap')
+)};
 const BASEMAP = ${basemap ? escapeJson(basemap) : 'null'};
 
 const eur = n => n == null ? '—' : new Intl.NumberFormat('fr-FR').format(Math.round(n)) + ' €';
 const num = n => n == null ? '—' : new Intl.NumberFormat('fr-FR').format(n);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-/** Couleur du marqueur : verte si le prix est sous le marché, rouge au-dessus. */
+/**
+ * Couleur par ancienneté de l'annonce. En prospection, c'est le temps passé
+ * en vitrine qui dit la disponibilité du vendeur, pas l'écart de prix.
+ */
+const PALIERS = [
+  { min: 240, cle: 'j4', texte: '8 mois et plus' },
+  { min: 120, cle: 'j3', texte: '4 à 8 mois' },
+  { min: 60,  cle: 'j2', texte: '2 à 4 mois' },
+  { min: 0,   cle: 'j1', texte: 'moins de 2 mois' },
+];
 function tone(d){
-  if (d.ec == null) return 'n';
-  if (d.ec <= -5) return 'g';
-  if (d.ec >= 8) return 'r';
-  return 'a';
+  if (d.j == null) return 'j0';
+  return (PALIERS.find(p => d.j >= p.min) ?? PALIERS[PALIERS.length - 1]).cle;
 }
 
 const nbNeufs = DATA.filter(d => d.st === 'nouveau').length;
@@ -359,12 +419,22 @@ document.getElementById('stamp').textContent =
 
 document.getElementById('credits').innerHTML = 'Fond de carte : ' + ATTRIBUTION;
 
-const map = L.map('map', { zoomControl: true, scrollWheelZoom: true });
+/** GeoJSON [lon, lat] → Leaflet [lat, lon], en conservant trous et multi-parties. */
+const versLatLng = (geom) => geom.map((poly) => poly.map((anneau) => anneau.map(([x, y]) => [y, x])));
+
+// minZoom explicite : sans lui, Leaflet adopte celui de la couche la plus
+// restrictive — la photo embarquée — et la carte refuse de dézoomer.
+const map = L.map('map', { zoomControl: true, scrollWheelZoom: true, minZoom: 5, maxZoom: 21 });
 // Vue initiale posée avant toute couche : Leaflet exige un centre pour projeter.
 map.setView([46.6, 2.4], 6);
 
-${basemap ? FOND_VECTORIEL : FOND_OSM}
+document.getElementById('legende').innerHTML =
+  '<span style="color:var(--ink);font-weight:600">Ancienneté</span>' +
+  PALIERS.slice().reverse().map(p => '<span><i class="' + p.cle + '"></i>' + p.texte + '</span>').join('');
+
+${basemap ? FOND_VECTORIEL : fond === 'satellite' ? FOND_SATELLITE : FOND_OSM}
 ${basemap?.cadastre ? FOND_CADASTRE : ''}
+${basemap?.tuiles ? FOND_TUILES : ''}
 
 const layer = L.layerGroup().addTo(map);
 const parcelles = L.layerGroup().addTo(map);
@@ -417,79 +487,118 @@ function libelleLien(url, defaut){
 function corpsFiche(d){
   const rows = [];
   const push = (k, v) => { if (v) rows.push('<dt>' + k + '</dt><dd>' + v + '</dd>'); };
-  push('Surface', d.s ? num(d.s) + ' m²' + (d.pc ? ' · ' + d.pc + ' pièces' : '') : null);
-  push('Terrain', d.te ? num(d.te) + ' m²' : null);
+
+  push('En ligne', d.j != null
+    ? '<b class="age ' + tone(d) + '">' + (d.jm ? 'au moins ' : '') + d.j + ' jours</b>' +
+      (d.nb ? ' <span style="color:var(--muted)">· prix baissé</span>' : '')
+    : null);
   push('Adresse', d.ad
     ? esc(d.ad) + (d.cf ? ' <span style="color:var(--muted)">— confiance ' + esc(d.cf) + '</span>' : '')
     : (d.v ? esc(d.v) + ' — localisation approchée' : null));
+  push('Bien', [
+    d.s ? num(d.s) + ' m²' : null,
+    d.pc ? d.pc + ' pièces' : null,
+    d.te ? 'terrain ' + num(d.te) + ' m²' : null,
+  ].filter(Boolean).join(' · ') || null);
   push('Parcelle', d.pcl
     ? '<span style="font-variant-numeric:tabular-nums">' + esc(d.pcl) + '</span>' +
-      (d.ct ? ' <span style="color:var(--muted)">· ' + num(d.ct) + ' m² au cadastre</span>' : '')
+      (d.ct ? ' <span style="color:var(--muted)">· ' + num(d.ct) + ' m²</span>' : '') +
+      (d.pcf === 'moyenne' || d.pcf === 'faible'
+        ? ' <span style="color:var(--amber)">· à confirmer</span>' : '')
     : null);
-  push('DPE', d.dpe ? dpeBadge(d.dpe) + (d.ges ? ' &nbsp;GES ' + dpeBadge(d.ges) : '') : null);
-  push('Construit en', d.an);
-  if (d.ec != null) {
+  if (d.ec != null && Math.abs(d.ec) <= 120) {
     const col = d.ec > 0 ? 'var(--red)' : 'var(--green)';
-    push('Écart marché', '<b style="color:' + col + '">' + (d.ec > 0 ? '+' : '') + d.ec.toFixed(1) + ' %</b>' +
-      (d.fb && d.fh ? ' <span style="color:var(--muted)">(' + eur(d.fb) + '–' + eur(d.fh) + ')</span>' : ''));
+    push('Face au marché', '<b style="color:' + col + '">' + (d.ec > 0 ? '+' : '') + d.ec.toFixed(0) + ' %</b>');
+  } else if (d.ec != null) {
+    push('Face au marché', '<span style="color:var(--muted)">bien atypique, hors comparaison communale</span>');
   }
-  push('En ligne', d.j != null ? d.j + ' jours' + (d.nb ? ' · ' + d.nb + ' baisse' + (d.nb > 1 ? 's' : '') + (d.bp ? ' (−' + d.bp.toFixed(1) + ' %)' : '') : '') : null);
-  push('Délai commune', d.dv ? d.dv + ' jours' : null);
-  if (d.pa > 1) {
-    const depuis = d.d1 ? Math.round((Date.now() - new Date(d.d1)) / 86400000) : null;
-    push('Suivi', d.pa + ' parutions' + (depuis != null ? ' sur ' + depuis + ' jours' : '') +
-      ' <span style="color:var(--muted)">— remis en ligne</span>');
-  }
-  if (d.pv) {
-    const baisse = d.pv.apres < d.pv.avant;
-    push('Dernier prix', '<span style="color:' + (baisse ? 'var(--green)' : 'var(--red)') + '">' +
-      eur(d.pv.avant) + ' → ' + eur(d.pv.apres) + '</span>');
-  }
+  if (d.dpe) push('DPE', dpeBadge(d.dpe) + (d.ges ? ' &nbsp;GES ' + dpeBadge(d.ges) : ''));
 
-  const links = [];
+  const liens = [];
   const lien = (url, defaut) => '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer"' +
     ' title="' + esc(url) + '">' + esc(libelleLien(url, defaut)) + '</a>';
-  if (d.ua) links.push(lien(d.ua, 'Annonce'));
-  if (d.ul) links.push(lien(d.ul, 'Analyse'));
-  if (d.um) links.push(lien(d.um, 'Maps'));
+  if (d.um) liens.push(lien(d.um, 'Maps'));
+  if (d.ul) liens.push(lien(d.ul, 'Analyse'));
 
-  return { rows: rows.join(''), links: links.join('') };
+  const action = d.ua
+    ? '<a class="prospecter" href="' + esc(d.ua) + '" target="_blank" rel="noopener noreferrer">' +
+      'Ouvrir l’annonce · ' + esc(libelleLien(d.ua, 'source').replace(/^Annonce /, '')) + '</a>'
+    : '';
+
+  return { rows: rows.join(''), links: liens.join(''), action };
 }
 
 /** Bulle sur la carte : image, prix, caractéristiques, liens. */
 function popup(d){
-  const { rows, links } = corpsFiche(d);
+  const { rows, links, action } = corpsFiche(d);
   return '<div class="pop">' +
     (d.ph ? '<img src="' + esc(d.ph) + '" alt="" loading="lazy">' : '') +
     '<div class="body">' +
-      '<h3>' + esc(d.t || 'Annonce ' + d.id) + '</h3>' +
       '<div class="p">' + eur(d.p) + (d.m2 ? '<small>' + num(d.m2) + ' €/m²</small>' : '') + '</div>' +
       '<dl>' + rows + '</dl>' +
+      action +
       '<div class="links">' + links + '</div>' +
+      boutonsSuivi(d.id) +
     '</div></div>';
+}
+
+/** Boutons de suivi : où en est-on de la prospection de ce bien. */
+function boutonsSuivi(id){
+  const actuel = statut(id);
+  return '<div class="suivi" data-suivi="' + id + '">' +
+    ['afaire', 'contacte', 'ecarte'].map((v) =>
+      '<button type="button" data-valeur="' + v + '" aria-pressed="' + (actuel === v) + '">' +
+      LIBELLE_STATUT[v] + '</button>').join('') +
+    '</div>';
 }
 
 /** Même contenu, déplié dans la liste : sur mobile la bulle masquerait la carte. */
 function detailFiche(d){
-  const { rows, links } = corpsFiche(d);
-  return '<div class="pop"><dl>' + rows + '</dl><div class="links">' + links + '</div></div>';
+  const { rows, links, action } = corpsFiche(d);
+  return '<div class="pop"><dl>' + rows + '</dl>' + action +
+    '<div class="links">' + links + '</div>' + boutonsSuivi(d.id) + '</div>';
 }
 
 function card(d){
+  const st = statut(d.id);
+  const comparable = d.ec == null || Math.abs(d.ec) <= 120;
   const tags =
-    (d.st === 'nouveau' ? '<span class="tag new">nouveau</span>' : '') +
-    (d.st === 'republie' ? '<span class="tag again">remis en ligne</span>' : '') +
-    (d.pm === 'Sous le marché' ? '<span class="tag under">sous marché</span>' : '') +
-    (d.pm === 'Au-dessus du marché' ? '<span class="tag over">au-dessus</span>' : '');
+    (comparable && d.pm === 'Sous le marché' ? '<span class="tag under">sous marché</span>' : '') +
+    (comparable && d.pm === 'Au-dessus du marché' ? '<span class="tag over">au-dessus</span>' : '') +
+    (d.st === 'republie' ? '<span class="tag again">remis en ligne</span>' : '');
+
   const vignette = d.ph ? '<img src="' + esc(d.ph) + '" alt="" loading="lazy">'
     : AVEC_PHOTOS ? '<div class="noimg"></div>' : '';
-  return '<article class="card" data-id="' + d.id + '" tabindex="0">' +
+
+  return '<article class="card' + (st !== 'afaire' ? ' ' + st : '') + '" data-id="' + d.id + '" tabindex="0">' +
     '<div class="head">' + vignette +
-    '<div><h3>' + esc(d.t || 'Annonce ' + d.id) + tags + '</h3>' +
-    '<div class="meta">' + esc(d.v || '') + (d.cp ? ' · ' + esc(d.cp) : '') +
-      (d.s ? ' · ' + num(d.s) + ' m²' : '') + (d.pc ? ' · ' + d.pc + ' p.' : '') + '</div>' +
-    '<div class="price">' + eur(d.p) + (d.m2 ? ' <span class="meta">' + num(d.m2) + ' €/m²</span>' : '') + '</div>' +
+    '<div class="corps">' +
+      '<div class="ligne1">' +
+        '<span class="prix">' + eur(d.p) + '</span>' +
+        (d.m2 ? '<span class="m2">' + num(d.m2) + ' €/m²</span>' : '') +
+        '<span class="jours ' + tone(d) + '">' + (d.j != null ? (d.jm ? '≥ ' : '') + d.j + ' j' : '?') + '</span>' +
+      '</div>' +
+      '<div class="meta">' + esc(d.v || '') +
+        (d.s ? ' · ' + num(d.s) + ' m²' : '') + (d.pc ? ' · ' + d.pc + ' p.' : '') +
+        (d.te ? ' · terrain ' + num(d.te) + ' m²' : '') + '</div>' +
+      '<h3>' + esc(d.t || 'Annonce ' + d.id) + tags + '</h3>' +
     '</div></div></article>';
+}
+
+// ── Suivi de prospection ──────────────────────────────────────────────────
+// Conservé dans le navigateur : la carte se régénère chaque matin, le suivi
+// des contacts, lui, doit survivre.
+const CLE_SUIVI = 'carto-immo:suivi';
+let suivi = {};
+try { suivi = JSON.parse(localStorage.getItem(CLE_SUIVI) || '{}'); } catch { suivi = {}; }
+
+const statut = (id) => suivi[id] ?? 'afaire';
+const LIBELLE_STATUT = { afaire: 'À prospecter', contacte: 'Contacté', ecarte: 'Écarté' };
+
+function definirStatut(id, valeur){
+  if (valeur === 'afaire') delete suivi[id]; else suivi[id] = valeur;
+  try { localStorage.setItem(CLE_SUIVI, JSON.stringify(suivi)); } catch { /* navigation privée */ }
+  render();
 }
 
 const F = { q:'', pmin:null, pmax:null, smin:null, smax:null, nw:false, again:false, under:false, drop:false, exact:false };
@@ -512,7 +621,7 @@ function matches(d){
   return true;
 }
 
-function select(id, fly){
+function select(id, fly, { bulleDejaGeree = false } = {}){
   if (selected && markers.has(selected)) {
     const p = markers.get(selected);
     p.m.setIcon(icon(p.d, false));
@@ -531,15 +640,19 @@ function select(id, fly){
     }
     // La bulle s'ancre au même point que la parcelle : sans décalage, elle la
     // recouvre. On la remonte de la demi-hauteur réelle du terrain à l'écran.
+    const decalerBulle = () => {
+      const bulle = entry.m.getPopup();
+      if (!bulle || !entry.parcelle) return;
+      const b = entry.parcelle.getBounds();
+      const haut = map.latLngToContainerPoint(b.getNorthWest()).y;
+      const bas = map.latLngToContainerPoint(b.getSouthEast()).y;
+      // Demi-hauteur du terrain, plus la pointe de la bulle et une marge.
+      bulle.options.offset = L.point(0, -(Math.abs(bas - haut) / 2 + 40));
+      if (entry.m.isPopupOpen()) entry.m.openPopup(); // réapplique le décalage
+    };
     const ouvrirBulle = () => {
       if (!entry.m.getPopup()) return;
-      if (entry.parcelle) {
-        const b = entry.parcelle.getBounds();
-        const haut = map.latLngToContainerPoint(b.getNorthWest()).y;
-        const bas = map.latLngToContainerPoint(b.getSouthEast()).y;
-        // Demi-hauteur du terrain, plus la pointe de la bulle et une marge.
-        entry.m.getPopup().options.offset = L.point(0, -(Math.abs(bas - haut) / 2 + 40));
-      }
+      decalerBulle();
       entry.m.openPopup();
     };
 
@@ -553,19 +666,31 @@ function select(id, fly){
     if (fly) {
       const duree = DOUX ? .6 : 0;
       if (!mobile) map.once('moveend', ouvrirBulle);
-      if (entry.parcelle) {
-        map.flyToBounds(entry.parcelle.getBounds().pad(1.2), {
+      const bornes = entry.parcelle?.getBounds();
+      if (bornes && mobile) {
+        // La bande de carte laissée par le panneau est trop courte pour un
+        // cadrage classique : on fixe le zoom, puis on décale le centre pour
+        // que la parcelle se pose dans la partie visible.
+        const zoom = Math.max(17, Math.min(19, map.getBoundsZoom(bornes.pad(0.4), true)));
+        const pt = map.project(bornes.getCenter(), zoom);
+        pt.y += masqueBas() / 2;
+        map.flyTo(map.unproject(pt, zoom), zoom, { duration: duree });
+      } else if (bornes) {
+        map.flyToBounds(bornes.pad(1.2), {
           duration: duree,
           maxZoom: 19,
-          // Réserver la place de la bulle sur grand écran, celle du panneau sur mobile.
-          paddingTopLeft: [20, mobile ? 20 : 360],
-          paddingBottomRight: [20, mobile ? masqueBas() + 20 : 40],
+          // Réserver la place de la bulle, qui s'ouvre au-dessus du point.
+          paddingTopLeft: [20, 360],
+          paddingBottomRight: [20, 40],
         });
       } else {
         map.flyTo(entry.m.getLatLng(), Math.max(map.getZoom(), 17), { duration: duree });
       }
-    } else if (!mobile) {
+    } else if (!mobile && !bulleDejaGeree) {
       ouvrirBulle();
+    } else if (!mobile) {
+      // Bulle ouverte par Leaflet : on n'a plus qu'à la décaler de la parcelle.
+      decalerBulle();
     }
   }
 }
@@ -573,7 +698,12 @@ function select(id, fly){
 /** Contour de la parcelle cadastrale du bien, en évidence quand il est choisi. */
 function tracerParcelle(d, sel){
   if (!d.pg) return null;
-  return L.polygon(d.pg.map(r => r.map(([x, y]) => [y, x])), {
+  if (d.bg) {
+    L.polygon(versLatLng(d.bg), {
+      color: '#0f2742', weight: 1.2, fillColor: '#0f2742', fillOpacity: .18, interactive: false,
+    }).addTo(parcelles);
+  }
+  return L.polygon(versLatLng(d.pg), {
     color: sel ? '#0f2742' : '#3b6fb0',
     weight: sel ? 3.5 : 2.2,
     fillColor: sel ? '#3b6fb0' : '#5c86bd',
@@ -589,9 +719,12 @@ function tracerParcelle(d, sel){
  */
 function amenerDansLaListe(el){
   const liste = document.getElementById('list');
-  const cible = el.offsetTop - 8;
-  if (cible < liste.scrollTop || cible > liste.scrollTop + liste.clientHeight - el.offsetHeight) {
-    liste.scrollTo({ top: cible, behavior: DOUX ? 'smooth' : 'auto' });
+  // offsetTop se compte depuis le premier ancêtre positionné, qui n'est pas la
+  // liste : on mesure la position réelle de la fiche dans son conteneur.
+  const haut = el.getBoundingClientRect().top - liste.getBoundingClientRect().top + liste.scrollTop;
+  const bas = haut + el.offsetHeight;
+  if (haut < liste.scrollTop || bas > liste.scrollTop + liste.clientHeight) {
+    liste.scrollTo({ top: Math.max(0, haut - 8), behavior: DOUX ? 'smooth' : 'auto' });
   }
 }
 
@@ -609,6 +742,17 @@ function majDetail(){
   amenerDansLaListe(carte);
 }
 
+/**
+ * Ordre de prospection : les biens traités passent en fin de liste, puis les
+ * plus anciens d'abord — ce sont eux dont le vendeur est le plus disponible.
+ */
+function ordreProspection(a, b){
+  const rang = { afaire: 0, contacte: 1, ecarte: 2 };
+  const ra = rang[statut(a.id)] - rang[statut(b.id)];
+  if (ra) return ra;
+  return (b.j ?? -1) - (a.j ?? -1);
+}
+
 function render(){
   layer.clearLayers();
   parcelles.clearLayers();
@@ -619,7 +763,9 @@ function render(){
 
   for (const d of shown) {
     const m = L.marker([d.la, d.lo], { icon: icon(d, false) })
-      .on('click', () => select(d.id, MOBILE()));
+      // Leaflet bascule lui-même la bulle au clic : on sélectionne sans la
+      // rouvrir, sinon elle se referme aussitôt.
+      .on('click', () => select(d.id, MOBILE(), { bulleDejaGeree: !MOBILE() }));
     // Sur mobile la bulle recouvrirait la carte : le détail se déplie dans la liste.
     if (!MOBILE()) m.bindPopup(popup(d), { closeButton: true, autoPanPadding: [30, 30] });
     layer.addLayer(m);
@@ -628,14 +774,34 @@ function render(){
 
   const list = document.getElementById('list');
   list.innerHTML = shown.length
-    ? shown.slice().sort((a,b) => (a.p ?? 1e12) - (b.p ?? 1e12)).map(card).join('')
+    ? shown.slice().sort(ordreProspection).map(card).join('')
     : '<div class="empty">Aucun bien ne correspond à ces filtres.</div>';
-  list.querySelectorAll('.card').forEach(el =>
-    el.addEventListener('click', () => select(el.dataset.id, true)));
+  for (const el of list.querySelectorAll('.card')) {
+    el.addEventListener('click', () => select(el.dataset.id, true));
+    // Les fiches sont focalisables : elles doivent s'activer au clavier.
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(el.dataset.id, true); }
+    });
+  }
 
+  // Un re-rendu reconstruit tout en état neutre : on rétablit la sélection.
+  if (selected && markers.has(selected)) {
+    const e = markers.get(selected);
+    e.m.setIcon(icon(e.d, true));
+    if (e.parcelle) e.parcelle.setStyle({ color: '#0f2742', weight: 3.5, fillColor: '#3b6fb0', fillOpacity: 0.38 });
+    document.querySelector('.card[data-id="' + selected + '"]')?.classList.add('sel');
+  } else if (selected) {
+    selected = null;
+  }
+
+  const restants = shown.filter(d => statut(d.id) === 'afaire').length;
+  const traites = shown.length - restants;
   document.querySelector('#count span').textContent =
-    shown.length + ' bien' + (shown.length > 1 ? 's' : '') + ' affiché' + (shown.length > 1 ? 's' : '') +
-    ' sur ' + DATA.length;
+    restants + ' à prospecter' +
+    (traites ? ' · ' + traites + ' traités' : '') +
+    (shown.length !== DATA.length ? ' · ' + shown.length + '/' + DATA.length + ' affichés' : '');
+
+
 
   if (shown.length) {
     map.fitBounds(L.latLngBounds(shown.map(d => [d.la, d.lo])).pad(.15), {
@@ -757,6 +923,18 @@ if (poignee) {
     if (e.key === 'ArrowDown') allerA(position + 1);
   });
 }
+
+// Délégation au document : les boutons de la bulle naissent après le rendu,
+// un écouteur posé sur les blocs existants ne les verrait jamais.
+document.addEventListener('click', (e) => {
+  const bouton = e.target.closest('.suivi button[data-valeur]');
+  if (!bouton) return;
+  const bloc = bouton.closest('[data-suivi]');
+  if (!bloc) return;
+  e.stopPropagation();
+  e.preventDefault();
+  definirStatut(bloc.dataset.suivi, bouton.dataset.valeur);
+});
 
 on('voirtout', 'click', () => cadrerTout());
 

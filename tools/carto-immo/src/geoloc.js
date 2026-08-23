@@ -66,9 +66,18 @@ async function diagnosticsCandidats(annonce) {
   const type = TYPE_ADEME[annonce.typeBien] ?? TYPE_ADEME[annonce.typeBrut];
   if (type) filtres.push(`type_batiment:${type}`);
 
-  const url = `${API}?size=100&bbox=${bbox}&qs=${encodeURIComponent(filtres.join(' AND '))}&select=${CHAMPS}`;
+  const TAILLE = 1000;
+  const url = `${API}?size=${TAILLE}&bbox=${bbox}&qs=${encodeURIComponent(filtres.join(' AND '))}&select=${CHAMPS}`;
   try {
-    return (await json(url)).results ?? [];
+    const res = await json(url);
+    const lot = res.results ?? [];
+    // Un lot tronqué fausserait le départage : mieux vaut renoncer que trancher
+    // sur un sous-ensemble arbitraire.
+    if (res.total > TAILLE) {
+      log.warn(`  ${res.total} diagnostics ce jour-là autour de l'annonce : trop pour départager`);
+      return [];
+    }
+    return lot;
   } catch (e) {
     log.warn(`  registre DPE indisponible (${e.message})`);
     return [];
@@ -81,7 +90,12 @@ async function diagnosticsCandidats(annonce) {
  */
 export function noterDiagnostic(annonce, d) {
   const motifs = ['date du diagnostic'];
-  let note = 35 + 15; // date exacte et étiquette énergie, déjà filtrées
+  let note = 35; // date exacte, déjà filtrée
+  if (annonce.dpeAnnonce) {
+    if (d.etiquette_dpe && d.etiquette_dpe !== annonce.dpeAnnonce) return null;
+    note += 15;
+    motifs.push('étiquette énergie');
+  }
 
   const type = TYPE_ADEME[annonce.typeBien] ?? TYPE_ADEME[annonce.typeBrut];
   if (type && d.type_batiment) {
@@ -126,9 +140,12 @@ export function noterDiagnostic(annonce, d) {
     motifs.push('année de construction');
   }
 
-  const [lat, lon] = String(d._geopoint).split(',').map(Number);
+  // Sans position exploitable, le diagnostic ne peut pas localiser : il sort.
+  const [lat, lon] = String(d._geopoint ?? '').split(',').map(Number);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
   let distance = null;
-  if (annonce.flouLat != null && Number.isFinite(lat)) {
+  if (annonce.flouLat != null) {
     distance = metres(annonce.flouLat, annonce.flouLon, lat, lon);
     if (distance > RAYON_KM * 1000) return null;
     note += distance <= 2000 ? 12 : distance <= 8000 ? 8 : distance <= 20000 ? 3 : -10;
@@ -157,7 +174,14 @@ export async function localiser(annonce) {
   if (!notes.length) return null;
   const meilleur = notes[0];
   if (meilleur.note < NOTE_MINIMALE) return null;
-  if (notes.length > 1 && meilleur.note - notes[1].note < ECART_MINIMAL) return null;
+
+  // Un même logement peut porter deux diagnostics : ce n'est pas une ambiguïté
+  // de localisation, seule l'adresse nous intéresse.
+  const memeLogement = (a, b) =>
+    (a.identifiant_ban && a.identifiant_ban === b.identifiant_ban) ||
+    (a.adresse_ban && a.adresse_ban === b.adresse_ban && a._geopoint === b._geopoint);
+  const concurrents = notes.slice(1).filter((n) => !memeLogement(n.d, meilleur.d));
+  if (concurrents.length && meilleur.note - concurrents[0].note < ECART_MINIMAL) return null;
 
   const d = meilleur.d;
   const [latitude, longitude] = String(d._geopoint).split(',').map(Number);

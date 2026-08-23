@@ -8,15 +8,16 @@
  * → prix situé face aux ventes réelles du secteur (DVF) → parcelle cadastrale.
  * Chaque bien garde le lien vers son annonce.
  *
- * Deux cartes sont écrites : l'une sur fond OpenStreetMap comme en production,
- * l'autre entièrement autonome (départements, communes, plan cadastral
- * embarqués), utilisable sans aucune requête sortante.
+ * Deux cartes sont écrites : l'une sur photographies aériennes IGN comme en
+ * production, l'autre entièrement autonome — départements, communes et dalles
+ * de photo embarquées — utilisable sans aucune requête sortante.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT } from '../src/config.js';
 import { collecterEtLocaliser } from '../src/pipeline-annonces.js';
 import { departements, communes } from '../src/contours.js';
+import { tuilesAutour } from '../src/tuiles.js';
 import { writeMap } from '../src/map.js';
 import { writeSpreadsheet, writeCsv } from '../src/sheet.js';
 import { log } from '../src/log.js';
@@ -30,6 +31,7 @@ const CACHE = path.join(OUT, '.cache');
 const MAX = Number(opt('max', '200'));
 const TYPES = opt('types', 'house').split(',');
 const FILTRES = args.includes('--filtres');
+const SANS_PHOTO = args.includes('--sans-photo');
 
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -70,17 +72,37 @@ for (const d of depsSecteur) {
 }
 if (coms.length) log.ok(`  ${coms.length} communes`);
 
-const osm = writeMap(placees, path.join(OUT, 'carte-annonces.html'), { title: titre, note, filtres: FILTRES });
+const osm = writeMap(placees, path.join(OUT, 'carte-annonces.html'), {
+  title: titre, note, filtres: FILTRES, fond: 'satellite',
+});
 
 const attribution =
   'Annonces <a href="https://www.bienici.com/">Bien\'ici</a> · adresses ' +
   '<a href="https://data.ademe.fr/">DPE ADEME</a> · cadastre et contours © IGN / Etalab · ' +
   'prix <a href="https://app.dvf.etalab.gouv.fr/">DVF</a>';
 
+// Photo aérienne embarquée : sous l'orthophotographie, le plan cadastral de
+// contexte devient redondant, on ne garde que les parcelles des biens.
+let tuiles = null;
+if (!SANS_PHOTO) {
+  log.step('Photographies aériennes');
+  const r = await tuilesAutour(placees, { cacheDir: CACHE });
+  if (Object.keys(r.tuiles).length) {
+    tuiles = { images: r.tuiles, zoomMin: 16, zoomMax: r.zoomMax };
+    log.ok(`  ${Object.keys(r.tuiles).length} dalles · ${(r.octets / 1048576).toFixed(1)} Mo`);
+  }
+}
+
 const autonome = (deps.length || coms.length)
   ? writeMap(placees, path.join(OUT, 'carte-annonces-autonome.html'), {
       title: titre, note, filtres: FILTRES,
-      basemap: { departements: deps, communes: coms, cadastre: contexte, attribution },
+      basemap: {
+        departements: deps,
+        communes: coms,
+        cadastre: tuiles ? null : contexte,
+        tuiles,
+        attribution: tuiles ? attribution + ' · photographies aériennes &copy; IGN' : attribution,
+      },
     })
   : null;
 if (!autonome) fs.rmSync(path.join(OUT, 'carte-annonces-autonome.html'), { force: true });
@@ -88,9 +110,9 @@ if (!autonome) fs.rmSync(path.join(OUT, 'carte-annonces-autonome.html'), { force
 await writeSpreadsheet(placees, path.join(OUT, 'annonces.xlsx'));
 writeCsv(placees, path.join(OUT, 'annonces.csv'));
 
-log.ok(`Carte (OpenStreetMap) : ${osm.file}`);
+log.ok(`Carte (photo aérienne) : ${osm.file}`);
 if (autonome) {
-  log.ok(`Carte (autonome)      : ${autonome.file}  ${(fs.statSync(autonome.file).size / 1024).toFixed(0)} Ko`);
+  log.ok(`Carte (autonome)       : ${autonome.file}  ${(fs.statSync(autonome.file).size / 1048576).toFixed(1)} Mo`);
 }
-log.ok(`Tableur               : ${path.join(OUT, 'annonces.xlsx')}`);
-log.info(`Communes touchées     : ${villes.join(', ')}`);
+log.ok(`Tableur                : ${path.join(OUT, 'annonces.xlsx')}`);
+log.info(`Communes touchées      : ${villes.join(', ')}`);

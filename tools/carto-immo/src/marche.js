@@ -8,7 +8,15 @@ import { log } from './log.js';
  */
 
 const BASE = 'https://files.data.gouv.fr/geo-dvf/latest/csv';
-const ANNEES = [2024, 2023];
+/**
+ * DVF paraît avec un décalage : l'année en cours n'est jamais complète, et la
+ * précédente pas toujours publiée. On remonte donc de deux exercices révolus,
+ * et l'absence d'un fichier n'est pas une erreur.
+ */
+const ANNEES = (() => {
+  const derniere = new Date().getUTCFullYear() - 1;
+  return [derniere, derniere - 1, derniere - 2];
+})();
 
 function parseCsv(txt) {
   const rows = [];
@@ -33,7 +41,16 @@ function parseCsv(txt) {
 const nb = (v) => { const x = Number(v); return v !== '' && Number.isFinite(x) ? x : null; };
 const tri = (a) => [...a].sort((x, y) => x - y);
 const mediane = (a) => { const s = tri(a), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
-const quantile = (a, p) => tri(a)[Math.min(a.length - 1, Math.floor(a.length * p))];
+// Interpolation linéaire : l'arrondi vers le bas décale les quartiles d'un rang
+// dès que n·p tombe juste.
+const quantile = (a, p) => {
+  const s = tri(a);
+  if (!s.length) return null;
+  const r = (s.length - 1) * p;
+  const bas = Math.floor(r);
+  const haut = Math.min(s.length - 1, bas + 1);
+  return s[bas] + (s[haut] - s[bas]) * (r - bas);
+};
 
 /**
  * Prix au m² des ventes de la commune, par type de bien.
@@ -91,6 +108,12 @@ export async function reperes(insee, typeBien, cacheDir) {
   let res = null;
   try {
     const parType = await ventes(insee, cacheDir);
+    // Seuls maisons et appartements ont des repères : comparer un terrain ou un
+    // immeuble au prix des maisons n'aurait pas de sens.
+    if (typeBien !== 'Maison' && typeBien !== 'Appartement') {
+      cacheMemoire.set(cle, null);
+      return null;
+    }
     const type = typeBien === 'Appartement' ? 'appartement' : 'maison';
     const pm2 = parType[type] ?? [];
     // En dessous de cinq ventes, une médiane ne veut rien dire.
