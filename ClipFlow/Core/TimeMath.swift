@@ -42,6 +42,37 @@ struct RationalSpeed: Hashable, Codable, Sendable {
     var denominator: Int
 
     static let half = RationalSpeed(numerator: 1, denominator: 2)
+    static let real = RationalSpeed(numerator: 1, denominator: 1)
+
+    /// Cadence source sous laquelle un ralenti n'a plus de matiere.
+    ///
+    /// 30,5 et non 30 : les cameras annoncent 29,97 aussi souvent que 30, et
+    /// les deux posent exactement le meme probleme.
+    static let slowMotionFloor: Double = 30.5
+
+    /// Vitesse REELLEMENT applicable a une source de cadence donnee.
+    ///
+    /// Ralentir 0,5x une source 30 i/s ne laisse que 15 images vraies par
+    /// seconde de sortie : a 60 i/s, trois images sur quatre doivent etre
+    /// fabriquees, et deux images vraies consecutives sont separees d'1/15 s.
+    /// Sur du POV, le deplacement entre elles est tel que le flux optique n'a
+    /// plus de correspondance fiable a suivre — c'est exactement la
+    /// configuration qui a fait desactiver le flux par defaut dans ce projet.
+    ///
+    /// La source 30 i/s garde donc sa vitesse reelle. La duree FINALE du clip
+    /// ne change pas : elle est simplement prelevee sur une plus grande
+    /// portion du rush. Un clip demande a 1,5 s reste un clip de 1,5 s.
+    ///
+    /// Detection automatique, sans message : c'est une contrainte physique de
+    /// la source, pas une decision que l'utilisateur ait a arbitrer.
+    static func effective(_ requested: RationalSpeed,
+                          sourceFrameRate: Double) -> RationalSpeed {
+        // Cadence inconnue (0) : on ne presume rien et on respecte la demande.
+        guard sourceFrameRate > 1, sourceFrameRate <= slowMotionFloor else { return requested }
+        // Deja a vitesse reelle ou plus rapide : rien a plafonner.
+        guard requested.numerator < requested.denominator else { return requested }
+        return .real
+    }
 
     var label: String {
         if numerator == 1 && denominator == 2 { return "0,5×" }

@@ -257,11 +257,34 @@ struct ProjectEditorView: View {
         return CMTime(value: 2, timescale: CMTimeScale(fps.rounded()))
     }
 
-    /// Durée SOURCE fixe de la sélection = durée finale × vitesse.
+    /// Vitesse demandée par le projet, sans tenir compte de la source.
+    private var requestedSpeed: RationalSpeed {
+        RationalSpeed(numerator: project.speedNumerator,
+                      denominator: project.speedDenominator)
+    }
+
+    /// Vitesse RÉELLEMENT applicable au rush sous le curseur.
+    ///
+    /// Une source à 30 i/s ne se ralentit pas : voir `RationalSpeed.effective`.
+    /// Le plafond est appliqué ICI, au calcul de la sélection, et pas seulement
+    /// à la validation — sinon on poserait une sélection de 0,75 s en croyant
+    /// faire un clip de 1,5 s, et la validation devrait l'étendre dans le dos
+    /// de l'utilisateur.
+    private func speed(for rush: Rush?) -> RationalSpeed {
+        RationalSpeed.effective(requestedSpeed,
+                                sourceFrameRate: rush?.nominalFrameRate ?? 0)
+    }
+
+    /// Durée SOURCE fixe de la sélection = durée finale × vitesse EFFECTIVE.
+    ///
+    /// Sur un rush 30 i/s la vitesse retombe à 1×, donc la sélection couvre
+    /// toute la durée finale demandée : un clip de 1,5 s prélève 1,5 s de rush
+    /// au lieu de 0,75 s. La durée du clip produit ne change pas — seule la
+    /// portion de rush consommée change.
     private var fixedSourceDuration: CMTime {
         TimeMath.sourceDuration(
             final: project.finalDuration,
-            speed: RationalSpeed(numerator: project.speedNumerator, denominator: project.speedDenominator)
+            speed: speed(for: currentRush)
         )
     }
 
@@ -954,8 +977,7 @@ struct ProjectEditorView: View {
     private func clipDurationLabel(for range: CMTimeRange) -> String {
         TimeMath.finalDuration(
             source: range.duration,
-            speed: RationalSpeed(numerator: project.speedNumerator,
-                                 denominator: project.speedDenominator)
+            speed: speed(for: currentRush)
         ).label
     }
 
@@ -1325,13 +1347,16 @@ struct ProjectEditorView: View {
         // du projet : une sélection étendue « jusqu'à la fin du rush » serait
         // sinon exportée à la durée fixe du projet, donc tronquée. Pour une
         // sélection normale le calcul redonne exactement la valeur du projet.
+        // VITESSE EFFECTIVE, figée sur le passage : une source 30 i/s garde sa
+        // vitesse réelle quoi qu'ait choisi le projet. Le rush peut être
+        // supprimé ensuite, la vitesse ne doit plus dépendre de lui.
+        let applied = speed(for: rush)
         passage.finalDurationCentiseconds = TimeMath.finalDuration(
             source: range.duration,
-            speed: RationalSpeed(numerator: project.speedNumerator,
-                                 denominator: project.speedDenominator)
+            speed: applied
         ).centiseconds
-        passage.speedNumerator = project.speedNumerator
-        passage.speedDenominator = project.speedDenominator
+        passage.speedNumerator = applied.numerator
+        passage.speedDenominator = applied.denominator
         // Caractéristiques source FIGÉES : le rush peut être supprimé ensuite,
         // l'export garde la bonne colorimétrie (HDR jamais rendu en SDR muet).
         passage.colorimetry = rush.colorimetry

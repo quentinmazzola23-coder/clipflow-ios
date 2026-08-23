@@ -333,6 +333,34 @@ final class RenderQueueController {
                 existingNames: existing
             )
 
+            // SOURCE À CADENCE BASSE : le flux optique s'applique MÊME si le
+            // réglage global l'éteint.
+            //
+            // Un tel clip n'est plus ralenti (RationalSpeed.effective) : deux
+            // images vraies y sont séparées d'1/30 s et il n'en manque qu'une
+            // sur deux pour atteindre 60 i/s. C'est le régime FACILE de
+            // l'interpolation — exactement celui d'une source 60 i/s ralentie
+            // de moitié. Le réglage global, lui, a été éteint pour le régime
+            // DIFFICILE : 1/15 s entre deux images vraies, trois images sur
+            // quatre à fabriquer, sur du mouvement rapide. Le plafond de
+            // vitesse rend ce régime impossible, donc la raison d'éteindre ne
+            // s'applique plus ici.
+            //
+            // Sans cela, un montage mêlant du 30 et du 60 i/s montre deux
+            // rendus de mouvement différents d'un clip à l'autre.
+            //
+            // La condition « à vitesse réelle » n'est PAS décorative : les
+            // clips validés AVANT le plafond gardent une vitesse ralentie
+            // enregistrée. Leur appliquer le flux les mettrait précisément
+            // dans le régime difficile qu'on cherche à éviter — et ils y
+            // seraient passés en silence, alors qu'ils fonctionnaient jusque-là
+            // par duplication. On ne change pas le rendu d'un travail déjà fait.
+            let atRealSpeed = passage.speedNumerator >= passage.speedDenominator
+            let lowFrameRateSource = passage.sourceNominalFrameRate > 1
+                && passage.sourceNominalFrameRate <= RationalSpeed.slowMotionFloor
+                && atRealSpeed
+            let interpolates = project.opticalFlowEnabled || lowFrameRateSource
+
             let job = RenderJob(
                 sourceURL: source.url,
                 sourceRange: source.rangeInFile,
@@ -348,7 +376,7 @@ final class RenderQueueController {
                 // lui, chaque image du ralenti est une VRAIE image du rush,
                 // répétée. Mouvement plus saccadé, mais aucun pixel inventé —
                 // donc aucun artefact possible.
-                forceFastEngine: !project.opticalFlowEnabled
+                forceFastEngine: !interpolates
             )
 
             passage.exportState = .rendering
@@ -407,7 +435,7 @@ final class RenderQueueController {
                 // Un rendu HDR n'interpole jamais : compter ses images
                 // répétées comme suspectes serait un faux avertissement, au
                 // même titre qu'après un repli.
-                let interpolationDelivered = project.opticalFlowEnabled
+                let interpolationDelivered = interpolates
                     && !result.opticalFlowRejected
                     && !result.opticalFlowSkippedForHDR
                 if result.duplicatePairs > 0, interpolationDelivered {
