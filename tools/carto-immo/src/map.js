@@ -17,10 +17,42 @@ function inlineLeaflet() {
   return { css, js };
 }
 
+const FOND_OSM = `L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+}).addTo(map);`;
+
+// Fond vectoriel embarqué : la page reste lisible sans aucune requête sortante.
+const FOND_VECTORIEL = `document.querySelector('.leaflet-container').style.background = '#f3f1ec';
+const avecBien = new Set(BASEMAP.communesAvecBien || []);
+for (const com of BASEMAP.communes) {
+  const marque = avecBien.has(com.c);
+  const poly = L.polygon(com.g.map(r => r.map(([x, y]) => [y, x])), {
+    pane: 'tilePane',
+    color: marque ? '#8fa9cd' : '#dcd7cc',
+    weight: marque ? 1.5 : 0.6,
+    fillColor: marque ? '#e6edf7' : '#efece5',
+    fillOpacity: 1,
+    interactive: marque,
+  }).addTo(map);
+  if (marque) poly.bindTooltip(com.n, { direction: 'top', sticky: true });
+}
+map.attributionControl.addAttribution(BASEMAP.attribution || '');`;
+
 const escapeJson = (obj) =>
   JSON.stringify(obj).replace(/</g, '\\u003c').replace(/-->/g, '--\\u003e');
 
-export function writeMap(records, file, { title = 'Veille immobilière' } = {}) {
+/**
+ * @param {object[]} records
+ * @param {string} file
+ * @param {object} [opts]
+ * @param {string} [opts.title]
+ * @param {string} [opts.note] Ligne de contexte affichée sous l'en-tête.
+ * @param {object} [opts.basemap] Fond vectoriel autonome, à la place des tuiles
+ *   OpenStreetMap : `{ communes: [{ n, c, g }], attribution }`. Utile quand la
+ *   page doit fonctionner sans accès réseau.
+ */
+export function writeMap(records, file, { title = 'Veille immobilière', note = null, basemap = null } = {}) {
   const points = records
     .filter((r) => Number.isFinite(r.latitude) && Number.isFinite(r.longitude))
     .map((r) => ({
@@ -64,6 +96,13 @@ export function writeMap(records, file, { title = 'Veille immobilière' } = {}) 
   const sansCoords = records.length - points.length;
   const { css, js } = inlineLeaflet();
 
+  if (basemap?.communes) {
+    basemap = {
+      ...basemap,
+      communesAvecBien: [...new Set(records.map((r) => r.codeInsee).filter(Boolean))],
+    };
+  }
+
   const html = `<!doctype html>
 <html lang="fr">
 <head>
@@ -79,12 +118,15 @@ export function writeMap(records, file, { title = 'Veille immobilière' } = {}) 
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:var(--bg)}
+.card .price,.pop .p,.pop dd,.pill{font-variant-numeric:tabular-nums}
 #app{display:flex;height:100%}
 #side{width:370px;flex:none;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
 #map{flex:1;min-width:0}
 header{padding:16px 18px 12px;border-bottom:1px solid var(--line)}
 header h1{margin:0 0 2px;font-size:16px;font-weight:650;letter-spacing:-.01em}
 header .sub{color:var(--muted);font-size:12.5px}
+header .note{margin:9px 0 0;padding:8px 10px;border-radius:8px;background:#f4f1ea;border:1px solid var(--line);color:var(--muted);font-size:12px;line-height:1.45}
+header .note a{color:var(--accent)}
 .filters{padding:12px 18px;border-bottom:1px solid var(--line);display:grid;gap:9px}
 .row{display:flex;gap:8px;align-items:center}
 .row label{font-size:12px;color:var(--muted);min-width:64px}
@@ -130,7 +172,7 @@ input[type=search]{padding-left:10px}
 .badge{display:inline-block;width:19px;height:19px;line-height:19px;text-align:center;border-radius:4px;font-weight:700;font-size:11.5px;color:#fff}
 .dA{background:#008040}.dB{background:#39a24a}.dC{background:#a8c94a}.dD{background:#f5d800}.dE{background:#f0a000}.dF{background:#e06000}.dG{background:#d02020}.dX{background:#b0b0b0}
 .empty{padding:34px 18px;text-align:center;color:var(--muted);font-size:13px}
-@media (max-width:820px){#app{flex-direction:column}#side{width:100%;height:52%}#map{height:48%}}
+@media (max-width:820px){#app{flex-direction:column}#side{width:100%;height:56%;overflow:auto}#list{overflow:visible;flex:none}header .note{font-size:11.5px}#map{height:44%;flex:none}}
 </style>
 </head>
 <body>
@@ -139,6 +181,7 @@ input[type=search]{padding-left:10px}
     <header>
       <h1>${title}</h1>
       <div class="sub" id="stamp"></div>
+      ${note ? `<p class="note">${note}</p>` : ''}
     </header>
     <div class="filters">
       <input type="search" id="q" placeholder="Filtrer par ville, titre, adresse…">
@@ -164,6 +207,7 @@ input[type=search]{padding-left:10px}
 const DATA = ${escapeJson(points)};
 const GENERATED = ${escapeJson(new Date().toISOString())};
 const SANS_COORDS = ${sansCoords};
+const BASEMAP = ${basemap ? escapeJson(basemap) : 'null'};
 
 const eur = n => n == null ? '—' : new Intl.NumberFormat('fr-FR').format(Math.round(n)) + ' €';
 const num = n => n == null ? '—' : new Intl.NumberFormat('fr-FR').format(n);
@@ -187,10 +231,8 @@ document.getElementById('stamp').textContent =
   ' · ' + new Date(GENERATED).toLocaleString('fr-FR', {dateStyle:'long', timeStyle:'short'});
 
 const map = L.map('map', { zoomControl: true, scrollWheelZoom: true });
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19,
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-}).addTo(map);
+
+${basemap ? FOND_VECTORIEL : FOND_OSM}
 
 const layer = L.layerGroup().addTo(map);
 const markers = new Map();

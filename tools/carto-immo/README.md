@@ -187,6 +187,28 @@ Un bien qui accumule les parutions est un bien qui ne part pas : la colonne
 | Des biens sans coordonnées | lacquereur.fr n'a pas pu rapprocher l'annonce d'un DPE ou d'une parcelle. Ils restent dans le tableur, signalés en italique, mais pas sur la carte. |
 | Chrome ne se lance pas | Mets `"browserChannel": ""` dans `config.json` pour utiliser le Chromium de Playwright. |
 
+## Voir la carte sans rien configurer
+
+```bash
+node scripts/demo-donnees-reelles.mjs
+```
+
+Construit une carte de démonstration à partir de **données publiques réelles** :
+cinq vraies maisons du Gers, adresse et coordonnées issues du DPE ADEME, prix et
+surfaces des ventes publiées au fichier DVF, écart au marché calculé sur les
+ventes réelles des communes retenues. Rien n'est inventé.
+
+Ce sont des ventes déjà conclues, pas des annonces en cours : la démonstration
+montre la mise en forme, pas un état du marché.
+
+Deux cartes sont produites : `carte-demo.html` avec le fond OpenStreetMap comme
+en production, et `carte-demo-autonome.html` avec un fond vectoriel embarqué
+(contours communaux IGN) qui fonctionne **sans aucune requête sortante**.
+
+```bash
+node scripts/demo-donnees-reelles.mjs --communes 32013,32107 --out /tmp/demo
+```
+
 ## Tests
 
 ```bash

@@ -203,6 +203,26 @@ check('la carte ne place que les biens localisés', () => {
   assert.equal(map.plotted, 1);
   assert.equal(map.skipped, 1);
 });
+check('la carte accepte un fond vectoriel et une note', () => {
+  const f = path.join(out, 'carte-autonome.html');
+  const communes = [
+    { n: 'Marciac', c: '32233', g: [[[0.15, 43.51], [0.17, 43.51], [0.17, 43.53], [0.15, 43.53], [0.15, 43.51]]] },
+  ];
+  writeMap([{ ...records[0], codeInsee: '32233' }], f, {
+    note: 'Données de démonstration',
+    basemap: { communes, attribution: 'IGN / Etalab' },
+  });
+  const h = fs.readFileSync(f, 'utf8');
+  assert.ok(!h.includes('tile.openstreetmap.org'), 'aucune tuile distante');
+  assert.ok(h.includes('"Marciac"') && h.includes('IGN / Etalab'), 'le fond est embarqué');
+  assert.ok(h.includes('Données de démonstration'), 'la note est rendue');
+  assert.ok(h.includes('"32233"'), 'la commune du bien est marquée');
+});
+
+check('sans fond vectoriel, la carte utilise OpenStreetMap', () => {
+  assert.ok(fs.readFileSync(mapFile, 'utf8').includes('tile.openstreetmap.org'));
+});
+
 check('la carte est autonome (Leaflet embarqué)', () => {
   const h = fs.readFileSync(mapFile, 'utf8');
   assert.ok(h.includes('49.0022'), 'les coordonnées sont injectées');
