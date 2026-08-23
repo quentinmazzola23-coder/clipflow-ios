@@ -407,9 +407,26 @@ final class RenderQueueController {
                         RenderQueueController.shared.updateActivityThrottled()
                     }
                 }
+                // FORMAT DE SORTIE ET RECADRAGE, comme au montage.
+                //
+                // Sans cette étape, on réglait un cadrage, on le voyait sur
+                // l'aperçu, et le clip déposé dans Photos sortait au format de
+                // la caméra — deux chemins de sortie qui ne racontaient pas la
+                // même chose. Elle ne fait rien quand le rapport colle déjà et
+                // que le cadrage est au centre, ce qui est le cas courant.
+                var exportURL = result.outputURL
+                if let framed = try? await ClipReframer.reframe(
+                    source: result.outputURL,
+                    outputFormat: project.outputFormat,
+                    cropToFill: project.cropToFillOutput,
+                    cropCenter: passage.cropCenter
+                ) {
+                    try? FileManager.default.removeItem(at: result.outputURL)
+                    exportURL = framed
+                }
                 // Album par projet (réglage global) : sinon album commun.
                 let assetID = try await PhotoExportService.saveToPhotos(
-                    fileURL: result.outputURL,
+                    fileURL: exportURL,
                     projectName: project.albumPerProject ? project.name : nil
                 )
 
