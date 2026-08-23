@@ -92,7 +92,7 @@ export async function chargerCommune(insee, cacheDir, opts = {}) {
     if (!a.length) continue;
     const arr = arrondir(a);
     parcelles.set(f.properties.id, { anneaux: arr, contenance: f.properties.contenance ?? null });
-    geometries.push({ anneaux: arr, centre: centre(a[0]), batiment: false });
+    geometries.push({ anneaux: arr, centre: centre(a[0]), batiment: false, id: f.properties.id });
   }
   for (const f of fBatiments) {
     const a = anneaux(f.geometry);
@@ -123,6 +123,9 @@ export async function enrichirParcelles(fiches, cacheDir, { rayon = 200, sansCac
   }
 
   const contexte = { parcelles: [], batiments: [] };
+  // Des biens voisins partagent leur voisinage : sans déduplication, le même
+  // pâté de maisons serait embarqué autant de fois qu'il y a de biens autour.
+  const dejaVues = new Set();
   let trouvees = 0;
 
   for (const [insee, lot] of parCommune) {
@@ -137,6 +140,9 @@ export async function enrichirParcelles(fiches, cacheDir, { rayon = 200, sansCac
       trouvees++;
       if (f.latitude == null || f.longitude == null) continue;
       for (const g of commune.autour(f.latitude, f.longitude, rayon)) {
+        const cle = (g.batiment ? 'b' : 'p') + g.centre.join(',');
+        if (dejaVues.has(cle)) continue;
+        dejaVues.add(cle);
         (g.batiment ? contexte.batiments : contexte.parcelles).push(g.anneaux);
       }
     }

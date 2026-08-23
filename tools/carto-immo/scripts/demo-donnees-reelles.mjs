@@ -32,16 +32,9 @@ import { writeSpreadsheet, writeCsv } from '../src/sheet.js';
 import { log } from '../src/log.js';
 import { chargerCommune } from '../src/cadastre.js';
 
-// Secteur sud du Gers.
-const DEFAUT = [
-  '32013', // Auch
-  '32256', // Mirande
-  '32233', // Marciac
-  '32344', // Riscle
-  '32242', // Masseube
-  '32462', // Vic-Fezensac
-];
-const RAYON_CONTEXTE_M = 200; // parcelles voisines dessinées autour de chaque bien
+// Marciac par défaut. `--communes 32013,32256` élargit au secteur.
+const DEFAUT = ['32233'];
+const RAYON_CONTEXTE_M = 400; // parcelles voisines dessinées autour de chaque bien
 const ANNEES = [2024, 2023];
 const DEPARTEMENT = '32';
 
@@ -52,7 +45,7 @@ const opt = (nom, def) => {
 };
 const COMMUNES = opt('communes', DEFAUT.join(',')).split(',');
 const OUT = path.resolve(ROOT, opt('out', 'data-demo'));
-const PAR_COMMUNE = Number(opt('par-commune', '2'));
+const PAR_COMMUNE = Number(opt('par-commune', '30'));
 const FILTRES = args.includes('--filtres');
 const CACHE = path.join(OUT, '.cache');
 const SANS_CACHE = args.includes('--sans-cache');
@@ -264,6 +257,7 @@ const fiches = [];
 const contexteParcelles = [];
 const contexteBatiments = [];
 let totalVentes = 0;
+const dejaVues = new Set();
 
 for (const insee of COMMUNES) {
   log.step(`commune ${insee}`);
@@ -296,6 +290,9 @@ for (const insee of COMMUNES) {
 
     // Voisinage cadastral, pour que la parcelle se lise dans son contexte.
     for (const g of cadastre.autour(lat, lon, RAYON_CONTEXTE_M)) {
+      const cle = (g.batiment ? 'b' : 'p') + g.centre.join(',');
+      if (dejaVues.has(cle)) continue;
+      dejaVues.add(cle);
       (g.batiment ? contexteBatiments : contexteParcelles).push(g.anneaux);
     }
 
@@ -357,13 +354,19 @@ if (!fiches.length) {
   process.exit(1);
 }
 
+const villes = [...new Set(fiches.map((f) => f.ville))];
+const ou = villes.length === 1 ? `à ${villes[0]}` : `dans ${villes.length} communes du Gers`;
 const note =
-  `Données réelles. ${fiches.length} maisons du Gers, chacune à son adresse exacte et sur sa ` +
+  `Données réelles. ${fiches.length} maisons ${ou}, chacune à son adresse exacte et sur sa ` +
   'parcelle cadastrale : adresse et coordonnées confirmées par le DPE ADEME, contour de parcelle ' +
   'issu du cadastre, prix et surfaces des ventes publiées au fichier DVF ' +
-  `(${ANNEES.at(-1)}-${ANNEES[0]}), écart au marché calculé sur ${totalVentes} ventes réelles des ` +
-  'communes parcourues. Ce sont des ventes déjà conclues, pas des annonces en cours — l\'agent, ' +
-  'lui, alimente cette même carte avec les annonces leboncoin du matin.';
+  `(${ANNEES.at(-1)}-${ANNEES[0]}), écart au marché calculé sur ${totalVentes} ventes réelles. ` +
+  'Ce sont des ventes déjà conclues, pas des annonces en cours — l\'agent, lui, alimente cette ' +
+  'même carte avec les annonces leboncoin du matin.';
+
+const titre = villes.length === 1
+  ? `Veille immobilière — ${villes[0]}`
+  : `Veille immobilière — ${villes.length} communes du Gers`;
 
 log.step('contours communaux');
 let communes = [];
@@ -381,11 +384,11 @@ try {
 // Deux cartes : l'une avec le fond OpenStreetMap comme en production, l'autre
 // avec un fond vectoriel embarqué, qui fonctionne sans aucune requête sortante.
 const osm = writeMap(fiches, path.join(OUT, 'carte-demo.html'), {
-  title: 'Veille immobilière — Gers', note, filtres: FILTRES,
+  title: titre, note, filtres: FILTRES,
 });
 const hors = communes.length
   ? writeMap(fiches, path.join(OUT, 'carte-demo-autonome.html'), {
-      title: 'Veille immobilière — Gers',
+      title: titre,
       note,
       filtres: FILTRES,
       basemap: {

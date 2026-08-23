@@ -130,6 +130,12 @@ Tout arrive dans `data/` :
 - Le fichier est autonome (Leaflet embarqué) ; seul le fond de carte
   OpenStreetMap se charge en ligne.
 
+**Sur téléphone**, la carte occupe tout l'écran et la liste devient un panneau
+glissant : une poignée le fait passer de replié à mi-hauteur puis grand ouvert,
+au doigt ou d'un simple appui. Choisir un bien déplie ses détails dans la liste
+plutôt que dans une bulle — qui masquerait la carte — et le cadrage réserve la
+hauteur du panneau pour que la parcelle reste visible.
+
 ### Le tableur
 
 Une ligne **par bien**, pas par annonce : prix, €/m², surface, terrain, pièces,
@@ -221,8 +227,11 @@ Les téléchargements sont mis en cache dans `data-demo/.cache` : ces API
 publiques répondent régulièrement 503, et les fichiers ne bougent pas.
 `--sans-cache` force le rafraîchissement.
 
+Par défaut la recherche porte sur **Marciac**. Pour élargir :
+
 ```bash
-node scripts/demo-donnees-reelles.mjs --communes 32013,32107 --out /tmp/demo
+node scripts/demo-donnees-reelles.mjs --communes 32013,32256,32344 --par-commune 2
+node scripts/demo-donnees-reelles.mjs --communes 32013 --out /tmp/demo --filtres
 ```
 
 ## Tests

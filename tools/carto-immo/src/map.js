@@ -17,6 +17,9 @@ function inlineLeaflet() {
   return { css, js };
 }
 
+const ATTRIBUTION_OSM =
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
+
 const FOND_OSM = `L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
@@ -32,7 +35,7 @@ for (const com of BASEMAP.communes) {
     pane: 'tilePane',
     color: marque ? '#8fa9cd' : '#dcd7cc',
     weight: marque ? 1.5 : 0.6,
-    fillColor: marque ? '#e6edf7' : '#efece5',
+    fillColor: marque ? '#ece7db' : '#f2efe8',
     fillOpacity: 1,
     interactive: marque,
   }).addTo(map);
@@ -47,15 +50,18 @@ map.attributionControl.addAttribution(BASEMAP.attribution || '');`;
  */
 const FOND_CADASTRE = `const cadastre = L.layerGroup();
 const ZOOM_CADASTRE = 15;
+// Canvas plutôt que SVG : le plan cadastral compte des milliers de polygones,
+// que le DOM ne suit pas, en particulier sur mobile.
+const renduCadastre = L.canvas({ pane: 'tilePane', padding: .4 });
 for (const poly of (BASEMAP.cadastre?.parcelles ?? [])) {
   L.polygon(poly.map(r => r.map(([x, y]) => [y, x])), {
-    pane: 'tilePane', color: '#cfc8ba', weight: 0.7,
+    renderer: renduCadastre, pane: 'tilePane', color: '#cfc8ba', weight: 0.7,
     fillColor: '#f6f3ec', fillOpacity: 1, interactive: false,
   }).addTo(cadastre);
 }
 for (const poly of (BASEMAP.cadastre?.batiments ?? [])) {
   L.polygon(poly.map(r => r.map(([x, y]) => [y, x])), {
-    pane: 'tilePane', color: '#b9b0a0', weight: 0.6,
+    renderer: renduCadastre, pane: 'tilePane', color: '#b9b0a0', weight: 0.6,
     fillColor: '#ddd6c8', fillOpacity: 1, interactive: false,
   }).addTo(cadastre);
 }
@@ -173,7 +179,7 @@ export function writeMap(
   --accent:#1f3a5f; --green:#1e7a46; --amber:#a06a00; --red:#b3261e; --grey:#8b9099;
 }
 *{box-sizing:border-box}
-html,body{height:100%;margin:0}
+html,body{height:100%;margin:0;overflow:hidden;overscroll-behavior:none}
 body{font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:var(--bg)}
 .card .price,.pop .p,.pop dd,.pill{font-variant-numeric:tabular-nums}
 #app{display:flex;height:100%}
@@ -193,11 +199,14 @@ input[type=search]{padding-left:10px}
 .chip{border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 11px;font-size:12.5px;cursor:pointer;color:var(--muted);user-select:none}
 .chip[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
 #count{padding:9px 18px;font-size:12.5px;color:var(--muted);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
-#count button{border:none;background:none;color:var(--accent);font:inherit;font-size:12.5px;cursor:pointer;text-decoration:underline}
+#count .actions{display:flex;gap:14px}
+#count button{border:none;background:none;color:var(--accent);font:inherit;font-size:12.5px;cursor:pointer;text-decoration:underline;padding:0}
 #list{overflow:auto;flex:1;min-height:0}
-.card{display:flex;gap:11px;padding:11px 18px;border-bottom:1px solid var(--line);cursor:pointer}
+.card{display:block;padding:11px 18px;border-bottom:1px solid var(--line);cursor:pointer;-webkit-tap-highlight-color:transparent}
+.card .head{display:flex;gap:11px}
 .card:hover{background:#faf9f6}
 .card.sel{background:#eef2f8;box-shadow:inset 3px 0 0 var(--accent)}
+.card .detail{margin-top:11px;padding-top:11px;border-top:1px solid var(--line)}
 .card img{width:74px;height:56px;object-fit:cover;border-radius:7px;background:#e9e7e1;flex:none}
 .card .noimg{width:74px;height:56px;border-radius:7px;background:#e9e7e1;flex:none}
 .card h3{margin:0 0 3px;font-size:13px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -229,20 +238,62 @@ input[type=search]{padding-left:10px}
 .badge{display:inline-block;width:19px;height:19px;line-height:19px;text-align:center;border-radius:4px;font-weight:700;font-size:11.5px;color:#fff}
 .dA{background:#008040}.dB{background:#39a24a}.dC{background:#a8c94a}.dD{background:#f5d800}.dE{background:#f0a000}.dF{background:#e06000}.dG{background:#d02020}.dX{background:#b0b0b0}
 .empty{padding:34px 18px;text-align:center;color:var(--muted);font-size:13px}
-@media (max-width:820px){#app{flex-direction:column}#side{width:100%;height:56%;overflow:auto}#list{overflow:visible;flex:none}header .note{font-size:11.5px}#map{height:44%;flex:none}}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+#poignee{display:none}
+#credits{display:none;margin:0;padding:12px 18px 18px;font-size:11px;line-height:1.5;color:var(--muted);border-top:1px solid var(--line)}
+#credits a{color:var(--muted)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+@media (max-width:820px){
+  #app{display:block;position:relative}
+  #map{position:absolute;inset:0;height:100%;width:100%}
+  /* Panneau glissant : la carte reste visible, la liste vient par-dessus. */
+  #side{
+    position:absolute;left:0;right:0;bottom:0;width:auto;height:90%;
+    border-right:none;border-top:1px solid var(--line);
+    border-radius:20px 20px 0 0;box-shadow:0 -8px 32px rgba(0,0,0,.18);
+    transform:translateY(var(--pos,70%));
+    transition:transform .3s cubic-bezier(.22,.61,.36,1);
+    z-index:1000;overscroll-behavior:contain;
+  }
+  #side.glisse{transition:none}
+  #poignee{
+    display:flex;align-items:center;justify-content:center;
+    height:30px;flex:none;cursor:grab;touch-action:none;
+    background:var(--panel);border-radius:20px 20px 0 0;
+  }
+  #poignee::before{content:'';width:40px;height:4px;border-radius:2px;background:#cfcac0}
+  #poignee:active{cursor:grabbing}
+  header{padding:2px 18px 12px;touch-action:none}
+  header h1{font-size:15px}
+  header .note{font-size:11.5px;max-height:0;padding:0 10px;border-width:0;overflow:hidden;transition:max-height .3s,padding .3s}
+  #side.ouvert header .note{max-height:280px;padding:8px 10px;border-width:1px}
+  #list{overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+  .card{padding:13px 18px}
+  .card img,.card .noimg{width:88px;height:66px}
+  .card h3{font-size:14px}
+  .chip{padding:9px 14px;font-size:13px}
+  #count{padding:11px 18px}
+  #count button{padding:6px 2px}
+  .leaflet-control-zoom{display:none}
+  /* Le contrôle Leaflet se retrouverait derrière le panneau. */
+  .leaflet-control-attribution{display:none}
+  #credits{display:block}
+}
 </style>
 </head>
 <body>
 <div id="app">
   <aside id="side">
+    <div id="poignee" role="button" tabindex="0" aria-label="Déplier ou replier la liste" aria-expanded="false"></div>
     <header>
       <h1>${title}</h1>
       <div class="sub" id="stamp"></div>
       ${note ? `<p class="note">${note}</p>` : ''}
     </header>
     ${filtres ? BLOC_FILTRES : ''}
-    <div id="count"><span></span>${filtres ? '<button id="reset">Réinitialiser</button>' : ''}</div>
+    <div id="count"><span></span><span class="actions"><button id="voirtout">Tout voir</button>${filtres ? '<button id="reset">Réinitialiser</button>' : ''}</span></div>
     <div id="list"></div>
+    <p id="credits"></p>
   </aside>
   <div id="map"></div>
 </div>
@@ -252,6 +303,7 @@ const DATA = ${escapeJson(points)};
 const GENERATED = ${escapeJson(new Date().toISOString())};
 const SANS_COORDS = ${sansCoords};
 const AVEC_FILTRES = ${filtres};
+const ATTRIBUTION = ${escapeJson(basemap?.attribution ?? '© OpenStreetMap')};
 const BASEMAP = ${basemap ? escapeJson(basemap) : 'null'};
 
 const eur = n => n == null ? '—' : new Intl.NumberFormat('fr-FR').format(Math.round(n)) + ' €';
@@ -274,6 +326,8 @@ document.getElementById('stamp').textContent =
   (nbRepris ? ' · ' + nbRepris + ' remis en ligne' : '') +
   (SANS_COORDS ? ' · ' + SANS_COORDS + ' sans localisation' : '') +
   ' · ' + new Date(GENERATED).toLocaleString('fr-FR', {dateStyle:'long', timeStyle:'short'});
+
+document.getElementById('credits').innerHTML = 'Fond de carte : ' + ATTRIBUTION;
 
 const map = L.map('map', { zoomControl: true, scrollWheelZoom: true });
 
@@ -310,7 +364,7 @@ function dpeBadge(v){
   return '<span class="badge d' + k + '">' + (k === 'X' ? '?' : k) + '</span>';
 }
 
-function popup(d){
+function corpsFiche(d){
   const rows = [];
   const push = (k, v) => { if (v) rows.push('<dt>' + k + '</dt><dd>' + v + '</dd>'); };
   push('Surface', d.s ? num(d.s) + ' m²' + (d.pc ? ' · ' + d.pc + ' pièces' : '') : null);
@@ -345,14 +399,26 @@ function popup(d){
   if (d.ul) links.push('<a href="' + esc(d.ul) + '" target="_blank" rel="noopener">Analyse</a>');
   if (d.um) links.push('<a href="' + esc(d.um) + '" target="_blank" rel="noopener">Maps</a>');
 
+  return { rows: rows.join(''), links: links.join('') };
+}
+
+/** Bulle sur la carte : image, prix, caractéristiques, liens. */
+function popup(d){
+  const { rows, links } = corpsFiche(d);
   return '<div class="pop">' +
     (d.ph ? '<img src="' + esc(d.ph) + '" alt="" loading="lazy">' : '') +
     '<div class="body">' +
       '<h3>' + esc(d.t || 'Annonce ' + d.id) + '</h3>' +
       '<div class="p">' + eur(d.p) + (d.m2 ? '<small>' + num(d.m2) + ' €/m²</small>' : '') + '</div>' +
-      '<dl>' + rows.join('') + '</dl>' +
-      '<div class="links">' + links.join('') + '</div>' +
+      '<dl>' + rows + '</dl>' +
+      '<div class="links">' + links + '</div>' +
     '</div></div>';
+}
+
+/** Même contenu, déplié dans la liste : sur mobile la bulle masquerait la carte. */
+function detailFiche(d){
+  const { rows, links } = corpsFiche(d);
+  return '<div class="pop"><dl>' + rows + '</dl><div class="links">' + links + '</div></div>';
 }
 
 function card(d){
@@ -361,13 +427,14 @@ function card(d){
     (d.st === 'republie' ? '<span class="tag again">remis en ligne</span>' : '') +
     (d.pm === 'Sous le marché' ? '<span class="tag under">sous marché</span>' : '') +
     (d.pm === 'Au-dessus du marché' ? '<span class="tag over">au-dessus</span>' : '');
-  return '<article class="card" data-id="' + d.id + '">' +
+  return '<article class="card" data-id="' + d.id + '" tabindex="0">' +
+    '<div class="head">' +
     (d.ph ? '<img src="' + esc(d.ph) + '" alt="" loading="lazy">' : '<div class="noimg"></div>') +
     '<div><h3>' + esc(d.t || 'Annonce ' + d.id) + tags + '</h3>' +
     '<div class="meta">' + esc(d.v || '') + (d.cp ? ' · ' + esc(d.cp) : '') +
       (d.s ? ' · ' + num(d.s) + ' m²' : '') + (d.pc ? ' · ' + d.pc + ' p.' : '') + '</div>' +
     '<div class="price">' + eur(d.p) + (d.m2 ? ' <span class="meta">' + num(d.m2) + ' €/m²</span>' : '') + '</div>' +
-    '</div></article>';
+    '</div></div></article>';
 }
 
 const F = { q:'', pmin:null, pmax:null, smin:null, smax:null, nw:false, again:false, under:false, drop:false, exact:false };
@@ -399,7 +466,7 @@ function select(id, fly){
   selected = id;
   document.querySelectorAll('.card.sel').forEach(e => e.classList.remove('sel'));
   const el = document.querySelector('.card[data-id="' + id + '"]');
-  if (el) { el.classList.add('sel'); el.scrollIntoView({ block:'nearest', behavior:'smooth' }); }
+  if (el) { el.classList.add('sel'); amenerDansLaListe(el); }
   const entry = markers.get(id);
   if (entry) {
     entry.m.setIcon(icon(entry.d, true));
@@ -407,33 +474,43 @@ function select(id, fly){
       entry.parcelle.setStyle({ color: '#0f2742', weight: 3.5, fillColor: '#3b6fb0', fillOpacity: 0.38 });
       entry.parcelle.bringToFront();
     }
-    // La fiche s'ancre au même point que la parcelle : sans décalage, elle la
+    // La bulle s'ancre au même point que la parcelle : sans décalage, elle la
     // recouvre. On la remonte de la demi-hauteur réelle du terrain à l'écran.
-    const ouvrirFiche = () => {
+    const ouvrirBulle = () => {
+      if (!entry.m.getPopup()) return;
       if (entry.parcelle) {
         const b = entry.parcelle.getBounds();
         const haut = map.latLngToContainerPoint(b.getNorthWest()).y;
         const bas = map.latLngToContainerPoint(b.getSouthEast()).y;
-        entry.m.getPopup().options.offset = L.point(0, -(Math.abs(bas - haut) / 2 + 14));
+        // Demi-hauteur du terrain, plus la pointe de la bulle et une marge.
+        entry.m.getPopup().options.offset = L.point(0, -(Math.abs(bas - haut) / 2 + 40));
       }
       entry.m.openPopup();
     };
 
+    const mobile = MOBILE();
+    if (mobile) {
+      majDetail();
+      // Laisser voir la carte : on n'ouvre le panneau qu'à mi-hauteur.
+      if (position === 2) allerA(1);
+    }
+
     if (fly) {
-      // Cadrer la parcelle plutôt que le point : on voit la forme du terrain.
-      map.once('moveend', ouvrirFiche);
+      const duree = DOUX ? .6 : 0;
+      if (!mobile) map.once('moveend', ouvrirBulle);
       if (entry.parcelle) {
         map.flyToBounds(entry.parcelle.getBounds().pad(1.2), {
-          duration: .6,
+          duration: duree,
           maxZoom: 19,
-          paddingTopLeft: [20, 360],
-          paddingBottomRight: [20, 40],
+          // Réserver la place de la bulle sur grand écran, celle du panneau sur mobile.
+          paddingTopLeft: [20, mobile ? 20 : 360],
+          paddingBottomRight: [20, mobile ? masqueBas() + 20 : 40],
         });
       } else {
-        map.flyTo(entry.m.getLatLng(), Math.max(map.getZoom(), 17), { duration: .6 });
+        map.flyTo(entry.m.getLatLng(), Math.max(map.getZoom(), 17), { duration: duree });
       }
-    } else {
-      ouvrirFiche();
+    } else if (!mobile) {
+      ouvrirBulle();
     }
   }
 }
@@ -450,6 +527,33 @@ function tracerParcelle(d, sel){
   }).addTo(parcelles);
 }
 
+/**
+ * Amène une fiche dans la partie visible de la liste. scrollIntoView ferait
+ * défiler tous les ancêtres — y compris le corps de page, qui reste défilable
+ * par programme même en overflow:hidden — et décalerait le panneau.
+ */
+function amenerDansLaListe(el){
+  const liste = document.getElementById('list');
+  const cible = el.offsetTop - 8;
+  if (cible < liste.scrollTop || cible > liste.scrollTop + liste.clientHeight - el.offsetHeight) {
+    liste.scrollTo({ top: cible, behavior: DOUX ? 'smooth' : 'auto' });
+  }
+}
+
+/** Déplie le détail du bien choisi dans sa fiche de liste (mobile). */
+function majDetail(){
+  for (const e of document.querySelectorAll('.card .detail')) e.remove();
+  if (!MOBILE() || !selected) return;
+  const carte = document.querySelector('.card[data-id="' + selected + '"]');
+  const entree = markers.get(selected);
+  if (!carte || !entree) return;
+  const bloc = document.createElement('div');
+  bloc.className = 'detail';
+  bloc.innerHTML = detailFiche(entree.d);
+  carte.appendChild(bloc);
+  amenerDansLaListe(carte);
+}
+
 function render(){
   layer.clearLayers();
   parcelles.clearLayers();
@@ -460,8 +564,9 @@ function render(){
 
   for (const d of shown) {
     const m = L.marker([d.la, d.lo], { icon: icon(d, false) })
-      .bindPopup(popup(d), { closeButton:true, autoPanPadding:[30,30] })
-      .on('click', () => select(d.id, false));
+      .on('click', () => select(d.id, MOBILE()));
+    // Sur mobile la bulle recouvrirait la carte : le détail se déplie dans la liste.
+    if (!MOBILE()) m.bindPopup(popup(d), { closeButton: true, autoPanPadding: [30, 30] });
     layer.addLayer(m);
     markers.set(d.id, { m, d, parcelle: tracerParcelle(d, false) });
   }
@@ -477,7 +582,14 @@ function render(){
     shown.length + ' bien' + (shown.length > 1 ? 's' : '') + ' affiché' + (shown.length > 1 ? 's' : '') +
     ' sur ' + DATA.length;
 
-  if (shown.length) map.fitBounds(L.latLngBounds(shown.map(d => [d.la, d.lo])).pad(.15), { maxZoom: 15 });
+  if (shown.length) {
+    map.fitBounds(L.latLngBounds(shown.map(d => [d.la, d.lo])).pad(.15), {
+      maxZoom: 15,
+      paddingTopLeft: [20, 20],
+      paddingBottomRight: [20, masqueBas() + 20],
+    });
+  }
+  majDetail();
 }
 
 const numOrNull = v => v === '' || v == null ? null : Number(v);
@@ -513,8 +625,105 @@ map.on('zoomend', () => {
   }
 });
 
+// ── Panneau glissant (mobile) ────────────────────────────────────────────
+
+const MOBILE = () => window.matchMedia('(max-width:820px)').matches;
+const DOUX = !window.matchMedia('(prefers-reduced-motion:reduce)').matches;
+const side = document.getElementById('side');
+const poignee = document.getElementById('poignee');
+
+/** Positions d'arrêt du panneau, du replié à l'ouvert. */
+const arrets = () => {
+  const h = side.offsetHeight;
+  return [0, Math.round(h * 0.42), Math.round(h * 0.70)];
+};
+let position = 2; // replié au démarrage : la carte prime
+
+function placerPanneau(px, anime = true) {
+  side.classList.toggle('glisse', !anime);
+  side.style.setProperty('--pos', px + 'px');
+  side.classList.toggle('ouvert', px < arrets()[1]);
+  poignee.setAttribute('aria-expanded', String(px < arrets()[2] - 4));
+}
+
+function allerA(i, anime = true) {
+  const a = arrets();
+  position = Math.max(0, Math.min(a.length - 1, i));
+  placerPanneau(a[position], anime);
+}
+
+/** Hauteur de carte masquée par le panneau, pour ne rien cadrer dessous. */
+function masqueBas() {
+  if (!MOBILE()) return 0;
+  const r = side.getBoundingClientRect();
+  return Math.max(0, window.innerHeight - r.top);
+}
+
+if (poignee) {
+  let depart = null;
+  // Un glissement se termine par un clic synthétisé : sans ce drapeau, il
+  // rebasculerait aussitôt le panneau.
+  let aGlisse = false;
+  const debut = (e) => {
+    if (!MOBILE()) return;
+    aGlisse = false;
+    depart = { y: e.clientY, base: arrets()[position] };
+    poignee.setPointerCapture?.(e.pointerId);
+    side.classList.add('glisse');
+  };
+  const bouge = (e) => {
+    if (!depart) return;
+    e.preventDefault();
+    if (Math.abs(e.clientY - depart.y) > 6) aGlisse = true;
+    const a = arrets();
+    placerPanneau(Math.max(0, Math.min(a[a.length - 1], depart.base + (e.clientY - depart.y))), false);
+  };
+  const fin = (e) => {
+    if (!depart) return;
+    const a = arrets();
+    const y = Math.max(0, Math.min(a[a.length - 1], depart.base + (e.clientY - depart.y)));
+    // On s'arrête au cran le plus proche.
+    let proche = 0;
+    for (let i = 1; i < a.length; i++) if (Math.abs(a[i] - y) < Math.abs(a[proche] - y)) proche = i;
+    depart = null;
+    allerA(proche);
+  };
+  poignee.addEventListener('pointerdown', debut);
+  poignee.addEventListener('pointermove', bouge);
+  poignee.addEventListener('pointerup', fin);
+  poignee.addEventListener('pointercancel', fin);
+  poignee.addEventListener('click', () => {
+    if (aGlisse) { aGlisse = false; return; }
+    if (!depart) allerA(position === 2 ? 1 : 2);
+  });
+  poignee.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); allerA(position === 2 ? 1 : 2); }
+    if (e.key === 'ArrowUp') allerA(position - 1);
+    if (e.key === 'ArrowDown') allerA(position + 1);
+  });
+}
+
+on('voirtout', 'click', () => cadrerTout());
+
+function cadrerTout() {
+  const shown = DATA.filter(matches);
+  if (!shown.length) return;
+  map.fitBounds(L.latLngBounds(shown.map(d => [d.la, d.lo])).pad(.15), {
+    maxZoom: 15,
+    paddingBottomRight: [20, masqueBas() + 20],
+    paddingTopLeft: [20, 20],
+  });
+}
+
+window.matchMedia('(max-width:820px)').addEventListener('change', () => {
+  render();
+  if (MOBILE()) allerA(2, false); else side.style.removeProperty('--pos');
+});
+window.addEventListener('resize', () => { if (MOBILE()) allerA(position, false); });
+
 map.setView([43.52, 0.16], 9);
 render();
+if (MOBILE()) allerA(2, false);
 </script>
 </body>
 </html>`;
