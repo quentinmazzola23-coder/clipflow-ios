@@ -33,7 +33,14 @@ const neuf = () => ({ version: VERSION, updatedAt: null, biens: {} });
 function migrer(ancien) {
   const store = neuf();
   for (const rec of Object.values(ancien.records ?? {})) {
-    const cle = cleBien(rec);
+    let cle = cleBien(rec);
+    // Deux annonces d'une base v1 peuvent partager une empreinte sans désigner
+    // le même bien : les écraser perdrait parutions et historique de prix.
+    if (store.biens[cle]) {
+      let n = 2;
+      while (store.biens[`${cle}#${n}`]) n++;
+      cle = `${cle}#${n}`;
+    }
     store.biens[cle] = {
       ...rec,
       cle,
@@ -186,12 +193,17 @@ export function trierAnnonces(store, annonces, cfg, { maintenant = new Date().to
 export function enregistrerAnalyse(store, fiche, annonce) {
   const quand = fiche.collecteLe;
   const cle = cleBien(fiche);
-  fiche.cle = cle;
 
-  const doublon = rapprocherApresAnalyse(fiche, tousLesBiens(store));
+  // Le bien déjà rattaché à cette annonce fait foi : c'est le seul lien certain,
+  // là où la clé, elle, peut se préciser d'une analyse à l'autre.
+  const parAnnonce = indexAnnonces(store).get(String(annonce.id)) ?? null;
+
+  const doublon = parAnnonce ? null : rapprocherApresAnalyse(fiche, tousLesBiens(store));
   if (doublon) {
     const bien = doublon.bien;
+    const ancienneCle = bien.cle;
     Object.assign(bien, fusionnable(fiche));
+    bien.cle = ancienneCle; // la fiche fusionnée garde sa place en base
     rattacherAnnonce(bien, annonce, quand);
     bien.analyseLe = quand;
     bien.statut = 'republie';
@@ -199,14 +211,26 @@ export function enregistrerAnalyse(store, fiche, annonce) {
     return { bien, fusionAvec: doublon.motif };
   }
 
-  const existant = store.biens[cle];
-  // L'annonce est-elle déjà rattachée à ce bien, ou est-ce une nouvelle parution ?
-  const dejaRattachee = existant?.annonces?.some((a) => String(a.id) === String(annonce.id));
+  // Sinon : le bien portant déjà l'annonce, ou celui rangé sous cette clé — à
+  // condition que la clé soit une vraie preuve d'identité.
+  const sousLaCle = store.biens[cle];
+  const cleProbante = !cle.startsWith('empreinte:');
+  const existant = parAnnonce ?? (cleProbante ? sousLaCle : null);
+  const dejaRattachee = !!parAnnonce;
 
   const bien = existant ?? { ...fiche, annonces: [], premiereApparition: quand, republications: 0 };
+  const ancienneCle = existant?.cle ?? null;
   if (existant) Object.assign(bien, fusionnable(fiche));
 
-  bien.cle = cle;
+  // Deux biens distincts peuvent partager une empreinte : on ne les écrase pas.
+  let cleFinale = cle;
+  if (!existant && sousLaCle) {
+    let n = 2;
+    while (store.biens[`${cle}#${n}`]) n++;
+    cleFinale = `${cle}#${n}`;
+  }
+
+  bien.cle = cleFinale;
   bien.analyseLe = quand;
   if (!existant) {
     bien.statut = 'nouveau';
@@ -220,10 +244,10 @@ export function enregistrerAnalyse(store, fiche, annonce) {
     bien.statut = 'connu';
   }
   rattacherAnnonce(bien, annonce, quand);
-  store.biens[cle] = bien;
 
-  // La clé a pu se préciser (empreinte → parcelle) : on retire l'ancienne.
-  if (existant && existant.cle && existant.cle !== cle) delete store.biens[existant.cle];
+  // La clé a pu se préciser (empreinte → parcelle) : on déménage la fiche.
+  if (ancienneCle && ancienneCle !== cleFinale) delete store.biens[ancienneCle];
+  store.biens[cleFinale] = bien;
 
   return { bien, fusionAvec: null };
 }

@@ -197,6 +197,11 @@ async function cmdRun(cfg, args) {
       const res = await analyseInto(ctx, cfg, store, batch);
       analysees = res.analysees;
       log.ok(`${res.stats.ok} analysées, ${res.stats.failed} en échec`);
+      // Une session expirée interrompt tout : l'exécution ne peut pas se
+      // conclure comme si elle avait abouti.
+      if (res.stats.errors.some((e) => /session lacquereur/.test(e.error))) {
+        process.exitCode = 1;
+      }
       if (aAnalyser.length > batch.length) {
         log.info(`${aAnalyser.length - batch.length} restantes : prochaine exécution.`);
       }
@@ -271,22 +276,25 @@ async function cmdAnnonces(cfg, args) {
 
   // Les annonces sans adresse exacte restent hors carte : on ne place pas un
   // bien sur un point qu'on n'a pas établi.
-  let nouveaux = 0;
+  const enregistres = [];
   for (const fiche of fiches) {
     if (!fiche.localisationPrecise) continue;
     const { bien } = enregistrerAnalyse(store, fiche, {
       id: fiche.id, url: fiche.urlAnnonce, titre: fiche.titre, prix: fiche.prix, vendeur: fiche.vendeur,
     });
-    if (bien.statut === 'nouveau') nouveaux++;
+    enregistres.push(bien);
   }
   saveStore(cfg.paths.store, store);
 
+  const nouveaux = enregistres.filter((b) => b.statut === 'nouveau').length;
   log.ok(`${localisees}/${total} annonces localisées · ${nouveaux} nouvelles en base`);
 
-  // Même rapport que la voie leboncoin : c'est ce qu'on lit en premier.
+  // Même rapport que la voie leboncoin : c'est ce qu'on lit en premier. Le
+  // statut est porté par le bien enregistré, pas par la fiche d'entrée.
+  const inchanges = enregistres.filter((b) => b.statut === 'connu').length;
   const rapport = construireRapport(
-    { nouveaux: [], republies: [], connus: [] },
-    fiches.filter((f) => f.localisationPrecise && f.statut === 'nouveau')
+    { nouveaux: [], republies: [], connus: Array.from({ length: inchanges }, () => ({ bien: null, prixModifie: null })) },
+    enregistres
   );
   const texte = ecrireRapport(rapport, cfg.paths.report);
   console.log('\n' + texte);

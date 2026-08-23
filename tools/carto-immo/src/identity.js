@@ -210,26 +210,48 @@ export function rapprocher(annonce, biens, { seuil = SEUIL_RAPPROCHEMENT } = {})
  * cadastrale identifie un bien sans ambiguïté.
  */
 export function rapprocherApresAnalyse(fiche, biens) {
+  // Les motifs ne se valent pas : la parcelle cadastrale identifie un bien,
+  // la proximité seulement le suggère. On retient donc le meilleur, pas le
+  // premier venu.
+  const NIVEAUX = [
+    {
+      motif: 'même parcelle cadastrale',
+      force: 4,
+      test: (b) => fiche.parcelle && b.parcelle && fiche.parcelle === b.parcelle,
+    },
+    {
+      motif: 'même adresse',
+      force: 3,
+      test: (b) => fiche.banId && b.banId && fiche.banId === b.banId,
+    },
+    {
+      motif: 'annonce déjà diffusée pour ce bien',
+      force: 2,
+      test: (b) =>
+        (b.autresAnnonces ?? []).some(
+          (u) => u && u.split('?')[0] === fiche.urlAnnonce.split('?')[0]
+        ),
+    },
+    {
+      motif: 'même emplacement et même surface',
+      force: 1,
+      test: (b) => {
+        if (!fiche.localisationPrecise || !b.localisationPrecise) return false;
+        const d = distanceM(fiche.latitude, fiche.longitude, b.latitude, b.longitude);
+        return d != null && d <= 25 && proche(fiche.surface, b.surface, 3) === true;
+      },
+    },
+  ];
+
+  let meilleur = null;
   for (const bien of biens) {
     if (bien.cle === fiche.cle) continue;
-
-    if (fiche.parcelle && bien.parcelle && fiche.parcelle === bien.parcelle) {
-      return { bien, motif: 'même parcelle cadastrale' };
+    for (const niveau of NIVEAUX) {
+      if (!niveau.test(bien)) continue;
+      if (!meilleur || niveau.force > meilleur.force) meilleur = { bien, motif: niveau.motif, force: niveau.force };
+      break; // le premier niveau satisfait est le plus fort pour ce bien
     }
-    if (fiche.banId && bien.banId && fiche.banId === bien.banId) {
-      return { bien, motif: 'même adresse' };
-    }
-    const urls = bien.autresAnnonces ?? [];
-    if (urls.some((u) => u && u.split('?')[0] === fiche.urlAnnonce.split('?')[0])) {
-      return { bien, motif: 'annonce déjà diffusée pour ce bien' };
-    }
-    if (fiche.localisationPrecise && bien.localisationPrecise) {
-      const d = distanceM(fiche.latitude, fiche.longitude, bien.latitude, bien.longitude);
-      const memeSurface = proche(fiche.surface, bien.surface, 3);
-      if (d != null && d <= 25 && memeSurface) {
-        return { bien, motif: 'même emplacement et même surface' };
-      }
-    }
+    if (meilleur?.force === NIVEAUX[0].force) break; // rien ne bat la parcelle
   }
-  return null;
+  return meilleur ? { bien: meilleur.bien, motif: meilleur.motif } : null;
 }

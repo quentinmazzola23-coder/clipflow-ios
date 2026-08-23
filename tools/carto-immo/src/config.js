@@ -57,6 +57,12 @@ function deepMerge(base, override) {
 }
 
 export function loadConfig(explicitPath) {
+  // Un --config explicite qui n'existe pas est une erreur, pas une invitation à
+  // retomber sur les valeurs par défaut.
+  if (explicitPath && !fs.existsSync(path.resolve(explicitPath))) {
+    throw new Error(`Fichier de configuration introuvable : ${path.resolve(explicitPath)}`);
+  }
+
   const candidates = explicitPath
     ? [path.resolve(explicitPath)]
     : [path.join(ROOT, 'config.json'), path.join(ROOT, 'config.example.json')];
@@ -76,6 +82,10 @@ export function loadConfig(explicitPath) {
   for (const [k, v] of Object.entries(cfg.paths)) {
     cfg.paths[k] = path.isAbsolute(v) ? v : path.join(ROOT, v);
   }
-  fs.mkdirSync(cfg.paths.data, { recursive: true });
+  // Toute destination configurée doit exister, pas seulement data/.
+  for (const [nom, dest] of Object.entries(cfg.paths)) {
+    const dossier = nom === 'data' || nom === 'profile' || nom === 'cache' ? dest : path.dirname(dest);
+    fs.mkdirSync(dossier, { recursive: true });
+  }
   return cfg;
 }

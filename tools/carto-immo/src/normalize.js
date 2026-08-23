@@ -82,6 +82,13 @@ export function normalize(ad, analysis, { collectedAt = new Date().toISOString()
     longitude: lon,
     localisationPrecise,
     confianceAdresse: addr.confidence ?? null,
+    // Même vocabulaire que la voie « annonces » : la colonne Confiance et la
+    // fiche de carte lisent ce champ, quelle que soit l'origine de l'adresse.
+    niveauConfiance:
+      addr.confidence == null ? null
+        : addr.confidence >= 80 ? 'élevée'
+        : addr.confidence >= 60 ? 'bonne'
+        : 'moyenne',
     sourceAdresse: addr.source ?? null,
     parcelle: addr.parcelle_id ?? null,
     banId: addr.ban_id ?? null,
@@ -218,6 +225,22 @@ export function normaliserAnnonce(annonce, localisation, marche = {}, { collecte
     terrasse: annonce.terrasse ?? null,
     piscine: annonce.piscine ?? null,
     parking: annonce.parking ?? null,
+
+    // Caractéristiques telles qu'annoncées : c'est contre elles que se fera le
+    // rapprochement d'une future parution, jamais contre la commune du DPE.
+    lbc: {
+      titre: annonce.titre ?? null,
+      prix: annonce.prix ?? null,
+      ville: annonce.ville ?? null,
+      codePostal: annonce.codePostal ?? null,
+      surface: annonce.surface ?? null,
+      terrain: annonce.terrain ?? null,
+      pieces: annonce.pieces ?? null,
+      typeBien: annonce.typeBien ?? null,
+      vendeur: annonce.vendeur ?? null,
+      lat: annonce.flouLat ?? null,
+      lon: annonce.flouLon ?? null,
+    },
 
     urlAnnonce: annonce.url,
     urlAnalyse: `https://lacquereur.fr/listing-analysis/${encodeURIComponent(annonce.url)}`,

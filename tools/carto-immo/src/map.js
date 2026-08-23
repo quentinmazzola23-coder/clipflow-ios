@@ -664,7 +664,10 @@ function select(id, fly, { bulleDejaGeree = false } = {}){
     }
 
     if (fly) {
-      const duree = DOUX ? .6 : 0;
+      // Leaflet ignore duration:0 et anime quand même : sans mouvement voulu,
+      // on se pose directement.
+      const anime = DOUX;
+      const duree = .6;
       if (!mobile) map.once('moveend', ouvrirBulle);
       const bornes = entry.parcelle?.getBounds();
       if (bornes && mobile) {
@@ -674,17 +677,22 @@ function select(id, fly, { bulleDejaGeree = false } = {}){
         const zoom = Math.max(17, Math.min(19, map.getBoundsZoom(bornes.pad(0.4), true)));
         const pt = map.project(bornes.getCenter(), zoom);
         pt.y += masqueBas() / 2;
-        map.flyTo(map.unproject(pt, zoom), zoom, { duration: duree });
+        const centre = map.unproject(pt, zoom);
+        if (anime) map.flyTo(centre, zoom, { duration: duree });
+        else map.setView(centre, zoom, { animate: false });
       } else if (bornes) {
-        map.flyToBounds(bornes.pad(1.2), {
-          duration: duree,
+        const cadrage = {
           maxZoom: 19,
           // Réserver la place de la bulle, qui s'ouvre au-dessus du point.
           paddingTopLeft: [20, 360],
           paddingBottomRight: [20, 40],
-        });
+        };
+        if (anime) map.flyToBounds(bornes.pad(1.2), { ...cadrage, duration: duree });
+        else map.fitBounds(bornes.pad(1.2), { ...cadrage, animate: false });
       } else {
-        map.flyTo(entry.m.getLatLng(), Math.max(map.getZoom(), 17), { duration: duree });
+        const z = Math.max(map.getZoom(), 17);
+        if (anime) map.flyTo(entry.m.getLatLng(), z, { duration: duree });
+        else map.setView(entry.m.getLatLng(), z, { animate: false });
       }
     } else if (!mobile && !bulleDejaGeree) {
       ouvrirBulle();

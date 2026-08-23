@@ -14,9 +14,17 @@ if [ "${1:-}" = "--supprimer" ]; then
   exit 0
 fi
 
+# La voie `annonces` ne demande pas de session ouverte : c'est celle qu'on
+# programme par défaut. `--commande run` bascule sur la voie leboncoin.
+commande="src/cli.js annonces"
+if [ "${1:-}" = "--commande" ]; then
+  [ "${2:-}" = "run" ] && commande="src/cli.js run"
+  shift 2
+fi
+
 heure="${1:-07:30}"
 h="${heure%%:*}"; m="${heure##*:}"
-ligne="$((10#$m)) $((10#$h)) * * * cd \"$racine\" && $(command -v node) src/cli.js run --quiet >> data/cron.log 2>&1 $marqueur"
+ligne="$((10#$m)) $((10#$h)) * * * cd \"$racine\" && $(command -v node) $commande --quiet >> data/cron.log 2>&1 $marqueur"
 
 { crontab -l 2>/dev/null | grep -v "$marqueur"; echo "$ligne"; } | crontab -
 echo "Tâche programmée tous les jours à $heure."

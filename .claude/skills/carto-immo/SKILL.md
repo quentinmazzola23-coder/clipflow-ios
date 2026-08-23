@@ -18,8 +18,7 @@ cd tools/carto-immo && node src/cli.js annonces --zone Marciac
 
 Elle relève les annonces Bien'ici, retrouve leur adresse exacte via le registre
 des DPE, trace la parcelle et situe le prix face aux ventes DVF. Ni navigateur
-ni compte. C'est la voie à privilégier, et la seule qui fonctionne en tâche
-programmée sans session ouverte.
+ni compte : c'est la voie à privilégier.
 
 La voie leboncoin couvre en plus les annonces de particuliers, mais exige une
 session de navigateur et un compte lacquereur.fr :
@@ -51,6 +50,10 @@ décompte « remises en ligne » dans la sortie avant de conclure à un problèm
 | Refaire tableur et carte sans recollecter | `node src/cli.js map` |
 | Limiter le volume d'un lancement | `node src/cli.js run --max 15` |
 | Programmer tous les matins | `scripts/planifier-windows.ps1` (Windows) ou `scripts/planifier-cron.sh` (macOS/Linux) |
+
+Ces deux scripts programment la commande `run`, qui exige une session de
+navigateur ouverte. Pour programmer la voie `annonces`, qui n'en a pas besoin,
+remplace la commande dans la tâche par `src/cli.js annonces --zone <commune>`.
 
 ## Avant de lancer, vérifie deux choses
 

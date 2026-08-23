@@ -25,11 +25,24 @@ const etiquette = (b) =>
  */
 export function construireRapport(triage, analyses, { maintenant = new Date().toISOString() } = {}) {
   const nouveaux = analyses.filter((b) => b.statut === 'nouveau');
-  const republies = triage.republies;
-  const baisses = [...triage.connus, ...triage.republies]
+
+  // Une remise en ligne peut être démasquée au triage — sur les caractéristiques
+  // visibles — ou seulement à l'analyse, par la parcelle. Les deux comptent.
+  const dejaCitees = new Set(triage.republies.map((r) => r.bien.cle));
+  const republies = [
+    ...triage.republies,
+    ...analyses
+      .filter((b) => b.statut === 'republie' && !dejaCitees.has(b.cle))
+      .map((bien) => ({
+        bien,
+        motifs: [bien.motifRapprochement ?? 'démasquée à l’analyse'],
+        prixModifie: bien.prixModifie ?? null,
+      })),
+  ];
+  const baisses = [...triage.connus, ...republies]
     .filter((c) => c.prixModifie && c.prixModifie.apres < c.prixModifie.avant)
     .map((c) => ({ bien: c.bien, ...c.prixModifie }));
-  const hausses = [...triage.connus, ...triage.republies]
+  const hausses = [...triage.connus, ...republies]
     .filter((c) => c.prixModifie && c.prixModifie.apres > c.prixModifie.avant)
     .map((c) => ({ bien: c.bien, ...c.prixModifie }));
   const affaires = nouveaux.filter((b) => b.positionMarche === 'Sous le marché');
@@ -73,7 +86,7 @@ export function ecrireRapport(r, file) {
           ? ` — ${b.ecartMarchePct > 0 ? '+' : ''}${b.ecartMarchePct.toFixed(1)} % vs marché`
           : '';
       lignes.push(`- **${etiquette(b)}**${marche}`);
-      if (b.adresseEstimee) lignes.push(`  ${b.adresseEstimee} (confiance ${b.confianceAdresse ?? '?'} %)`);
+      if (b.adresseEstimee) lignes.push(`  ${b.adresseEstimee} (confiance ${b.niveauConfiance ?? 'inconnue'})`);
       lignes.push(`  ${b.urlAnnonce}`);
     }
     lignes.push('');

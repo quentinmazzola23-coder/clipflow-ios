@@ -8,6 +8,7 @@ const COLUMNS = [
   { header: 'Prix', key: 'prix', width: 13, fmt: '#,##0 "€"' },
   { header: '€/m²', key: 'prixM2', width: 10, fmt: '#,##0' },
   { header: 'Écart marché', key: 'ecartMarcheAffiche', width: 13, fmt: '+0"%";-0"%";0"%"' },
+  { header: 'Ventes comparées', key: 'nbVentesComparables', width: 16 },
   { header: 'Commune', key: 'ville', width: 20 },
   { header: 'Adresse', key: 'adresseEstimee', width: 42 },
   { header: 'Confiance', key: 'niveauConfiance', width: 11 },

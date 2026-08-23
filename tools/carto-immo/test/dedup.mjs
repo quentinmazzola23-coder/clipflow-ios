@@ -262,6 +262,48 @@ check('deux fiches au même emplacement et même surface sont fusionnées', () =
   assert.equal(fusion.fusionAvec, 'même emplacement et même surface');
 });
 
+// ── Une clé qui se précise ne doit pas dupliquer le bien ─────────────────
+
+check('un bien localisé après coup reste le même bien', () => {
+  const f = path.join(tmp, 'precision.json');
+  const st = loadStore(f);
+  const a = annonce({ id: 7007, ville: 'Auch', cp: '32000', surface: 120, pieces: 5 });
+
+  // Jour 1 : analyse sans adresse — la clé se réduit à une empreinte.
+  const j1 = enregistrerAnalyse(st, {
+    ...fiche(a, { parcelle: null, banId: null, adresse: null, quand: '2026-08-01T06:00:00.000Z' }),
+    localisationPrecise: false, latitude: null, longitude: null,
+  }, a).bien;
+  assert.match(j1.cle, /^empreinte:/);
+  assert.equal(j1.statut, 'nouveau');
+
+  // Jour 15 : la même annonce, cette fois localisée.
+  reinitialiserStatuts(st);
+  const j15 = enregistrerAnalyse(st, fiche(a, {
+    parcelle: '32013000AR0366', quand: '2026-08-15T06:00:00.000Z',
+  }), a).bien;
+
+  assert.equal(tousLesBiens(st).length, 1, 'un seul bien, pas deux');
+  assert.equal(j15.cle, 'parcelle:32013000AR0366');
+  assert.equal(j15.premiereApparition, '2026-08-01T06:00:00.000Z', 'l\'ancienneté est conservée');
+  assert.equal(j15.statut, 'connu', 'ce n\'est pas une nouveauté');
+  assert.equal(j15.annonces.length, 1, 'une seule parution');
+});
+
+check('deux biens de même empreinte ne se confondent pas', () => {
+  const f = path.join(tmp, 'empreintes.json');
+  const st = loadStore(f);
+  // Mêmes commune, type, surface et pièces : l'empreinte est identique.
+  for (const id of [8001, 8002]) {
+    const a = annonce({ id, ville: 'Auch', cp: '32000', surface: 100, pieces: 4 });
+    enregistrerAnalyse(st, {
+      ...fiche(a, { parcelle: null, banId: null, adresse: null }),
+      localisationPrecise: false, latitude: null, longitude: null,
+    }, a);
+  }
+  assert.equal(tousLesBiens(st).length, 2, 'deux biens distincts');
+});
+
 // ── Persistance ───────────────────────────────────────────────────────────
 
 saveStore(storeFile, store);

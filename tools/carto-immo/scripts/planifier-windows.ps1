@@ -10,6 +10,10 @@
 param(
   [string]$Heure = '07:30',
   [string]$NomTache = 'Carto-immo - veille quotidienne',
+  # La voie `annonces` ne demande pas de session ouverte : c'est celle qu'on
+  # programme par defaut. -Commande run bascule sur la voie leboncoin.
+  [ValidateSet('annonces','run')][string]$Commande = 'annonces',
+  [string]$Zone = 'Marciac',
   [switch]$Supprimer
 )
 
@@ -29,13 +33,17 @@ if ($Supprimer) {
 $node = (Get-Command node -ErrorAction SilentlyContinue).Source
 if (-not $node) { throw "Node.js est introuvable. Installe-le depuis https://nodejs.org puis relance." }
 
-$action = New-ScheduledTaskAction -Execute $node `
-  -Argument 'src\cli.js run --quiet' -WorkingDirectory $racine
+$arguments = if ($Commande -eq 'annonces') {
+  "src\cli.js annonces --zone $Zone --quiet"
+} else {
+  'src\cli.js run --quiet'
+}
+$action = New-ScheduledTaskAction -Execute $node -Argument $arguments -WorkingDirectory $racine
 
 $declencheur = New-ScheduledTaskTrigger -Daily -At $Heure
 
-# La tache doit tourner dans la session ouverte : le navigateur a besoin
-# du profil connecte, et une execution en arriere-plan echouerait.
+# La voie leboncoin a besoin d'une session ouverte : son navigateur utilise le
+# profil connecte. La voie annonces, elle, n'a besoin de rien.
 $parametres = New-ScheduledTaskSettingsSet `
   -StartWhenAvailable `
   -DontStopIfGoingOnBatteries `
