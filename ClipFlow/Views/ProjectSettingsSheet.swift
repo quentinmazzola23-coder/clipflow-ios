@@ -69,7 +69,7 @@ struct ProjectSettingsSheet: View {
                     }
                 }
 
-                Section("Format de la vidéo") {
+                Section {
                     Picker("Format", selection: Binding(
                         get: { project.outputFormat },
                         set: { project.outputFormat = $0; onTouch() }
@@ -88,6 +88,8 @@ struct ProjectSettingsSheet: View {
                         get: { project.upscaleOnExport },
                         set: { project.upscaleOnExport = $0; onTouch() }
                     ))
+                } header: {
+                    Text("Format de la vidéo")
                 } footer: {
                     Text("Export toujours en 4K, 60 images par seconde. "
                          + "Le recadrage se déplace au doigt sur l'aperçu.")
