@@ -84,6 +84,7 @@ export function normalize(ad, analysis, { collectedAt = new Date().toISOString()
     confianceAdresse: addr.confidence ?? null,
     sourceAdresse: addr.source ?? null,
     parcelle: addr.parcelle_id ?? null,
+    banId: addr.ban_id ?? null,
     codeInsee: addr.commune_insee_code ?? provider.insee_code_hint ?? null,
 
     // ── Énergie ─────────────────────────────────────────────────────────
@@ -120,6 +121,24 @@ export function normalize(ad, analysis, { collectedAt = new Date().toISOString()
     terrasse: l.has_terrace ?? null,
     piscine: l.has_pool ?? null,
     parking: l.has_parking ?? null,
+
+    // Caractéristiques telles qu'annoncées sur leboncoin, conservées à part.
+    // Le rapprochement d'une future annonce se fait contre celles-ci, et non
+    // contre les valeurs réécrites par lacquereur : on compare ce qui est
+    // comparable, deux descriptions issues du même site.
+    lbc: {
+      titre: ad.titre ?? null,
+      prix: ad.prix ?? null,
+      ville: ad.ville ?? null,
+      codePostal: ad.codePostal ?? null,
+      surface: ad.surface ?? null,
+      terrain: ad.terrain ?? null,
+      pieces: ad.pieces ?? null,
+      typeBien: ad.typeBien ?? null,
+      vendeur: ad.vendeur ?? null,
+      lat: ad.lbcLat ?? null,
+      lon: ad.lbcLon ?? null,
+    },
 
     // ── Liens et médias ─────────────────────────────────────────────────
     urlAnnonce: ad.url,

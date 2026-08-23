@@ -8,7 +8,11 @@ import { openBrowser } from './browser.js';
 import { collectListings, applyFilters } from './leboncoin.js';
 import { analyseAll } from './lacquereur.js';
 import { normalize } from './normalize.js';
-import { loadStore, saveStore, needsAnalysis, upsert, allRecords } from './store.js';
+import {
+  loadStore, saveStore, trierAnnonces, enregistrerAnalyse,
+  reinitialiserStatuts, allRecords,
+} from './store.js';
+import { construireRapport, ecrireRapport, resumerRapport } from './report.js';
 import { writeSpreadsheet, writeCsv } from './sheet.js';
 import { writeMap } from './map.js';
 
@@ -89,12 +93,17 @@ async function cmdLogin(cfg) {
 }
 
 async function analyseInto(ctx, cfg, store, listings) {
+  const analysees = [];
   const stats = await analyseAll(ctx, listings, cfg, async (ad, analysis) => {
-    const rec = normalize(ad, analysis);
-    upsert(store, rec);
+    const fiche = normalize(ad, analysis);
+    const { bien, fusionAvec } = enregistrerAnalyse(store, fiche, ad);
+    if (fusionAvec) {
+      log.info(`  rattaché à un bien déjà suivi (${fusionAvec})`);
+    }
+    analysees.push(bien);
     saveStore(cfg.paths.store, store); // sauvegarde incrémentale : une coupure ne perd rien
   });
-  return stats;
+  return { stats, analysees };
 }
 
 async function cmdRun(cfg, args) {
@@ -114,40 +123,72 @@ async function cmdRun(cfg, args) {
   }
 
   const store = loadStore(cfg.paths.store);
-  for (const rec of Object.values(store.records)) rec.nouvelle = false;
+  reinitialiserStatuts(store);
+  let rapport = null;
 
   const ctx = await openBrowser(cfg);
   try {
     log.step(`Collecte sur ${cfg.searches.length} recherche(s)`);
     const all = await collectListings(ctx, cfg);
-    log.ok(`${all.length} annonces trouvées`);
+    log.ok(`${all.length} annonces relevées`);
 
     const filtered = applyFilters(all, cfg.filters);
     if (filtered.length !== all.length) {
       log.info(`${all.length - filtered.length} écartées par les filtres`);
     }
 
-    const todo = filtered.filter((a) => needsAnalysis(store, a.id, cfg.reanalyseAfterDays));
-    const cap = args.max ?? cfg.maxAnalysesPerRun;
-    const batch = todo.slice(0, cap);
-
-    log.info(
-      `${todo.length} à analyser${todo.length > batch.length ? ` — limité à ${batch.length} pour cette exécution` : ''}` +
-        ` (${filtered.length - todo.length} déjà connues)`
-    );
-
-    if (batch.length) {
-      const stats = await analyseInto(ctx, cfg, store, batch);
-      log.ok(`${stats.ok} analysées, ${stats.failed} en échec`);
-      if (todo.length > batch.length) {
-        log.info(`${todo.length - batch.length} restantes : elles seront traitées à la prochaine exécution.`);
+    // Triage avant toute requête : c'est ici qu'on évite de renvoyer à
+    // lacquereur une maison déjà analysée sous une annonce précédente.
+    log.step('Tri des annonces');
+    const triage = trierAnnonces(store, filtered, cfg);
+    log.info(`${triage.nouveaux.length} jamais vues`);
+    if (triage.republies.length) {
+      log.info(`${triage.republies.length} remises en ligne (même bien, nouvelle annonce) — pas de nouvelle analyse`);
+      for (const r of triage.republies) {
+        log.debug(`  ${r.annonce.url} → ${r.bien.titre ?? r.bien.cle} [${r.motifs.join(', ')}]`);
       }
     }
+    log.info(`${triage.connus.length} déjà suivies`);
+
+    const aAnalyser = [
+      ...triage.nouveaux.map((n) => n.annonce),
+      ...[...triage.republies, ...triage.connus]
+        .filter((c) => c.aReanalyser)
+        .map((c) => c.annonce),
+    ];
+    const cap = args.max ?? cfg.maxAnalysesPerRun;
+    const batch = aAnalyser.slice(0, cap);
+
+    let analysees = [];
+    if (batch.length) {
+      log.step(
+        `Analyse de ${batch.length} annonce(s) sur lacquereur.fr` +
+          (aAnalyser.length > batch.length ? ` (${aAnalyser.length - batch.length} reportées)` : '')
+      );
+      const res = await analyseInto(ctx, cfg, store, batch);
+      analysees = res.analysees;
+      log.ok(`${res.stats.ok} analysées, ${res.stats.failed} en échec`);
+      if (aAnalyser.length > batch.length) {
+        log.info(`${aAnalyser.length - batch.length} restantes : prochaine exécution.`);
+      }
+    } else {
+      log.info('Rien de neuf à analyser.');
+    }
+
+    rapport = construireRapport(triage, analysees);
   } finally {
     await ctx.close().catch(() => {});
   }
 
   saveStore(cfg.paths.store, store);
+
+  if (rapport) {
+    const texte = ecrireRapport(rapport, cfg.paths.report);
+    console.log('\n' + texte);
+    log.ok(`Rapport  : ${cfg.paths.report}`);
+    log.ok(`Bilan    : ${resumerRapport(rapport)}`);
+  }
+
   const map = await buildOutputs(cfg, store);
   if (map && cfg.openMapWhenDone) openInBrowser(cfg.paths.map);
 }
@@ -159,11 +200,11 @@ async function cmdAdd(cfg, urls) {
   });
 
   const store = loadStore(cfg.paths.store);
-  for (const rec of Object.values(store.records)) rec.nouvelle = false;
+  reinitialiserStatuts(store);
 
   const ctx = await openBrowser(cfg);
   try {
-    const stats = await analyseInto(ctx, cfg, store, listings);
+    const { stats } = await analyseInto(ctx, cfg, store, listings);
     log.ok(`${stats.ok} analysées, ${stats.failed} en échec`);
   } finally {
     await ctx.close().catch(() => {});

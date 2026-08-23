@@ -32,7 +32,9 @@ const COLUMNS = [
   { header: 'Position', key: 'positionMarche', width: 20 },
   { header: 'Délai vente commune (j)', key: 'delaiVenteCommuneJours', width: 21 },
   { header: 'Vendeur', key: 'vendeur', width: 22 },
-  { header: 'Nouvelle', key: 'nouvelleLabel', width: 10 },
+  { header: 'Statut', key: 'statutLabel', width: 16 },
+  { header: 'Suivi depuis', key: 'premiereApparitionJour', width: 13 },
+  { header: 'Parutions', key: 'nbParutions', width: 10 },
   { header: 'Annonce', key: 'urlAnnonce', width: 16, link: true, linkText: 'leboncoin' },
   { header: 'Analyse', key: 'urlAnalyse', width: 16, link: true, linkText: 'lacquereur' },
   { header: 'Carte', key: 'urlMaps', width: 14, link: true, linkText: 'Google Maps' },
@@ -42,6 +44,13 @@ const HEADER_FILL = 'FF1F3A5F';
 const GREEN = 'FF1E7A46';
 const RED = 'FFB3261E';
 const AMBER = 'FF8A6100';
+const BLUE = 'FF0B57D0';
+
+const STATUT_FR = {
+  nouveau: 'nouveau',
+  republie: 'remis en ligne',
+  connu: '',
+};
 
 export async function writeSpreadsheet(records, file) {
   const wb = new ExcelJS.Workbook();
@@ -62,7 +71,9 @@ export async function writeSpreadsheet(records, file) {
   for (const rec of records) {
     const row = ws.addRow({
       ...rec,
-      nouvelleLabel: rec.nouvelle ? 'oui' : '',
+      statutLabel: STATUT_FR[rec.statut] ?? '',
+      premiereApparitionJour: (rec.premiereApparition ?? '').slice(0, 10),
+      nbParutions: rec.annonces?.length ?? 1,
     });
 
     for (const col of COLUMNS) {
@@ -83,7 +94,13 @@ export async function writeSpreadsheet(records, file) {
     const pos = row.getCell('positionMarche');
     if (rec.positionMarche === 'Sous le marché') pos.font = { color: { argb: GREEN }, bold: true };
     else if (rec.positionMarche === 'Au-dessus du marché') pos.font = { color: { argb: RED } };
-    if (rec.nouvelle) row.getCell('nouvelleLabel').font = { color: { argb: AMBER }, bold: true };
+    if (rec.statut === 'nouveau') {
+      row.getCell('statutLabel').font = { color: { argb: AMBER }, bold: true };
+    } else if (rec.statut === 'republie') {
+      row.getCell('statutLabel').font = { color: { argb: BLUE }, bold: true };
+      // Une remise en ligne signale un bien qui ne part pas : c'est négociable.
+      row.getCell('nbParutions').font = { color: { argb: BLUE }, bold: true };
+    }
     if (rec.localisationPrecise === false) {
       row.getCell('adresseEstimee').font = { italic: true, color: { argb: 'FF777777' } };
     }
@@ -108,7 +125,12 @@ export function writeCsv(records, file) {
   const lines = [COLUMNS.map((c) => esc(c.header)).join(';')];
   for (const rec of records) {
     lines.push(
-      COLUMNS.map((c) => esc(c.key === 'nouvelleLabel' ? (rec.nouvelle ? 'oui' : '') : rec[c.key])).join(';')
+      COLUMNS.map((c) => {
+        if (c.key === 'statutLabel') return esc(STATUT_FR[rec.statut] ?? '');
+        if (c.key === 'premiereApparitionJour') return esc((rec.premiereApparition ?? '').slice(0, 10));
+        if (c.key === 'nbParutions') return esc(rec.annonces?.length ?? 1);
+        return esc(rec[c.key]);
+      }).join(';')
     );
   }
   fs.writeFileSync(file, '﻿' + lines.join('\n'), 'utf8');

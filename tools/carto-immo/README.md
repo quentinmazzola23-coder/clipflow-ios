@@ -3,12 +3,15 @@
 Agent qui, à la demande ou chaque matin :
 
 1. parcourt tes recherches **leboncoin** et relève toutes les annonces ;
-2. envoie chaque annonce à **lacquereur.fr**, qui en déduit l'emplacement du bien
-   (adresse BAN, parcelle cadastrale, coordonnées GPS) ainsi que son positionnement
-   de prix face aux ventes réelles du secteur (DVF) ;
-3. consigne le tout dans un **tableur** (`.xlsx` + `.csv`) ;
-4. génère une **carte interactive** où chaque maison apparaît à sa position, avec
-   son prix, ses infos et ses liens.
+2. **trie ce qui est réellement nouveau** — une maison retirée puis remise en
+   ligne sous un nouvel identifiant est reconnue comme le bien déjà suivi, et
+   n'est pas renvoyée à l'analyse ;
+3. envoie les seules vraies nouveautés à **lacquereur.fr**, qui en déduit
+   l'emplacement du bien (adresse BAN, parcelle cadastrale, coordonnées GPS)
+   ainsi que son positionnement de prix face aux ventes réelles du secteur (DVF) ;
+4. consigne le tout dans un **tableur** (`.xlsx` + `.csv`) ;
+5. génère une **carte interactive** et un **rapport du matin** qui dit en trois
+   lignes ce qui a bougé depuis la veille.
 
 ---
 
@@ -102,6 +105,7 @@ Tout arrive dans `data/` :
 
 | Fichier | Contenu |
 |---|---|
+| `rapport.md` | **Le rapport du matin** — à lire en premier |
 | `carte.html` | La carte interactive — double-clique pour l'ouvrir |
 | `annonces.xlsx` | Le tableur, filtres actifs et liens cliquables |
 | `annonces.csv` | Même chose en CSV (point-virgule, UTF-8, s'ouvre dans Excel FR) |
@@ -114,32 +118,62 @@ Tout arrive dans `data/` :
   **orange** = dans le marché, **rouge** = au-dessus, **gris** = pas d'estimation.
 - Clic sur une pastille ou sur la liste de gauche : photo, prix au m², surface,
   DPE, adresse estimée, écart au marché, ancienneté de l'annonce, liens.
-- Filtres : prix, surface, texte libre, et quatre raccourcis — *nouvelles*,
-  *sous le marché*, *prix baissé*, *adresse exacte*.
+- Filtres : prix, surface, texte libre, et cinq raccourcis — *nouveaux*,
+  *remis en ligne*, *sous le marché*, *prix baissé*, *adresse exacte*.
 - Le fichier est autonome (Leaflet embarqué) ; seul le fond de carte
   OpenStreetMap se charge en ligne.
 
 ### Le tableur
 
-Une ligne par bien : prix, €/m², surface, terrain, pièces, **adresse estimée**,
-indice de confiance, **latitude/longitude**, parcelle cadastrale, DPE/GES,
-ancienneté, nombre de baisses de prix, **écart à la médiane DVF du secteur**,
-fourchette de marché, délai de vente moyen sur la commune, et les liens vers
-l'annonce, l'analyse et Google Maps.
+Une ligne **par bien**, pas par annonce : prix, €/m², surface, terrain, pièces,
+**adresse estimée**, indice de confiance, **latitude/longitude**, parcelle
+cadastrale, DPE/GES, ancienneté, nombre de baisses de prix, **écart à la médiane
+DVF du secteur**, fourchette de marché, délai de vente moyen sur la commune,
+statut (*nouveau* / *remis en ligne*), date de première apparition, nombre de
+parutions, et les liens vers l'annonce, l'analyse et Google Maps.
 
 L'écart au marché est coloré : c'est la colonne à regarder pour repérer une
 marge de négociation.
 
 ---
 
-## Suivi dans le temps
+## Ce qui est nouveau, ce qui ne l'est pas
 
-La base locale n'est jamais écrasée. À chaque exécution :
+C'est le cœur de l'agent. Sur leboncoin, une maison qui ne se vend pas est
+régulièrement retirée puis remise en ligne : nouvel identifiant, même bien.
+Sans précaution, chaque remise en ligne repartirait pour une analyse et
+s'annoncerait comme une nouveauté.
 
-- les annonces déjà vues ne sont pas ré-analysées (sauf après
-  `reanalyseAfterDays`), ce qui économise des requêtes ;
-- les nouvelles sont marquées **nouveau** dans la carte et le tableur ;
-- toute variation de prix est ajoutée à l'historique de la fiche.
+**La base est donc organisée par bien, pas par annonce.** Un bien porte la liste
+de toutes ses parutions successives, sa date de première apparition et
+l'historique complet de ses prix.
+
+Le rapprochement se fait à deux niveaux :
+
+**Avant l'analyse**, sur ce que la page de résultats laisse voir — commune,
+surface, nombre de pièces, terrain, vendeur, titre, prix. C'est ce qui économise
+les requêtes. La comparaison se fait toujours entre données leboncoin, jamais
+contre les valeurs réécrites par lacquereur. Une surface, un nombre de pièces ou
+une commune qui se contredisent écartent d'emblée le rapprochement.
+
+**Après l'analyse**, sur la **parcelle cadastrale** — qui identifie un bien sans
+ambiguïté — puis sur l'adresse BAN et enfin sur la position exacte.
+
+Le seuil du premier niveau est volontairement élevé : rater un doublon coûte une
+analyse, fusionner à tort masque une vraie annonce. Une remise en ligne trop
+remaniée pour être reconnue au tri sera de toute façon démasquée à l'analyse par
+sa parcelle, et les deux fiches fusionnées.
+
+Chaque matin, tu obtiens donc trois catégories distinctes :
+
+| Catégorie | Sens | Analysé ? |
+|---|---|---|
+| **Nouveau** | Bien jamais vu | Oui |
+| **Remis en ligne** | Bien déjà suivi, nouvelle annonce | Non |
+| Déjà suivi | Même annonce que la veille | Non |
+
+Un bien qui accumule les parutions est un bien qui ne part pas : la colonne
+**Parutions** du tableur est un bon signal de négociation.
 
 ---
 
@@ -159,12 +193,17 @@ La base locale n'est jamais écrasée. À chaque exécution :
 npm test
 ```
 
-Deux campagnes, toutes deux **sans accès réseau** :
+Trois campagnes, toutes **sans accès réseau** :
 
 - `test/smoke.mjs` — décodage d'une vraie page lacquereur.fr enregistrée,
   normalisation, base locale, tableur, carte.
+- `test/dedup.mjs` — reconnaissance des remises en ligne : republication à
+  l'identique, avec baisse de prix, au titre réécrit ; non-confusion de deux
+  maisons voisines de même taille ; rattrapage par la parcelle cadastrale ;
+  rapport du matin.
 - `test/integration.mjs` — pilotage réel du navigateur, requêtes interceptées :
-  collecte, analyse, session expirée, mur anti-bot, annonce sans localisation.
+  collecte, analyse, session expirée, mur anti-bot, annonce sans localisation,
+  et un scénario complet sur deux matins consécutifs.
 
 ---
 

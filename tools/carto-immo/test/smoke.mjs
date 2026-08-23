@@ -14,7 +14,7 @@ import { decodeFlight, findObjectWithKeys, collectObjectsWithKeys } from '../src
 import { extractAdsFromHtml, pageUrl, applyFilters } from '../src/leboncoin.js';
 import { analysisUrl } from '../src/lacquereur.js';
 import { normalize } from '../src/normalize.js';
-import { loadStore, saveStore, upsert, needsAnalysis, allRecords } from '../src/store.js';
+import { loadStore, saveStore, enregistrerAnalyse, tousLesBiens, allRecords } from '../src/store.js';
 import { writeSpreadsheet, writeCsv } from '../src/sheet.js';
 import { writeMap } from '../src/map.js';
 
@@ -83,33 +83,25 @@ check('les liens sont construits', () => {
   assert.equal(rec.urlAnalyse, analysisUrl(ad.url));
 });
 
-// ── 3. Base locale et suivi des prix ─────────────────────────────────────
+// ── 3. Base locale ───────────────────────────────────────────────────────
+// Le détail du suivi et des remises en ligne est couvert par test/dedup.mjs.
 const storeFile = path.join(out, 'annonces.json');
 const store = loadStore(storeFile);
 
-check('une annonce inconnue est à analyser', () =>
-  assert.equal(needsAnalysis(store, rec.id, 14), true));
-
-upsert(store, rec);
-check('la première insertion marque « nouvelle »', () =>
-  assert.equal(store.records[rec.id].nouvelle, true));
-
-// Deuxième passage, prix baissé : le suivi doit l'enregistrer.
-store.records[rec.id].nouvelle = false;
-upsert(store, { ...rec, prix: 379000, collecteLe: '2026-09-01T08:00:00.000Z' });
-check('une baisse de prix est tracée', () => {
-  const s = store.records[rec.id];
-  assert.equal(s.suiviPrix.length, 2);
-  assert.equal(s.baisseDepuisSuivi, 15000);
-  assert.equal(s.nouvelle, false);
-  assert.equal(s.vuePremiereFois, '2026-08-23T08:00:00.000Z');
+const { bien } = enregistrerAnalyse(store, rec, ad);
+check('la fiche analysée entre en base comme bien nouveau', () => {
+  assert.equal(bien.statut, 'nouveau');
+  assert.equal(bien.cle, 'parcelle:78403000AB0604');
+  assert.equal(bien.annonces.length, 1);
+  assert.equal(bien.annonces[0].id, ad.id);
 });
-check('une annonce fraîche n\'est pas ré-analysée', () =>
-  assert.equal(needsAnalysis(store, rec.id, 14), false));
 
 saveStore(storeFile, store);
-check('la base se recharge sans perte', () =>
-  assert.equal(allRecords(loadStore(storeFile)).length, 1));
+check('la base se recharge sans perte', () => {
+  const relu = loadStore(storeFile);
+  assert.equal(tousLesBiens(relu).length, 1);
+  assert.equal(allRecords(relu)[0].adresseEstimee, rec.adresseEstimee);
+});
 
 // ── 4. Collecteur leboncoin ──────────────────────────────────────────────
 check('la pagination est réécrite', () => {
@@ -175,17 +167,20 @@ check('collectObjectsWithKeys ne rend que les objets complets', () => {
 
 // ── 5. Sorties ───────────────────────────────────────────────────────────
 const records = [
-  { ...rec, nouvelle: true },
+  { ...bien, statut: 'nouveau' },
   {
-    ...rec,
+    ...bien,
     id: '999',
+    cle: 'empreinte:sansgeo',
     titre: 'Maison sans localisation',
     latitude: null,
     longitude: null,
     localisationPrecise: false,
     ecartMarchePct: -12.4,
     positionMarche: 'Sous le marché',
-    nouvelle: false,
+    statut: 'republie',
+    annonces: [{ id: '999' }, { id: '998' }],
+    premiereApparition: '2026-07-01T08:00:00.000Z',
   },
 ];
 
@@ -213,6 +208,7 @@ check('la carte est autonome (Leaflet embarqué)', () => {
   assert.ok(h.includes('49.0022'), 'les coordonnées sont injectées');
   assert.ok(h.includes('.leaflet-container') && h.length > 150000, 'Leaflet est inliné');
   assert.ok(!/<script[^>]+src=/.test(h), 'aucun script externe');
+  assert.ok(h.includes('Remis en ligne'), 'le filtre des remises en ligne est présent');
 });
 
 fs.rmSync(out, { recursive: true, force: true });

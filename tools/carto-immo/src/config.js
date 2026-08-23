@@ -26,6 +26,7 @@ const DEFAULTS = {
     csv: 'data/annonces.csv',
     map: 'data/carte.html',
     store: 'data/annonces.json',
+    report: 'data/rapport.md',
     log: 'data/agent.log',
   },
   // headless: false est nettement plus fiable face aux protections anti-bot.

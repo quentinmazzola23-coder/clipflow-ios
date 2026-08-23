@@ -51,7 +51,10 @@ export function writeMap(records, file, { title = 'Veille immobilière' } = {}) 
       fh: r.fourchetteHaute,
       pm: r.positionMarche,
       dv: r.delaiVenteCommuneJours,
-      nw: !!r.nouvelle,
+      st: r.statut ?? 'connu',
+      pa: r.annonces?.length ?? 1,
+      d1: r.premiereApparition ?? null,
+      pv: r.prixModifie ?? null,
       ph: r.photo,
       ua: r.urlAnnonce,
       ul: r.urlAnalyse,
@@ -103,6 +106,7 @@ input[type=search]{padding-left:10px}
 .card .price{font-size:13.5px;font-weight:680;margin-top:2px}
 .tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:5px;margin-left:5px;vertical-align:1px}
 .tag.new{background:#fff3d6;color:var(--amber)}
+.tag.again{background:#e8eefb;color:#0b57d0}
 .tag.under{background:#e3f4ea;color:var(--green)}
 .tag.over{background:#fdeceb;color:var(--red)}
 .marker{position:absolute;left:0;top:0;width:max-content;transform:translate(-50%,-50%)}
@@ -143,7 +147,8 @@ input[type=search]{padding-left:10px}
       <div class="row"><label for="smin">Surface</label>
         <input type="number" id="smin" placeholder="min m²"><input type="number" id="smax" placeholder="max m²"></div>
       <div class="chips">
-        <button class="chip" id="f-new" aria-pressed="false">Nouvelles</button>
+        <button class="chip" id="f-new" aria-pressed="false">Nouveaux</button>
+        <button class="chip" id="f-again" aria-pressed="false">Remis en ligne</button>
         <button class="chip" id="f-under" aria-pressed="false">Sous le marché</button>
         <button class="chip" id="f-drop" aria-pressed="false">Prix baissé</button>
         <button class="chip" id="f-exact" aria-pressed="false">Adresse exacte</button>
@@ -172,10 +177,14 @@ function tone(d){
   return 'a';
 }
 
+const nbNeufs = DATA.filter(d => d.st === 'nouveau').length;
+const nbRepris = DATA.filter(d => d.st === 'republie').length;
 document.getElementById('stamp').textContent =
   DATA.length + ' bien' + (DATA.length > 1 ? 's' : '') + ' localisé' + (DATA.length > 1 ? 's' : '') +
-  ' · mis à jour le ' + new Date(GENERATED).toLocaleString('fr-FR', {dateStyle:'long', timeStyle:'short'}) +
-  (SANS_COORDS ? ' · ' + SANS_COORDS + ' sans localisation' : '');
+  (nbNeufs ? ' · ' + nbNeufs + ' nouveau' + (nbNeufs > 1 ? 'x' : '') : '') +
+  (nbRepris ? ' · ' + nbRepris + ' remis en ligne' : '') +
+  (SANS_COORDS ? ' · ' + SANS_COORDS + ' sans localisation' : '') +
+  ' · ' + new Date(GENERATED).toLocaleString('fr-FR', {dateStyle:'long', timeStyle:'short'});
 
 const map = L.map('map', { zoomControl: true, scrollWheelZoom: true });
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -221,6 +230,16 @@ function popup(d){
   }
   push('En ligne', d.j != null ? d.j + ' jours' + (d.nb ? ' · ' + d.nb + ' baisse' + (d.nb > 1 ? 's' : '') + (d.bp ? ' (−' + d.bp.toFixed(1) + ' %)' : '') : '') : null);
   push('Délai commune', d.dv ? d.dv + ' jours' : null);
+  if (d.pa > 1) {
+    const depuis = d.d1 ? Math.round((Date.now() - new Date(d.d1)) / 86400000) : null;
+    push('Suivi', d.pa + ' parutions' + (depuis != null ? ' sur ' + depuis + ' jours' : '') +
+      ' <span style="color:var(--muted)">— remis en ligne</span>');
+  }
+  if (d.pv) {
+    const baisse = d.pv.apres < d.pv.avant;
+    push('Dernier prix', '<span style="color:' + (baisse ? 'var(--green)' : 'var(--red)') + '">' +
+      eur(d.pv.avant) + ' → ' + eur(d.pv.apres) + '</span>');
+  }
 
   const links = [];
   if (d.ua) links.push('<a href="' + esc(d.ua) + '" target="_blank" rel="noopener">Annonce</a>');
@@ -239,7 +258,8 @@ function popup(d){
 
 function card(d){
   const tags =
-    (d.nw ? '<span class="tag new">nouveau</span>' : '') +
+    (d.st === 'nouveau' ? '<span class="tag new">nouveau</span>' : '') +
+    (d.st === 'republie' ? '<span class="tag again">remis en ligne</span>' : '') +
     (d.pm === 'Sous le marché' ? '<span class="tag under">sous marché</span>' : '') +
     (d.pm === 'Au-dessus du marché' ? '<span class="tag over">au-dessus</span>' : '');
   return '<article class="card" data-id="' + d.id + '">' +
@@ -251,7 +271,7 @@ function card(d){
     '</div></article>';
 }
 
-const F = { q:'', pmin:null, pmax:null, smin:null, smax:null, nw:false, under:false, drop:false, exact:false };
+const F = { q:'', pmin:null, pmax:null, smin:null, smax:null, nw:false, again:false, under:false, drop:false, exact:false };
 
 function matches(d){
   if (F.q) {
@@ -262,7 +282,8 @@ function matches(d){
   if (F.pmax != null && (d.p == null || d.p > F.pmax)) return false;
   if (F.smin != null && (d.s == null || d.s < F.smin)) return false;
   if (F.smax != null && (d.s == null || d.s > F.smax)) return false;
-  if (F.nw && !d.nw) return false;
+  if (F.nw && d.st !== 'nouveau') return false;
+  if (F.again && d.st !== 'republie') return false;
   if (F.under && d.pm !== 'Sous le marché') return false;
   if (F.drop && !(d.nb > 0)) return false;
   if (F.exact && !d.pr) return false;
@@ -319,7 +340,7 @@ on('q', 'input', e => { F.q = e.target.value.trim().toLowerCase(); render(); });
 for (const [id, key] of [['pmin','pmin'],['pmax','pmax'],['smin','smin'],['smax','smax']]) {
   on(id, 'input', e => { F[key] = numOrNull(e.target.value); render(); });
 }
-for (const [id, key] of [['f-new','nw'],['f-under','under'],['f-drop','drop'],['f-exact','exact']]) {
+for (const [id, key] of [['f-new','nw'],['f-again','again'],['f-under','under'],['f-drop','drop'],['f-exact','exact']]) {
   on(id, 'click', e => {
     F[key] = !F[key];
     e.currentTarget.setAttribute('aria-pressed', String(F[key]));
@@ -327,7 +348,7 @@ for (const [id, key] of [['f-new','nw'],['f-under','under'],['f-drop','drop'],['
   });
 }
 on('reset', 'click', () => {
-  Object.assign(F, { q:'', pmin:null, pmax:null, smin:null, smax:null, nw:false, under:false, drop:false, exact:false });
+  Object.assign(F, { q:'', pmin:null, pmax:null, smin:null, smax:null, nw:false, again:false, under:false, drop:false, exact:false });
   document.querySelectorAll('.filters input').forEach(i => { i.value = ''; });
   document.querySelectorAll('.chip').forEach(c => c.setAttribute('aria-pressed','false'));
   render();

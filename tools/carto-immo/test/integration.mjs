@@ -15,9 +15,13 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 
 import { openBrowser } from '../src/browser.js';
-import { collectListings } from '../src/leboncoin.js';
+import { collectListings, applyFilters } from '../src/leboncoin.js';
 import { analyseListing, analyseAll } from '../src/lacquereur.js';
 import { normalize } from '../src/normalize.js';
+import {
+  loadStore, trierAnnonces, enregistrerAnalyse, reinitialiserStatuts, tousLesBiens,
+} from '../src/store.js';
+import { construireRapport, resumerRapport } from '../src/report.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixture = fs.readFileSync(path.join(here, 'fixtures', 'listing-analysis.html'), 'utf8');
@@ -67,6 +71,30 @@ const PAGE_DATADOME = `<html><head><title>leboncoin.fr</title></head><body>
 <p id="cmsg">Please enable JS and disable any ad blocker</p>
 <script>var dd={'host':'geo.captcha-delivery.com'}</script></body></html>`;
 
+/**
+ * Chaque annonce doit recevoir une localisation propre : servir la même page
+ * pour toutes ferait fusionner tous les biens sur la même parcelle.
+ */
+function personnaliser(page, urlDemandee) {
+  if (page !== fixture) return page;
+  const idAnnonce = decodeURIComponent(urlDemandee).match(/ventes_immobilieres\/(\d+)/)?.[1];
+  if (!idAnnonce) return page;
+  const bien = BIENS[idAnnonce];
+  if (!bien) return page;
+  return page
+    .replaceAll('78403000AB0604', bien.parcelle)
+    .replaceAll('78403_0005_00043', bien.ban)
+    .replaceAll('49.0022370439012', String(bien.lat))
+    .replaceAll('1.8785380526609368', String(bien.lon));
+}
+
+// Deux biens distincts ; l'annonce 333 republiera le bien de l'annonce 111.
+const BIENS = {
+  111: { parcelle: '32230000AB0111', ban: '32230_0001_00011', lat: 43.523100, lon: 0.156700 },
+  222: { parcelle: '32300000AB0222', ban: '32300_0002_00022', lat: 43.518300, lon: 0.405300 },
+  333: { parcelle: '32230000AB0111', ban: '32230_0001_00011', lat: 43.523100, lon: 0.156700 },
+};
+
 let passed = 0;
 const check = (name, fn) => { fn(); passed++; console.log(`  ✓ ${name}`); };
 
@@ -79,7 +107,11 @@ let servirRecherche = PAGE_RECHERCHE;
 await ctx.route('**/*', async (route) => {
   const url = route.request().url();
   if (url.includes('lacquereur.fr')) {
-    return route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: servirAnalyse });
+    return route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: personnaliser(servirAnalyse, url),
+    });
   }
   if (url.includes('leboncoin.fr')) {
     return route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: servirRecherche });
@@ -159,6 +191,61 @@ try {
     assert.ok(bloque, 'la collecte doit s\'interrompre');
     assert.match(bloque.message, /anti-bot/);
     assert.match(bloque.message, /npm run login/);
+  });
+  // ── Deux matins consécutifs ────────────────────────────────────────────
+  servirRecherche = PAGE_RECHERCHE;
+  servirAnalyse = fixture;
+  const store = loadStore(path.join(tmp, 'base.json'));
+  const cfgStore = { reanalyseAfterDays: 14 };
+
+  // Matin 1 : deux annonces inédites, deux analyses.
+  reinitialiserStatuts(store);
+  const jour1 = applyFilters(await collectListings(ctx, cfg), {});
+  const triage1 = trierAnnonces(store, jour1, cfgStore, { maintenant: '2026-08-23T06:00:00.000Z' });
+  const analysees1 = [];
+  await analyseAll(ctx, triage1.nouveaux.map((n) => n.annonce), cfg, async (ad, a) => {
+    analysees1.push(enregistrerAnalyse(store, normalize(ad, a, { collectedAt: '2026-08-23T06:00:00.000Z' }), ad).bien);
+  });
+  check('matin 1 — les deux annonces sont analysées et donnent deux biens', () => {
+    assert.equal(triage1.nouveaux.length, 2);
+    assert.equal(tousLesBiens(store).length, 2);
+    assert.ok(analysees1.every((b) => b.statut === 'nouveau'));
+  });
+
+  // Matin 2 : l'annonce 111 a disparu, remplacée par 333 — même bien, prix baissé.
+  servirRecherche = PAGE_RECHERCHE.replace(
+    JSON.stringify(JSON.stringify({ ads: [annonce(111, 'Marciac', 134000, 97), annonce(222, 'Mirande', 189000, 120)] })),
+    JSON.stringify(JSON.stringify({ ads: [annonce(333, 'Marciac', 126000, 97), annonce(222, 'Mirande', 189000, 120)] }))
+  );
+  reinitialiserStatuts(store);
+  const jour2 = applyFilters(await collectListings(ctx, cfg), {});
+  const triage2 = trierAnnonces(store, jour2, cfgStore, { maintenant: '2026-08-24T06:00:00.000Z' });
+
+  check('matin 2 — la remise en ligne est reconnue, aucune analyse relancée', () => {
+    assert.equal(triage2.nouveaux.length, 0, 'rien à analyser');
+    assert.equal(triage2.republies.length, 1);
+    assert.equal(triage2.republies[0].annonce.id, '333');
+    assert.equal(triage2.connus.length, 1);
+    assert.deepEqual(triage2.republies[0].prixModifie, { avant: 134000, apres: 126000 });
+  });
+
+  check('matin 2 — la base garde deux biens et trois parutions', () => {
+    const biens = tousLesBiens(store);
+    assert.equal(biens.length, 2);
+    const marciac = biens.find((b) => b.cle === 'parcelle:32230000AB0111');
+    assert.equal(marciac.annonces.length, 2);
+    assert.equal(marciac.republications, 1);
+    assert.equal(marciac.idPrincipal, '333');
+    assert.equal(marciac.premiereApparition, '2026-08-23T06:00:00.000Z');
+  });
+
+  check('matin 2 — le rapport annonce zéro nouveauté et une remise en ligne', () => {
+    const r = construireRapport(triage2, []);
+    assert.equal(r.nouveaux.length, 0);
+    assert.equal(r.republies.length, 1);
+    assert.equal(r.baisses.length, 1);
+    assert.match(resumerRapport(r), /0 nouveau bien/);
+    assert.match(resumerRapport(r), /1 remise en ligne/);
   });
 } finally {
   await ctx.close().catch(() => {});
