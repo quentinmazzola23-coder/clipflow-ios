@@ -155,3 +155,75 @@ export function normalize(ad, analysis, { collectedAt = new Date().toISOString()
     vendeur: ad.vendeur ?? null,
   };
 }
+
+/**
+ * Fiche construite à partir d'une annonce et de sa localisation par le DPE.
+ *
+ * Même forme que `normalize`, qui part de l'analyse lacquereur : le reste du
+ * pipeline — base, tableur, carte — ne connaît qu'une seule structure.
+ */
+export function normaliserAnnonce(annonce, localisation, marche = {}, { collectedAt = new Date().toISOString() } = {}) {
+  const loc = localisation ?? {};
+  const prix = annonce.prix ?? null;
+  const surface = annonce.surface ?? null;
+
+  return {
+    id: annonce.id,
+    source: annonce.source ?? null,
+    collecteLe: collectedAt,
+    titre: annonce.titre ?? null,
+    typeBien: annonce.typeBien ?? null,
+
+    prix,
+    prixM2: prix && surface ? round(prix / surface) : null,
+    surface,
+    terrain: annonce.terrain ?? null,
+    pieces: annonce.pieces ?? null,
+    chambres: annonce.chambres ?? null,
+    anneeConstruction: loc.anneeConstruction ?? annonce.anneeConstruction ?? null,
+
+    // La commune du DPE fait foi : les annonces sont classées sous la ville de
+    // diffusion, qui n'est pas toujours celle du bien.
+    ville: loc.commune ?? annonce.ville ?? null,
+    codePostal: loc.codePostal ?? annonce.codePostal ?? null,
+    adresseEstimee: loc.adresse ?? null,
+    latitude: loc.latitude ?? annonce.flouLat ?? null,
+    longitude: loc.longitude ?? annonce.flouLon ?? null,
+    localisationPrecise: !!loc.adresse,
+    confianceAdresse: loc.note ?? null,
+    niveauConfiance: loc.confiance ?? null,
+    sourceAdresse: loc.adresse ? 'dpe' : annonce.flouLat ? 'approchée' : null,
+    motifsLocalisation: loc.motifs ?? [],
+    distanceFlouM: loc.distanceFlouM ?? null,
+    banId: loc.banId ?? null,
+    codeInsee: loc.codeInsee ?? null,
+    numeroDpe: loc.numeroDpe ?? null,
+
+    dpe: loc.dpe ?? annonce.dpeAnnonce ?? null,
+    ges: loc.ges ?? annonce.gesAnnonce ?? null,
+    consoEnergie: loc.consoEnergie ?? annonce.consoAnnonce ?? null,
+    emissionsGes: loc.emissionsGes ?? annonce.emissionsAnnonce ?? null,
+    dateDpe: annonce.dateDpe ?? null,
+
+    publieeLe: annonce.publiee ? String(annonce.publiee).slice(0, 10) : null,
+    joursEnLigne: daysBetween(annonce.publiee, collectedAt),
+    nbBaisses: annonce.prixBaisse ? 1 : 0,
+
+    ...marche,
+
+    jardin: annonce.jardin ?? null,
+    terrasse: annonce.terrasse ?? null,
+    piscine: annonce.piscine ?? null,
+    parking: annonce.parking ?? null,
+
+    urlAnnonce: annonce.url,
+    urlAnalyse: `https://lacquereur.fr/listing-analysis/${encodeURIComponent(annonce.url)}`,
+    urlMaps: loc.latitude
+      ? `https://www.google.com/maps/search/?api=1&query=${loc.latitude},${loc.longitude}`
+      : null,
+    photo: annonce.photo ?? null,
+    photos: annonce.photos ?? [],
+    description: annonce.description ?? null,
+    vendeur: annonce.vendeur ?? null,
+  };
+}

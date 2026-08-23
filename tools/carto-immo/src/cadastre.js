@@ -56,6 +56,17 @@ const centre = (r) => [
   r.reduce((a, p) => a + p[1], 0) / r.length,
 ];
 
+/** Point dans polygone, par lancer de rayon. Anneau en [lon, lat]. */
+export function dansAnneau(lon, lat, anneau) {
+  let dedans = false;
+  for (let i = 0, j = anneau.length - 1; i < anneau.length; j = i++) {
+    const [xi, yi] = anneau[i];
+    const [xj, yj] = anneau[j];
+    if ((yi > lat) !== (yj > lat) && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) dedans = !dedans;
+  }
+  return dedans;
+}
+
 /** Distance approchée en mètres, suffisante pour un filtre de voisinage. */
 export function metres(lat1, lon1, lat2, lon2) {
   const k = Math.cos((lat1 * Math.PI) / 180);
@@ -104,6 +115,21 @@ export async function chargerCommune(insee, cacheDir, opts = {}) {
     parcelles,
     autour: (lat, lon, rayon) =>
       geometries.filter((g) => metres(lat, lon, g.centre[1], g.centre[0]) <= rayon),
+    /**
+     * Parcelle contenant un point. C'est ce qui relie une adresse — tout ce
+     * que donne le registre des DPE — à un terrain dessinable.
+     */
+    contenant: (lat, lon) => {
+      for (const g of geometries) {
+        if (g.batiment || !g.id) continue;
+        // Écarter d'emblée ce qui est loin : le test fin coûte cher.
+        if (metres(lat, lon, g.centre[1], g.centre[0]) > 400) continue;
+        if (g.anneaux.some((r) => dansAnneau(lon, lat, r))) {
+          return { id: g.id, ...parcelles.get(g.id) };
+        }
+      }
+      return null;
+    },
   };
 }
 
@@ -117,7 +143,8 @@ export async function chargerCommune(insee, cacheDir, opts = {}) {
 export async function enrichirParcelles(fiches, cacheDir, { rayon = 200, sansCache = false } = {}) {
   const parCommune = new Map();
   for (const f of fiches) {
-    if (!f.codeInsee || !f.parcelle) continue;
+    if (!f.codeInsee) continue;
+    if (!f.parcelle && (f.latitude == null || f.longitude == null)) continue;
     if (!parCommune.has(f.codeInsee)) parCommune.set(f.codeInsee, []);
     parCommune.get(f.codeInsee).push(f);
   }
@@ -133,7 +160,12 @@ export async function enrichirParcelles(fiches, cacheDir, { rayon = 200, sansCac
     if (!commune.parcelles.size) continue;
 
     for (const f of lot) {
-      const p = commune.parcelles.get(f.parcelle);
+      // Par identifiant quand on l'a, sinon par la parcelle qui contient le point.
+      let p = f.parcelle ? commune.parcelles.get(f.parcelle) : null;
+      if (!p && f.latitude != null && f.longitude != null) {
+        const trouvee = commune.contenant(f.latitude, f.longitude);
+        if (trouvee) { p = trouvee; f.parcelle = trouvee.id; }
+      }
       if (!p) continue;
       f.parcelleGeom = p.anneaux;
       f.contenance = p.contenance;

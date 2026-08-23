@@ -153,7 +153,7 @@ export function writeMap(
       v: r.ville,
       cp: r.codePostal,
       ad: r.adresseEstimee,
-      cf: r.confianceAdresse,
+      cf: r.niveauConfiance ?? null,
       pr: r.localisationPrecise,
       pcl: r.parcelle ?? null,
       pg: r.parcelleGeom ?? null,
@@ -180,6 +180,10 @@ export function writeMap(
       ul: r.urlAnalyse,
       um: r.urlMaps,
     }));
+
+  // En mode autonome la page ne doit émettre aucune requête : les photos, qui
+  // sont hébergées par le site d'annonces, laisseraient des cadres vides.
+  if (basemap) for (const p of points) p.ph = null;
 
   const sansCoords = records.length - points.length;
   const { css, js } = inlineLeaflet();
@@ -328,6 +332,7 @@ const DATA = ${escapeJson(points)};
 const GENERATED = ${escapeJson(new Date().toISOString())};
 const SANS_COORDS = ${sansCoords};
 const AVEC_FILTRES = ${filtres};
+const AVEC_PHOTOS = ${!basemap};
 const ATTRIBUTION = ${escapeJson(basemap?.attribution ?? '© OpenStreetMap')};
 const BASEMAP = ${basemap ? escapeJson(basemap) : 'null'};
 
@@ -414,7 +419,9 @@ function corpsFiche(d){
   const push = (k, v) => { if (v) rows.push('<dt>' + k + '</dt><dd>' + v + '</dd>'); };
   push('Surface', d.s ? num(d.s) + ' m²' + (d.pc ? ' · ' + d.pc + ' pièces' : '') : null);
   push('Terrain', d.te ? num(d.te) + ' m²' : null);
-  push('Adresse', d.ad ? esc(d.ad) + (d.cf ? ' <span style="color:var(--muted)">(' + d.cf + '%)</span>' : '') : (d.v ? esc(d.v) + ' — localisation approchée' : null));
+  push('Adresse', d.ad
+    ? esc(d.ad) + (d.cf ? ' <span style="color:var(--muted)">— confiance ' + esc(d.cf) + '</span>' : '')
+    : (d.v ? esc(d.v) + ' — localisation approchée' : null));
   push('Parcelle', d.pcl
     ? '<span style="font-variant-numeric:tabular-nums">' + esc(d.pcl) + '</span>' +
       (d.ct ? ' <span style="color:var(--muted)">· ' + num(d.ct) + ' m² au cadastre</span>' : '')
@@ -474,9 +481,10 @@ function card(d){
     (d.st === 'republie' ? '<span class="tag again">remis en ligne</span>' : '') +
     (d.pm === 'Sous le marché' ? '<span class="tag under">sous marché</span>' : '') +
     (d.pm === 'Au-dessus du marché' ? '<span class="tag over">au-dessus</span>' : '');
+  const vignette = d.ph ? '<img src="' + esc(d.ph) + '" alt="" loading="lazy">'
+    : AVEC_PHOTOS ? '<div class="noimg"></div>' : '';
   return '<article class="card" data-id="' + d.id + '" tabindex="0">' +
-    '<div class="head">' +
-    (d.ph ? '<img src="' + esc(d.ph) + '" alt="" loading="lazy">' : '<div class="noimg"></div>') +
+    '<div class="head">' + vignette +
     '<div><h3>' + esc(d.t || 'Annonce ' + d.id) + tags + '</h3>' +
     '<div class="meta">' + esc(d.v || '') + (d.cp ? ' · ' + esc(d.cp) : '') +
       (d.s ? ' · ' + num(d.s) + ' m²' : '') + (d.pc ? ' · ' + d.pc + ' p.' : '') + '</div>' +

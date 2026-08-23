@@ -10,6 +10,20 @@ n'écris pas de code d'extraction ici, lance-le et rends compte du résultat.
 
 ## Lancer
 
+Deux voies. Par défaut, prends celle qui ne demande rien :
+
+```bash
+cd tools/carto-immo && node src/cli.js annonces --zone Marciac
+```
+
+Elle relève les annonces Bien'ici, retrouve leur adresse exacte via le registre
+des DPE, trace la parcelle et situe le prix face aux ventes DVF. Ni navigateur
+ni compte. C'est la voie à privilégier, et la seule qui fonctionne en tâche
+programmée sans session ouverte.
+
+La voie leboncoin couvre en plus les annonces de particuliers, mais exige une
+session de navigateur et un compte lacquereur.fr :
+
 ```bash
 cd tools/carto-immo && node src/cli.js run
 ```
@@ -32,6 +46,7 @@ décompte « remises en ligne » dans la sortie avant de conclure à un problèm
 
 | Demande | Commande |
 |---|---|
+| Relever un autre secteur | `node src/cli.js annonces --zone Auch` |
 | Analyser une ou plusieurs annonces précises | `node src/cli.js add <url> [<url>…]` |
 | Refaire tableur et carte sans recollecter | `node src/cli.js map` |
 | Limiter le volume d'un lancement | `node src/cli.js run --max 15` |
@@ -39,12 +54,12 @@ décompte « remises en ligne » dans la sortie avant de conclure à un problèm
 
 ## Avant de lancer, vérifie deux choses
 
-1. **`tools/carto-immo/config.json` existe.** Sinon, copie `config.example.json`
-   et demande à Quentin les secteurs et le budget à surveiller — les URL de
-   recherche leboncoin telles qu'elles apparaissent dans son navigateur.
-2. **`tools/carto-immo/browser-profile/` existe.** Sinon la session n'a jamais
-   été ouverte : dis-lui de lancer `npm run login` une fois (il doit se
-   connecter à lacquereur.fr à la main, un compte est obligatoire).
+1. Pour la commande `annonces`, rien n'est requis : un secteur suffit, en
+   argument ou dans `config.json` (`bienici.zones`).
+2. Pour la commande `run` seulement : **`tools/carto-immo/config.json`** doit
+   contenir les URL de recherche leboncoin, et **`browser-profile/`** doit
+   exister, faute de quoi la session n'a jamais été ouverte — dis-lui de lancer
+   `npm run login` une fois.
 
 ## Erreurs courantes
 

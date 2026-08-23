@@ -1,4 +1,13 @@
 {
+  "bienici": {
+    "zones": [
+      "Marciac"
+    ],
+    "types": [
+      "house"
+    ],
+    "max": 200
+  },
   "searches": [
     "https://www.leboncoin.fr/recherche?category=9&real_estate_type=1&locations=Marciac_32230__43.5231_0.1567_30000&price=80000-350000",
     "https://www.leboncoin.fr/recherche?category=9&real_estate_type=1&locations=Mirande_32300__43.5183_0.4053_25000&price=80000-350000"
@@ -12,7 +21,10 @@
     "minSurface": 60,
     "propertyTypes": []
   },
-  "delayMs": { "leboncoin": 4000, "lacquereur": 6000 },
+  "delayMs": {
+    "leboncoin": 4000,
+    "lacquereur": 6000
+  },
   "headless": false,
   "browserChannel": "chrome",
   "openMapWhenDone": true

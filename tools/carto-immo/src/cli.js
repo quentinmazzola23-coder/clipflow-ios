@@ -16,10 +16,14 @@ import { construireRapport, ecrireRapport, resumerRapport } from './report.js';
 import { writeSpreadsheet, writeCsv } from './sheet.js';
 import { writeMap } from './map.js';
 import { enrichirParcelles } from './cadastre.js';
+import { collecterEtLocaliser } from './pipeline-annonces.js';
 
 const USAGE = `
 carto-immo — veille immobilière leboncoin → lacquereur.fr → tableur + carte
 
+  node src/cli.js annonces  Relève les annonces Bien'ici d'un secteur, retrouve
+                            leur adresse exacte par le registre des DPE, et
+                            produit tableur et carte. Aucune connexion requise.
   node src/cli.js login     Ouvre le navigateur pour se connecter une fois
                             (leboncoin + lacquereur.fr). À faire en premier.
   node src/cli.js run       Exécution complète : collecte, analyse, tableur, carte
@@ -28,6 +32,7 @@ carto-immo — veille immobilière leboncoin → lacquereur.fr → tableur + car
   node src/cli.js schedule  Affiche comment programmer l'exécution quotidienne
 
 Options : --config <fichier>  --headless  --max <n>  --quiet
+          --zone <commune>   secteur pour la commande annonces
 `;
 
 function parseArgs(argv) {
@@ -36,6 +41,7 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--config') args.config = argv[++i];
     else if (a === '--max') args.max = Number(argv[++i]);
+    else if (a === '--zone') (args.zones ??= []).push(argv[++i]);
     else if (a === '--headless') args.headless = true;
     else if (a === '--quiet') args.quiet = true;
     else args._.push(a);
@@ -227,6 +233,48 @@ async function cmdAdd(cfg, urls) {
   if (map && cfg.openMapWhenDone) openInBrowser(cfg.paths.map);
 }
 
+/**
+ * Veille sur une source qui publie ses annonces en clair : pas de navigateur,
+ * pas de compte, et l'adresse exacte reconstituée depuis le registre des DPE.
+ */
+async function cmdAnnonces(cfg, args) {
+  const zones = args.zones ?? cfg.bienici?.zones ?? [];
+  if (!zones.length) {
+    log.error('Aucun secteur indiqué.');
+    log.info('  node src/cli.js annonces --zone Marciac');
+    log.info('  ou renseigne "bienici": { "zones": ["Marciac"] } dans config.json');
+    process.exitCode = 1;
+    return;
+  }
+
+  const store = loadStore(cfg.paths.store);
+  reinitialiserStatuts(store);
+
+  const { fiches, total, localisees } = await collecterEtLocaliser(zones, {
+    types: cfg.bienici?.types ?? ['house'],
+    max: args.max ?? cfg.bienici?.max ?? 200,
+    cacheDir: cfg.paths.cache,
+    cadastre: cfg.cadastre,
+  });
+
+  // Les annonces sans adresse exacte restent hors carte : on ne place pas un
+  // bien sur un point qu'on n'a pas établi.
+  let nouveaux = 0;
+  for (const fiche of fiches) {
+    if (!fiche.localisationPrecise) continue;
+    const { bien } = enregistrerAnalyse(store, fiche, {
+      id: fiche.id, url: fiche.urlAnnonce, titre: fiche.titre, prix: fiche.prix, vendeur: fiche.vendeur,
+    });
+    if (bien.statut === 'nouveau') nouveaux++;
+  }
+  saveStore(cfg.paths.store, store);
+
+  log.ok(`${localisees}/${total} annonces localisées · ${nouveaux} nouvelles en base`);
+
+  const map = await buildOutputs(cfg, store);
+  if (map && cfg.openMapWhenDone) openInBrowser(cfg.paths.map);
+}
+
 function cmdSchedule(cfg) {
   const ps1 = path.join(ROOT, 'scripts', 'planifier-windows.ps1');
   const sh = path.join(ROOT, 'scripts', 'planifier-cron.sh');
@@ -259,6 +307,8 @@ async function main() {
   }
 
   switch (cmd) {
+    case 'annonces':
+      return cmdAnnonces(cfg, args);
     case 'login':
       return cmdLogin(cfg);
     case 'run':

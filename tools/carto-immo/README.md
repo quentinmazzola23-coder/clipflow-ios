@@ -1,17 +1,46 @@
-# carto-immo — veille immobilière automatisée
+# carto-immo — géolocalisation d'annonces immobilières
 
-Agent qui, à la demande ou chaque matin :
+Les sites d'annonces ne publient jamais l'adresse d'un bien : ils affichent un
+disque flou centré sur la ville. Cet agent la retrouve, et place chaque annonce
+sur sa parcelle — avec le lien qui y ramène.
 
-1. parcourt tes recherches **leboncoin** et relève toutes les annonces ;
+## Comment l'adresse est retrouvée
+
+L'annonce porte les données de son **diagnostic de performance énergétique** :
+date, étiquettes, surface, consommation. Or ces diagnostics sont publiés en open
+data par l'**ADEME**, avec l'adresse et les coordonnées. Retrouver le
+diagnostic, c'est retrouver le bien.
+
+Un couple date + étiquette est déjà très discriminant à l'échelle d'un canton ;
+la surface, la consommation et les émissions lèvent le reste. Le rapprochement
+est noté, et **sans candidat qui se détache nettement, l'annonce reste sans
+adresse** : mieux vaut un bien absent de la carte qu'un bien chez le voisin.
+
+L'adresse mène ensuite à la **parcelle cadastrale**, dessinée sur la carte.
+
+## Deux façons de relever les annonces
+
+| | **Bien'ici** | **leboncoin** |
+|---|---|---|
+| Commande | `annonces` | `run` |
+| Navigateur | non | oui, visible |
+| Compte | aucun | lacquereur.fr |
+| Localisation | registre des DPE | lacquereur.fr |
+
+La voie Bien'ici ne demande **ni navigateur ni compte** : une simple requête
+suffit. C'est la plus simple à programmer et la plus robuste. La voie leboncoin
+couvre les annonces de particuliers absentes des portails, au prix d'une session
+de navigateur à ouvrir une fois.
+
+Dans les deux cas, l'agent :
+
+1. relève les annonces du secteur ;
 2. **trie ce qui est réellement nouveau** — une maison retirée puis remise en
-   ligne sous un nouvel identifiant est reconnue comme le bien déjà suivi, et
-   n'est pas renvoyée à l'analyse ;
-3. envoie les seules vraies nouveautés à **lacquereur.fr**, qui en déduit
-   l'emplacement du bien (adresse BAN, parcelle cadastrale, coordonnées GPS)
-   ainsi que son positionnement de prix face aux ventes réelles du secteur (DVF) ;
+   ligne sous un nouvel identifiant est reconnue comme le bien déjà suivi ;
+3. retrouve l'adresse exacte, la parcelle, et situe le prix face aux ventes
+   réelles du secteur (**DVF**) ;
 4. consigne le tout dans un **tableur** (`.xlsx` + `.csv`) ;
-5. génère une **carte interactive** et un **rapport du matin** qui dit en trois
-   lignes ce qui a bougé depuis la veille.
+5. génère une **carte interactive** et un **rapport du matin**.
 
 ---
 
@@ -67,7 +96,8 @@ exécution : tu ne referas ça que si tu es déconnecté.
 ## Utilisation
 
 ```bash
-npm run run           # exécution complète
+node src/cli.js annonces --zone Marciac    # sans navigateur ni compte
+npm run run                                 # voie leboncoin, session requise
 ```
 
 Sous Windows, double-clique **`bin\lancer-agent.cmd`**.
@@ -206,38 +236,25 @@ Un bien qui accumule les parutions est un bien qui ne part pas : la colonne
 ## Voir la carte sans rien configurer
 
 ```bash
-node scripts/demo-donnees-reelles.mjs
+node scripts/carte-annonces.mjs --zone Marciac
 ```
 
-Construit une carte de démonstration à partir de **données publiques réelles** :
-cinq vraies maisons du Gers, adresse et coordonnées issues du DPE ADEME, prix et
-surfaces des ventes publiées au fichier DVF, écart au marché calculé sur les
-ventes réelles des communes retenues. Rien n'est inventé.
+Relève les annonces réellement en vente sur le secteur, retrouve leur adresse,
+et écrit deux cartes plus le tableur — sans navigateur, sans compte, sans
+configuration.
 
-Ce sont des ventes déjà conclues, pas des annonces en cours : la démonstration
-montre la mise en forme, pas un état du marché.
-
-Chaque bien retenu a son **adresse confirmée par un DPE** et sa **parcelle
-présente au cadastre** : la carte montre une localisation certaine, pas une
-approximation à la commune.
-
-Deux cartes sont produites : `carte-demo.html` avec le fond OpenStreetMap comme
-en production, et `carte-demo-autonome.html` avec un fond vectoriel embarqué qui
-fonctionne **sans aucune requête sortante**. Ce fond a trois échelles, chacune
-prenant le relais de la précédente : la **France par départements**, les
-**communes** du secteur cherché, puis le **plan cadastral** (parcelles et
-bâtiments) au zoom parcelle. La carte reste donc lisible même loin du secteur.
-
-Les téléchargements sont mis en cache dans `data-demo/.cache` : ces API
-publiques répondent régulièrement 503, et les fichiers ne bougent pas.
-`--sans-cache` force le rafraîchissement.
-
-Par défaut la recherche porte sur **Marciac**. Pour élargir :
+`carte-annonces.html` utilise le fond OpenStreetMap. `carte-annonces-autonome.html`
+embarque son propre fond et fonctionne **sans aucune requête sortante** : trois
+échelles qui se relaient, la **France par départements**, les **communes** du
+secteur, puis le **plan cadastral** au zoom parcelle. Faute de requête sortante,
+cette version n'affiche pas les photos des annonces.
 
 ```bash
-node scripts/demo-donnees-reelles.mjs --communes 32013,32256,32344 --par-commune 2
-node scripts/demo-donnees-reelles.mjs --communes 32013 --out /tmp/demo --filtres
+node scripts/carte-annonces.mjs --zone Auch --max 100 --types house,flat --filtres
 ```
+
+Les téléchargements sont mis en cache : ces API publiques répondent
+régulièrement 503, et les fichiers ne bougent pas.
 
 ## Tests
 
@@ -253,6 +270,10 @@ Trois campagnes, toutes **sans accès réseau** :
   l'identique, avec baisse de prix, au titre réécrit ; non-confusion de deux
   maisons voisines de même taille ; rattrapage par la parcelle cadastrale ;
   rapport du matin.
+- `test/geoloc.mjs` — appariement annonce ↔ diagnostic : ce qui doit être
+  accepté (surface annoncée plus large, consommation divergente, commune
+  voisine) et surtout ce qui doit être refusé (étiquette climat différente,
+  appartement pour une maison, distance excessive).
 - `test/integration.mjs` — pilotage réel du navigateur, requêtes interceptées :
   collecte, analyse, session expirée, mur anti-bot, annonce sans localisation,
   et un scénario complet sur deux matins consécutifs.
@@ -268,5 +289,8 @@ Trois campagnes, toutes **sans accès réseau** :
   conditions d'utilisation, et une cadence agressive te ferait bloquer.
 - Les données collectées (adresses, coordonnées) restent **sur ta machine** :
   aucun serveur, aucun envoi.
-- L'adresse rendue par lacquereur.fr est une **estimation** : la colonne
-  « Confiance » indique sa fiabilité. À vérifier avant toute démarche.
+- L'adresse est **reconstituée**, pas publiée : la colonne « Confiance »
+  indique la solidité du rapprochement. À vérifier avant toute démarche.
+- Les données mobilisées sont ouvertes et publiques — registre des DPE, cadastre,
+  ventes DVF. Le rapprochement se fait sur des biens en vente, à des fins
+  d'estimation professionnelle.

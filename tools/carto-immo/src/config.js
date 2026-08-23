@@ -30,6 +30,9 @@ const DEFAULTS = {
     log: 'data/agent.log',
     cache: 'data/.cache',
   },
+  // Veille sans navigateur : Bien'ici publie ses annonces en clair, et leur
+  // adresse exacte se reconstitue depuis le registre des DPE.
+  bienici: { zones: [], types: ['house'], max: 200 },
   // Contour cadastral des parcelles sur la carte. Nécessite un téléchargement
   // par commune, mis en cache : la première exécution est plus longue.
   cadastre: true,
