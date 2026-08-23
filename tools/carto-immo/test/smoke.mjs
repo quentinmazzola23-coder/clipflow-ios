@@ -247,6 +247,30 @@ check('la carte peut se passer du bloc de filtres', () => {
   assert.ok(b.includes('AVEC_FILTRES = false'), 'le filtrage est désactivé côté page');
 });
 
+check('les liens portent le nom de leur destination', () => {
+  const f = path.join(out, 'carte-liens.html');
+  writeMap([{
+    ...records[0],
+    urlAnnonce: 'https://www.leboncoin.fr/ad/ventes_immobilieres/2952864630',
+    urlAnalyse: 'https://lacquereur.fr/listing-analysis/x',
+    urlMaps: 'https://www.google.com/maps/search/?api=1&query=49.1,1.8',
+  }], f);
+  const h = fs.readFileSync(f, 'utf8');
+  assert.ok(h.includes('Annonce leboncoin'), 'une URL leboncoin est nommée comme telle');
+  assert.ok(h.includes('leboncoin.fr/ad/ventes_immobilieres/2952864630'), 'l\'URL de l\'annonce est intacte');
+  assert.ok(h.includes('target=\\"_blank\\"') || h.includes("target=\\'_blank\\'") || h.includes('_blank'),
+    'le lien s\'ouvre dans un nouvel onglet');
+  assert.ok(h.includes('noopener noreferrer'), 'le lien est isolé de la page');
+  assert.ok(h.includes('libelleLien'), 'le nommage est appliqué à l\'exécution');
+});
+
+check('un lien vers une autre source ne se fait pas passer pour une annonce', () => {
+  const f = path.join(out, 'carte-liens-dvf.html');
+  writeMap([{ ...records[0], urlAnnonce: 'https://app.dvf.etalab.gouv.fr/?code_commune=32233' }], f);
+  const h = fs.readFileSync(f, 'utf8');
+  assert.ok(h.includes('app.dvf.etalab.gouv.fr'));
+});
+
 check('sans fond vectoriel, la carte utilise OpenStreetMap', () => {
   assert.ok(fs.readFileSync(mapFile, 'utf8').includes('tile.openstreetmap.org'));
 });

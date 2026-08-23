@@ -9,6 +9,7 @@
  *   Adresses, coordonnées, DPE .... ADEME (data.ademe.fr)
  *   Parcelles et bâtiments ........ cadastre Etalab (cadastre.data.gouv.fr)
  *   Contours communaux ............ geo.api.gouv.fr
+ *   Contours départementaux ....... france-geojson (ODbL, d'après l'IGN)
  *
  * Seuls les biens dont l'adresse exacte est retrouvée dans le DPE *et* dont la
  * parcelle est présente au cadastre sont retenus : la carte doit montrer une
@@ -229,6 +230,31 @@ function simplifier(pts, eps) {
   return simplifier(pts.slice(0, imax + 1), eps).slice(0, -1).concat(simplifier(pts.slice(imax), eps));
 }
 
+/**
+ * Contours des départements de métropole, très allégés : ils donnent à la carte
+ * un fond national, sans quoi elle se viderait dès qu'on s'éloigne du secteur.
+ */
+async function contoursDepartements() {
+  const url = 'https://raw.githubusercontent.com/gregoiredavid/france-geojson/master/' +
+    'departements-version-simplifiee.geojson';
+  const brut = JSON.parse(await texte(url));
+  const EPS = 0.01; // ~1 km, largement assez à l'échelle du pays
+  const out = [];
+  for (const f of brut.features ?? []) {
+    const g = f.geometry;
+    if (!g) continue;
+    const anneaux = g.type === 'Polygon' ? [g.coordinates[0]] : g.coordinates.map((p) => p[0]);
+    const rings = [];
+    for (const r of anneaux) {
+      const s = simplifier(r.map(([x, y]) => [Number(x.toFixed(3)), Number(y.toFixed(3))]), EPS);
+      if (String(s[0]) !== String(s[s.length - 1])) s.push(s[0]);
+      if (s.length >= 4) rings.push(s);
+    }
+    if (rings.length) out.push({ n: f.properties?.nom, c: f.properties?.code, g: rings });
+  }
+  return out;
+}
+
 /** Contours communaux du département, allégés pour tenir dans la page. */
 async function contours() {
   const url = `https://geo.api.gouv.fr/departements/${DEPARTEMENT}/communes?fields=nom,code,contour&format=json`;
@@ -368,7 +394,15 @@ const titre = villes.length === 1
   ? `Veille immobilière — ${villes[0]}`
   : `Veille immobilière — ${villes.length} communes du Gers`;
 
-log.step('contours communaux');
+log.step('contours');
+let departements = [];
+try {
+  departements = await contoursDepartements();
+  log.ok(`  ${departements.length} départements`);
+} catch (e) {
+  log.warn(`  départements indisponibles (${e.message})`);
+}
+
 let communes = [];
 try {
   communes = await contours();
@@ -386,12 +420,13 @@ try {
 const osm = writeMap(fiches, path.join(OUT, 'carte-demo.html'), {
   title: titre, note, filtres: FILTRES,
 });
-const hors = communes.length
+const hors = (communes.length || departements.length)
   ? writeMap(fiches, path.join(OUT, 'carte-demo-autonome.html'), {
       title: titre,
       note,
       filtres: FILTRES,
       basemap: {
+        departements,
         communes,
         cadastre: { parcelles: contexteParcelles, batiments: contexteBatiments },
         attribution: 'Cadastre et contours © IGN / Etalab · Prix ' +

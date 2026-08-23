@@ -127,6 +127,9 @@ Tout arrive dans `data/` :
 - Le bloc de filtres est masqué par défaut (`filtresCarte` dans la config) :
   prix, surface, texte libre, et cinq raccourcis — *nouveaux*, *remis en ligne*,
   *sous le marché*, *prix baissé*, *adresse exacte*.
+- Les liens portent le nom de leur destination : « Annonce leboncoin »,
+  « Analyse », « Cadastre », « Maps ». Un bouton ne peut pas annoncer une
+  annonce et mener ailleurs.
 - Le fichier est autonome (Leaflet embarqué) ; seul le fond de carte
   OpenStreetMap se charge en ligne.
 
@@ -219,9 +222,11 @@ présente au cadastre** : la carte montre une localisation certaine, pas une
 approximation à la commune.
 
 Deux cartes sont produites : `carte-demo.html` avec le fond OpenStreetMap comme
-en production, et `carte-demo-autonome.html` avec un fond vectoriel embarqué —
-contours communaux en vue d'ensemble, **plan cadastral** (parcelles et
-bâtiments) au zoom parcelle — qui fonctionne **sans aucune requête sortante**.
+en production, et `carte-demo-autonome.html` avec un fond vectoriel embarqué qui
+fonctionne **sans aucune requête sortante**. Ce fond a trois échelles, chacune
+prenant le relais de la précédente : la **France par départements**, les
+**communes** du secteur cherché, puis le **plan cadastral** (parcelles et
+bâtiments) au zoom parcelle. La carte reste donc lisible même loin du secteur.
 
 Les téléchargements sont mis en cache dans `data-demo/.cache` : ces API
 publiques répondent régulièrement 503, et les fichiers ne bougent pas.

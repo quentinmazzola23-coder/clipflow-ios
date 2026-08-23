@@ -26,26 +26,51 @@ const FOND_OSM = `L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.pn
 }).addTo(map);`;
 
 // Fond vectoriel embarqué : la page reste lisible sans aucune requête sortante.
-const FOND_VECTORIEL = `document.querySelector('.leaflet-container').style.background = '#f3f1ec';
+//
+// Trois échelles, chacune prenant le relais de la précédente : la France par
+// départements, les communes du secteur, puis le plan cadastral. Sans cela, la
+// carte se viderait dès qu'on s'éloigne du périmètre cherché.
+const FOND_VECTORIEL = `document.querySelector('.leaflet-container').style.background = '#eef2f5';
+const renduFond = L.canvas({ pane: 'tilePane', padding: .3 });
+const ZOOM_COMMUNES = 9;
+
+for (const dep of (BASEMAP.departements ?? [])) {
+  L.polygon(dep.g.map(r => r.map(([x, y]) => [y, x])), {
+    renderer: renduFond, pane: 'tilePane',
+    color: '#d3ccbe', weight: .8, fillColor: '#f2efe8', fillOpacity: 1, interactive: false,
+  }).addTo(map);
+}
+
+const communesLayer = L.layerGroup();
 const avecBien = new Set(BASEMAP.communesAvecBien || []);
 const communesPolys = [];
-for (const com of BASEMAP.communes) {
+for (const com of (BASEMAP.communes ?? [])) {
   const marque = avecBien.has(com.c);
   const poly = L.polygon(com.g.map(r => r.map(([x, y]) => [y, x])), {
+    renderer: marque ? undefined : renduFond,
     pane: 'tilePane',
     color: marque ? '#8fa9cd' : '#dcd7cc',
     weight: marque ? 1.5 : 0.6,
     fillColor: marque ? '#ece7db' : '#f2efe8',
     fillOpacity: 1,
     interactive: marque,
-  }).addTo(map);
+  }).addTo(communesLayer);
   communesPolys.push({ poly, marque });
   if (marque) poly.bindTooltip(com.n, { direction: 'top', sticky: true });
 }
+
+function majCommunes() {
+  const veut = map.getZoom() >= ZOOM_COMMUNES;
+  if (veut && !map.hasLayer(communesLayer)) communesLayer.addTo(map);
+  else if (!veut && map.hasLayer(communesLayer)) map.removeLayer(communesLayer);
+}
+map.on('zoomend', majCommunes);
+majCommunes();
+
 map.attributionControl.addAttribution(BASEMAP.attribution || '');`;
 
 /**
- * Fond cadastral : parcelles et bâtiments autour de chaque bien. Il n'apparaît
+ * Plan cadastral : parcelles et bâtiments autour de chaque bien. Il n'apparaît
  * qu'au zoom parcelle, où le maillage communal ne dit plus rien.
  */
 const FOND_CADASTRE = `const cadastre = L.layerGroup();
@@ -330,6 +355,8 @@ document.getElementById('stamp').textContent =
 document.getElementById('credits').innerHTML = 'Fond de carte : ' + ATTRIBUTION;
 
 const map = L.map('map', { zoomControl: true, scrollWheelZoom: true });
+// Vue initiale posée avant toute couche : Leaflet exige un centre pour projeter.
+map.setView([46.6, 2.4], 6);
 
 ${basemap ? FOND_VECTORIEL : FOND_OSM}
 ${basemap?.cadastre ? FOND_CADASTRE : ''}
@@ -364,6 +391,24 @@ function dpeBadge(v){
   return '<span class="badge d' + k + '">' + (k === 'X' ? '?' : k) + '</span>';
 }
 
+/**
+ * Nomme un lien d'après sa destination réelle. Un bouton « Annonce » qui mène
+ * ailleurs qu'à une annonce est un piège : le libellé suit l'URL.
+ */
+function libelleLien(url, defaut){
+  let hote;
+  try { hote = new URL(url).hostname.replace(/^www\./, ''); } catch { return defaut; }
+  if (hote.includes('leboncoin')) return 'Annonce leboncoin';
+  if (hote.includes('seloger')) return 'Annonce SeLoger';
+  if (hote.includes('bienici')) return "Annonce Bien'ici";
+  if (hote.includes('logic-immo')) return 'Annonce Logic-Immo';
+  if (hote.includes('lacquereur')) return 'Analyse';
+  if (hote.includes('dvf')) return 'Vente DVF';
+  if (hote.includes('geoportail')) return 'Cadastre';
+  if (hote.includes('google')) return 'Maps';
+  return defaut;
+}
+
 function corpsFiche(d){
   const rows = [];
   const push = (k, v) => { if (v) rows.push('<dt>' + k + '</dt><dd>' + v + '</dd>'); };
@@ -395,9 +440,11 @@ function corpsFiche(d){
   }
 
   const links = [];
-  if (d.ua) links.push('<a href="' + esc(d.ua) + '" target="_blank" rel="noopener">Annonce</a>');
-  if (d.ul) links.push('<a href="' + esc(d.ul) + '" target="_blank" rel="noopener">Analyse</a>');
-  if (d.um) links.push('<a href="' + esc(d.um) + '" target="_blank" rel="noopener">Maps</a>');
+  const lien = (url, defaut) => '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer"' +
+    ' title="' + esc(url) + '">' + esc(libelleLien(url, defaut)) + '</a>';
+  if (d.ua) links.push(lien(d.ua, 'Annonce'));
+  if (d.ul) links.push(lien(d.ul, 'Analyse'));
+  if (d.um) links.push(lien(d.um, 'Maps'));
 
   return { rows: rows.join(''), links: links.join('') };
 }
@@ -721,7 +768,6 @@ window.matchMedia('(max-width:820px)').addEventListener('change', () => {
 });
 window.addEventListener('resize', () => { if (MOBILE()) allerA(position, false); });
 
-map.setView([43.52, 0.16], 9);
 render();
 if (MOBILE()) allerA(2, false);
 </script>
