@@ -93,11 +93,14 @@ struct ReviewView: View {
                 }
             }
         }
-        // Le bandeau ne pousse pas la mise en page : il s'insere dans la zone
-        // sure, sous la liste.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        // EN SURIMPRESSION, coin bas droit : sous le pouce, sans rien pousser.
+        // La liste garde toute sa hauteur, et aucune ligne ne se dérobe sous le
+        // doigt au moment où l'annulation apparaît.
+        .overlay(alignment: .bottomTrailing) {
             if let pending = undo.pending {
-                UndoBannerView(pending: pending, count: undo.count) { undo.undo() }
+                UndoButton(pending: pending, count: undo.count) { undo.undo() }
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 16)
             }
         }
         .animation(.snappy(duration: 0.22), value: undo.pending?.id)

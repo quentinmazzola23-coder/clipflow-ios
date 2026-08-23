@@ -95,45 +95,45 @@ final class DeletionUndo {
     }
 }
 
-/// Bandeau d'annulation, à poser en surimpression au bas d'un écran.
-struct UndoBannerView: View {
+/// Bouton d'annulation : un rond, rien d'autre.
+///
+/// IL A REMPLACÉ UN BANDEAU PLEINE LARGEUR, et c'est une correction, pas un
+/// changement de goût. Le bandeau était posé en surimpression au bas de
+/// l'écran, donc PAR-DESSUS la barre de commandes : « Suppr. rush »,
+/// « Val. + Suppr. » et « Valider » disparaissaient sous lui pendant cinq
+/// secondes, à l'endroit exact où le pouce revient. Le filet masquait les
+/// commandes qu'on venait d'utiliser.
+///
+/// Un rond de la taille du coupe-son ne recouvre plus rien d'utile, ne décale
+/// aucune mise en page, et reste sous le pouce. Le libellé de ce qui a été
+/// supprimé n'est plus écrit : celui qui vient de supprimer sait quoi, et
+/// l'information reste accessible aux lecteurs d'écran.
+struct UndoButton: View {
     let pending: PendingDeletion
     /// Nombre total de suppressions encore annulables.
     var count: Int = 1
     let onUndo: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            // La rafale est DITE : sans ce compte, quatre suppressions
-            // d'affilée affichaient quatre fois le même libellé, et rien
-            // n'indiquait combien restaient récupérables.
-            Text(count > 1
-                 ? "\(pending.label) · \(count) suppressions annulables"
-                 : pending.label)
-                .font(.footnote)
-                .foregroundStyle(.white)
-                .lineLimit(1)
-
-            Spacer(minLength: 0)
-
-            Button(action: onUndo) {
-                Text("Annuler")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(Theme.accent)
-                    // Prise confortable sans bouton dessiné : le bandeau est
-                    // déjà une interruption, un cadre de plus l'alourdirait.
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+        Button(action: onUndo) {
+            Image(systemName: "arrow.uturn.backward")
         }
-        .padding(.leading, 14)
-        .padding(.trailing, 4)
-        .padding(.vertical, 4)
-        .background(.black.opacity(0.72), in: Capsule())
-        .overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 0.5))
-        .padding(.horizontal, 16)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .buttonStyle(GlassIconButtonStyle(tint: Theme.accent, diameter: 36))
+        .overlay(alignment: .topTrailing) {
+            // LA RAFALE EST DITE, en un chiffre. Écarter quatre rushes de
+            // suite est le rythme normal du dérushage : sans ce compte, rien
+            // n'indiquerait combien de gestes restent récupérables.
+            if count > 1 {
+                Text("\(count)")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Theme.accent, in: Capsule())
+                    .offset(x: 4, y: -2)
+            }
+        }
+        .accessibilityLabel("Annuler — \(pending.label)")
+        .transition(.scale.combined(with: .opacity))
     }
 }

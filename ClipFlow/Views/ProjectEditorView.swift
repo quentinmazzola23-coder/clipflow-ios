@@ -71,6 +71,12 @@ struct ProjectEditorView: View {
     @AppStorage("previewMuted") private var previewMuted = false
     @State private var slowPreview = false
     @State private var showCustomDuration = false
+    @State private var showSettings = false
+    /// Demande de durée exacte formulée DEPUIS la feuille de réglages.
+    ///
+    /// iOS ne présente pas une feuille par-dessus une autre depuis la même
+    /// vue : la demande est retenue, et honorée une fois la première refermée.
+    @State private var pendingCustomDuration = false
 
     private let validateHaptic = UINotificationFeedbackGenerator()
 
@@ -337,26 +343,24 @@ struct ProjectEditorView: View {
                     .accessibilityLabel(previewMuted ? "Rétablir le son" : "Couper le son")
                     .padding(.leading, 8)
                 }
-                controlBar(isLandscape: isLandscape)
-            }
-            // BANDEAU D'ANNULATION posé SUR la barre de commandes, jamais
-            // au-dessus d'elle dans le flux.
-            //
-            // `safeAreaInset` avait l'air plus propre, mais il RÉDUIT la
-            // hauteur disponible : la barre remontait d'une quarantaine de
-            // points à l'apparition du bandeau. Or le cas visé est la rafale —
-            // on écarte quatre rushes de suite au même endroit — et la
-            // deuxième frappe serait tombée sur le bouton voisin. Un filet qui
-            // provoque la faute qu'il doit rattraper ne vaut rien.
-            //
-            // En surimpression, la mise en page ne bouge pas d'un point ; le
-            // bandeau masque brièvement la barre, ce qui est sans conséquence :
-            // il disparaît en cinq secondes et son seul geste est « Annuler ».
-            .overlay(alignment: .bottom) {
-                if let pending = undo.pending {
-                    UndoBannerView(pending: pending, count: undo.count) { undo.undo() }
-                        .padding(.bottom, 6)
+                .overlay(alignment: .trailing) {
+                    // ANNULATION, en miroir du coupe-son.
+                    //
+                    // Elle vivait dans un bandeau pleine largeur posé au bas de
+                    // l'écran, c'est-à-dire PAR-DESSUS la barre de commandes :
+                    // les trois boutons d'action disparaissaient sous lui cinq
+                    // secondes durant, juste là où le pouce revient.
+                    //
+                    // Ici, elle ne masque aucune commande et ne décale rien —
+                    // la mise en page ne bouge pas d'un point à son apparition,
+                    // ce qui reste la condition pour que la rafale de
+                    // suppressions ne provoque pas la faute qu'elle rattrape.
+                    if let pending = undo.pending {
+                        UndoButton(pending: pending, count: undo.count) { undo.undo() }
+                            .padding(.trailing, 8)
+                    }
                 }
+                controlBar(isLandscape: isLandscape)
             }
             .animation(.snappy(duration: 0.22), value: undo.pending?.id)
         }
@@ -402,6 +406,7 @@ struct ProjectEditorView: View {
         .onChange(of: showMontage) { _, presented in if presented { playback.pause() } }
         .onChange(of: showPicker) { _, presented in if presented { playback.pause() } }
         .onChange(of: showCustomDuration) { _, presented in if presented { playback.pause() } }
+        .onChange(of: showSettings) { _, presented in if presented { playback.pause() } }
         .sheet(isPresented: $showReview, onDismiss: dropEditingIfGone) {
             NavigationStack { ReviewView(project: project) }
         }
@@ -435,6 +440,23 @@ struct ProjectEditorView: View {
         }
         .sheet(isPresented: $showOutputFormat) {
             OutputFormatSheet(project: project, survey: project.rushFormatSurvey)
+        }
+        .sheet(isPresented: $showSettings, onDismiss: {
+            if pendingCustomDuration {
+                pendingCustomDuration = false
+                showCustomDuration = true
+            }
+        }) {
+            ProjectSettingsSheet(
+                project: project,
+                devStatsEnabled: $devStatsEnabled,
+                onPreviewQualityChange: { light in
+                    playback.lightPreview = light
+                    playback.applyPreviewQualityChange()
+                },
+                onTouch: touch,
+                onCustomDuration: { pendingCustomDuration = true }
+            )
         }
         .sheet(isPresented: $showCustomDuration) {
             CustomDurationSheet(
@@ -881,7 +903,6 @@ struct ProjectEditorView: View {
             // « relecture des passages ».
             Menu {
                 Section("Pendant le dérushage") {
-                    durationMenu
                     // MOMENTS FORTS — proposition, jamais décision : l'app
                     // repère où ça bouge plus que d'habitude, le choix reste
                     // à l'œil.
@@ -909,35 +930,6 @@ struct ProjectEditorView: View {
                     }
                 }
 
-                Section("Format de la vidéo") {
-                    Picker("Format", selection: Binding(
-                        get: { project.outputFormat },
-                        set: { newValue in
-                            project.outputFormat = newValue
-                            touch()
-                        }
-                    )) {
-                        ForEach(MontageOutputFormat.allCases, id: \.self) { format in
-                            Text(format.label).tag(format)
-                        }
-                    }
-                    .pickerStyle(.inline)
-                    Toggle("Recadrer plutôt que ceinturer", isOn: Binding(
-                        get: { project.cropToFillOutput },
-                        set: { newValue in
-                            project.cropToFillOutput = newValue
-                            touch()
-                        }
-                    ))
-                    Toggle("Suréchantillonner à l'export", isOn: Binding(
-                        get: { project.upscaleOnExport },
-                        set: { newValue in
-                            project.upscaleOnExport = newValue
-                            touch()
-                        }
-                    ))
-                }
-
                 Section("Quand les clips sont faits") {
                     Button {
                         showReview = true
@@ -953,54 +945,19 @@ struct ProjectEditorView: View {
                     }
                 }
 
-                // Réglages en SOUS-MENU : ils se touchent rarement, et les
-                // laisser à plat noyait les actions du jour sous quatre
-                // interrupteurs.
-                Menu {
-                    Toggle("Toucher = centre du clip", isOn: Binding(
-                        get: { project.touchAnchorIsCenter },
-                        set: { newValue in
-                            project.touchAnchorIsCenter = newValue
-                            AppSettings.captureFlag(\.touchAnchorIsCenter, value: newValue)
-                            touch()
-                        }
-                    ))
-                    Toggle("Aperçu léger (540p, plus fluide)", isOn: Binding(
-                        get: { project.previewLight },
-                        set: { newValue in
-                            project.previewLight = newValue
-                            playback.lightPreview = newValue
-                            playback.applyPreviewQualityChange()
-                            touch()
-                        }
-                    ))
-                    // Flux optique : désactivé par défaut. Activé, il FABRIQUE
-                    // les images intermédiaires (mouvement plus fluide) et peut
-                    // donc fabriquer des artefacts ; désactivé, chaque image du
-                    // ralenti est une vraie image du rush, répétée.
-                    Toggle("Flux optique (fluide, peut créer des artefacts)", isOn: Binding(
-                        get: { project.opticalFlowEnabled },
-                        set: { newValue in
-                            project.opticalFlowEnabled = newValue
-                            touch()
-                        }
-                    ))
-                    Toggle("Album Photos par projet", isOn: Binding(
-                        get: { project.albumPerProject },
-                        set: { newValue in
-                            project.albumPerProject = newValue
-                            touch()
-                        }
-                    ))
-                    Toggle("Stats développeur", isOn: Binding(
-                        get: { devStatsEnabled },
-                        set: { enabled in
-                            devStatsEnabled = enabled
-                            enabled ? DevStatsMonitor.shared.start() : DevStatsMonitor.shared.stop()
-                        }
-                    ))
-                } label: {
-                    Label("Réglages", systemImage: "slider.horizontal.3")
+                Section {
+                    // RÉGLAGES EN FEUILLE, plus en sous-menu.
+                    //
+                    // Un menu iOS se referme au premier choix : régler la
+                    // durée, puis le format, puis deux interrupteurs, c'était
+                    // rouvrir le menu quatre fois et redescendre à chaque fois
+                    // au même endroit. Ces réglages se touchent ensemble ; ils
+                    // méritaient une fenêtre qui dure.
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Label("Réglages du projet", systemImage: "slider.horizontal.3")
+                    }
                 }
 
                 Section {
@@ -1020,55 +977,6 @@ struct ProjectEditorView: View {
                 Image(systemName: "ellipsis.circle")
             }
         }
-    }
-
-    private var durationMenu: some View {
-        Menu("Durée finale : \(durationLabel)") {
-            // Une seule liste de modes, cochée : « jusqu'à la fin du rush » est
-            // un choix de durée comme les autres, pas une action à part.
-            Picker("Durée", selection: durationModeBinding) {
-                ForEach(ExactDuration.presets, id: \.centiseconds) { preset in
-                    Text(preset.label).tag(DurationMode.fixed(preset.centiseconds))
-                }
-                // La durée personnalisée courante reste visible et cochée quand
-                // elle ne fait pas partie des valeurs types.
-                if !project.durationToRushEnd,
-                   !ExactDuration.presets.contains(where: {
-                       $0.centiseconds == project.finalDurationCentiseconds
-                   }) {
-                    Text(project.finalDuration.label)
-                        .tag(DurationMode.fixed(project.finalDurationCentiseconds))
-                }
-                Text("Jusqu'à la fin du rush").tag(DurationMode.toRushEnd)
-            }
-            // Options présentées À PLAT dans le menu de durée : un Picker
-            // laissé au style par défaut ouvrirait un sous-menu de plus, soit
-            // un tap supplémentaire pour un choix fait en permanence.
-            .pickerStyle(.inline)
-            Divider()
-            Button("Durée personnalisée…") { showCustomDuration = true }
-        }
-    }
-
-    /// Mode de durée courant, écrit dans les deux champs du projet.
-    private var durationModeBinding: Binding<DurationMode> {
-        Binding(
-            get: {
-                project.durationToRushEnd
-                    ? .toRushEnd
-                    : .fixed(project.finalDurationCentiseconds)
-            },
-            set: { mode in
-                switch mode {
-                case .toRushEnd:
-                    project.durationToRushEnd = true
-                case .fixed(let centiseconds):
-                    project.durationToRushEnd = false
-                    project.finalDurationCentiseconds = centiseconds
-                }
-                touch()
-            }
-        )
     }
 
     /// Durée finale réelle d'une plage sélectionnée, telle qu'elle sera figée
