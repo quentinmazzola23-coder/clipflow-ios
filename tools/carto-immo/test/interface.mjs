@@ -266,6 +266,20 @@ try {
     assert.equal(v, true, 'la photo doit être entièrement dans la fenêtre');
   });
 
+  await check('une annonce du jour se dit au singulier', async () => {
+    const t = await page.evaluate(() => {
+      const d = window.cartoImmo.DATA[0];
+      const avant = d.j;
+      d.j = 1;
+      window.cartoImmo.render();
+      const html = document.querySelector('.card') ? document.body.innerHTML : '';
+      d.j = avant;
+      window.cartoImmo.render();
+      return html;
+    });
+    assert.ok(!t.includes('>1 jours<'), 'pas de « 1 jours »');
+  });
+
   await check('la bulle défile au lieu de déborder', async () => {
     const style = await page.evaluate(() => getComputedStyle(document.querySelector('.leaflet-popup-content')).overflowY);
     assert.equal(style, 'auto');

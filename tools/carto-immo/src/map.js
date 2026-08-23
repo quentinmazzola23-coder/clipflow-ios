@@ -370,7 +370,7 @@ input[type=search]{padding-left:10px}
 .marker.on{outline:3px solid rgba(31,58,95,.35);outline-offset:2px;border-radius:999px}
 .j0{background:#8b9099} .j1{background:#4a7fb5} .j2{background:#c08a2e} .j3{background:#c25a1e} .j4{background:#b3261e}
 .leaflet-popup.deportee .leaflet-popup-tip-container{display:none}
-.leaflet-popup-content{margin:0;width:296px!important;max-height:min(62vh,470px);overflow-y:auto;overscroll-behavior:contain}
+.leaflet-popup-content{margin:0;width:296px!important;max-height:min(78vh,620px);overflow-y:auto;overscroll-behavior:contain}
 .leaflet-popup-content-wrapper{border-radius:12px;padding:0;overflow:hidden}
 .pop img{width:100%;height:132px;object-fit:cover;display:block;background:#e9e7e1}
 .galerie{position:relative;background:#e9e7e1;line-height:0}
@@ -800,7 +800,8 @@ function corpsFiche(d){
   const push = (k, v) => { if (v) rows.push('<dt>' + k + '</dt><dd>' + v + '</dd>'); };
 
   push('En ligne', d.j != null
-    ? '<b class="age ' + tone(d) + '">' + (d.jm ? 'au moins ' : '') + d.j + ' jours</b>' +
+    ? '<b class="age ' + tone(d) + '">' + (d.jm ? 'au moins ' : '') + d.j +
+      (d.j > 1 ? ' jours' : ' jour') + '</b>' +
       (d.nb ? ' <span style="color:var(--muted)">· prix baissé</span>' : '')
     : null);
   push('Adresse', e.ad
