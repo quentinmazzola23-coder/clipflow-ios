@@ -37,6 +37,12 @@ struct MontageView: View {
     @State private var plan: MontagePlan?
     /// URL du fichier de chaque clip placé (id = index du passage).
     @State private var clipSources: [Int: URL] = [:]
+    /// Cadrage de chaque clip, gelé en même temps que le plan.
+    ///
+    /// Relire les Passage plus tard rouvrirait la porte au décalage d'index
+    /// que `passageIDs` ferme déjà à l'export : `clipID` est une POSITION dans
+    /// `orderedPassages`, et supprimer un clip décale tous les suivants.
+    @State private var clipCrops: [Int: CGPoint] = [:]
     /// Clips qui gagneraient à être lissés à 60 i/s, par identifiant de clip.
     ///
     /// Rempli à la construction du plan parce que la piste vidéo y est DÉJÀ
@@ -563,8 +569,20 @@ struct MontageView: View {
                 let width = abs(oriented.width), height = abs(oriented.height)
                 guard !Task.isCancelled, generation == planGeneration else { return }
                 if width > 0, height > 0 {
-                    overlayVideoRatio = width / height
-                    reanchorOverlays(videoRatio: Double(width / height))
+                    // LE RAPPORT QUI COMPTE EST CELUI DU FICHIER EXPORTÉ, pas
+                    // celui du rush.
+                    //
+                    // Les incrustations sont posées en fractions du CADRE DE
+                    // RENDU. Les ancrer sur la forme de la source donnait, dès
+                    // que le format de sortie en différait — rushes verticaux
+                    // exportés en 16:9, par exemple — une hauteur calculée à
+                    // partir d'un rapport trois fois trop petit : un logo ancré
+                    // « bas centre » débordait du cadre à l'export alors que
+                    // l'éditeur le montrait entier.
+                    let exported = project.outputFormat.aspect(
+                        sourceOriented: CGSize(width: width, height: height))
+                    overlayVideoRatio = CGFloat(exported)
+                    reanchorOverlays(videoRatio: exported)
                 }
             }
             guard needsImage else { return }
@@ -987,14 +1005,16 @@ struct MontageView: View {
 
         var candidates: [MontageClipCandidate] = []
         var sources: [Int: URL] = [:]
+        var crops: [Int: CGPoint] = [:]
         var smoothing: [Int: MontageSmoothingRequest] = [:]
 
         for (index, passage) in project.orderedPassages.enumerated() {
             // VERSION LISSÉE D'ABORD si elle existe, plage cachée ensuite
             // (autonome), copie source en dernier recours.
             //
-            // Le fichier lissé est un rendu à 60 i/s de la plage cachée, MÊME
-            // BASE DE TEMPS : son point d'entrée se calcule exactement pareil.
+            // Le fichier lissé COMMENCE au point d'entrée du clip : il ne
+            // couvre qu'une fenêtre de la plage cachée, pas toute la plage.
+            // Son point d'entrée est donc zéro, et non celui du cache.
             let url: URL
             let startInFile: CMTime
             // Vrai seulement pour la plage cachée nue — la seule qu'il reste
@@ -1004,7 +1024,7 @@ struct MontageView: View {
                FileManager.default.fileExists(
                    atPath: StorageManager.url(forCachedRangeRelativePath: smoothedPath).path) {
                 url = StorageManager.url(forCachedRangeRelativePath: smoothedPath)
-                startInFile = CMTimeSubtract(passage.start, passage.cachedRangeOffset)
+                startInFile = .zero
                 mayNeedSmoothing = false
             } else if let cachedPath = passage.cachedRangeRelativePath {
                 url = StorageManager.url(forCachedRangeRelativePath: cachedPath)
@@ -1035,30 +1055,42 @@ struct MontageView: View {
                                      denominator: passage.speedDenominator)
             ))
             sources[index] = url
+            crops[index] = passage.cropCenter
 
-            // LISSAGE : sur toute la plage cachée, pas sur la durée du clip
-            // dans CE plan. Changer de densité ou de fenêtre redistribue les
-            // durées ; un fichier taillé pour un plan serait à refaire au
-            // premier réglage, alors que la plage cachée, elle, ne bouge pas.
+            // LISSAGE SUR UNE FENÊTRE BORNÉE, à partir du point d'entrée du
+            // clip.
             //
-            // Départ à zéro EXIGÉ : une piste qui commencerait ailleurs
-            // décalerait le fichier lissé par rapport au point d'entrée du
-            // plan, calculé sur la plage cachée.
-            if mayNeedSmoothing, trackRange.start == .zero,
+            // Rendre toute la plage cachée paraissait plus simple et plus
+            // durable. En mode « jusqu'à la fin du rush », cette plage court
+            // jusqu'au bout du rush : la phase 0 rendait des minutes entières
+            // au flux optique, et déposait plus d'un gigaoctet, pour un clip
+            // dont le montage n'utilise qu'une seconde.
+            //
+            // La fenêtre part du point d'entrée — c'est de là que tout créneau
+            // prélève — et ne dépend d'aucun plan : elle survit donc aux
+            // changements de densité et de fenêtre musicale, ce qui était la
+            // qualité recherchée au départ.
+            let entry = CMTimeMaximum(startInFile, trackRange.start)
+            let available = CMTimeSubtract(trackRange.end, entry)
+            let span = CMTimeMinimum(
+                available,
+                CMTime(seconds: MontageSmoothing.maxSmoothedSpan, preferredTimescale: 600)
+            )
+            if mayNeedSmoothing, span.seconds > 0.05,
                MontageSmoothing.needsSmoothing(
                    sourceFrameRate: passage.sourceNominalFrameRate,
                    speedNumerator: passage.speedNumerator,
                    speedDenominator: passage.speedDenominator,
                    colorimetry: passage.colorimetry) {
-                // ARRONDI PAR EXCÈS au centième. Un fichier lissé plus COURT que
-                // la plage cachée priverait le montage des dernières images que
-                // le plan croit disponibles ; le dépassement inverse, lui, tient
-                // dans la tolérance de fin de rush du planificateur d'images.
-                let centiseconds = max(1, Int((trackRange.duration.seconds * 100).rounded(.up)))
+                // ARRONDI PAR EXCÈS au centième : un fichier plus COURT que la
+                // fenêtre priverait le montage d'images que le plan croit
+                // disponibles, tandis que le dépassement inverse tient dans la
+                // tolérance de fin du planificateur d'images.
+                let centiseconds = max(1, Int((span.seconds * 100).rounded(.up)))
                 smoothing[index] = MontageSmoothingRequest(
                     clipID: index,
                     sourceURL: url,
-                    sourceRange: trackRange,
+                    sourceRange: CMTimeRange(start: entry, duration: span),
                     finalDuration: ExactDuration(centiseconds: centiseconds),
                     colorimetry: passage.colorimetry,
                     filename: "smooth-" + UUID().uuidString + ".mov"
@@ -1072,6 +1104,7 @@ struct MontageView: View {
         let slots = map.slots(from: start, density: cutDensity)
         plan = MontagePlanner.plan(slots: slots, clips: candidates, windowStart: start)
         clipSources = sources
+        clipCrops = crops
         smoothingRequests = smoothing
         // Le PREMIER placement peut changer de clip, donc d'orientation : la
         // vignette de pose et la taille de rendu mémorisée décriraient un
@@ -1124,6 +1157,7 @@ struct MontageView: View {
         guard let plan, let filename = project.musicFilename else { return }
         let generation = planGeneration
         let sources = clipSources
+        let crops = clipCrops
         let token = UUID()
         previewToken = token
         isBuildingPreview = true
@@ -1134,6 +1168,7 @@ struct MontageView: View {
                 let montage = try await MontageComposer.build(
                     plan: plan,
                     sources: sources,
+                    crops: crops,
                     musicURL: MusicStore.url(forMusicFilename: filename),
                     overlays: resolvedOverlays, // dessinées par-dessus, pas incrustées ici
                     outputFormat: project.outputFormat,
@@ -1251,11 +1286,21 @@ struct MontageView: View {
         MontageExportController.shared.start(
             plan: plan,
             sources: clipSources,
+            crops: clipCrops,
             musicURL: MusicStore.url(forMusicFilename: filename),
             overlays: resolvedOverlays,
             outputFormat: project.outputFormat,
             cropToFill: project.cropToFillOutput,
-            upscale: project.upscaleOnExport,
+            // SECONDE PASSE RÉSERVÉE AU SDR.
+            //
+            // L'agrandisseur décode en BGRA 8 bits et réécrit en Rec.709 : sur
+            // un montage HLG ou 10 bits, il écraserait la profondeur et
+            // décalerait le gamma — bandes franches dans les ciels, couleurs
+            // ternes — pour gagner de la définition. Mieux vaut laisser
+            // AVFoundation agrandir en une passe et garder la plage dynamique
+            // intacte, sans rien demander à l'utilisateur.
+            upscale: project.upscaleOnExport
+                && project.orderedPassages.allSatisfy { $0.colorimetry == "sdr" },
             sourceOriented: firstPlacedRushSize,
             smoothing: smoothing,
             onSmoothed: { produced in
@@ -1269,6 +1314,14 @@ struct MontageView: View {
                         try? FileManager.default.removeItem(
                             at: StorageManager.url(forCachedRangeRelativePath: name))
                         continue
+                    }
+                    // Un fichier lissé PLUS ANCIEN pour ce même clip n'a plus
+                    // aucune référence une fois le chemin réécrit : sans cette
+                    // suppression il resterait dans les plages cachées,
+                    // introuvable et impurgeable autrement qu'en vidant tout.
+                    if let previous = passage.smoothedRangeRelativePath, previous != name {
+                        try? FileManager.default.removeItem(
+                            at: StorageManager.url(forCachedRangeRelativePath: previous))
                     }
                     passage.smoothedRangeRelativePath = name
                 }

@@ -118,6 +118,20 @@ enum MontageUpscaler {
                     AVVideoAverageBitRateKey: bitrate(for: targetSize, fps: frameRate),
                     AVVideoExpectedSourceFrameRateKey: Int(frameRate),
                 ],
+                // FICHIER ÉTIQUETÉ. Sans ces clés, le .mov sort sans
+                // description de couleur : un lecteur retombe alors sur une
+                // convention de son choix, et le montage suréchantillonné
+                // n'avait pas le même rendu que le même montage exporté en une
+                // passe. Cette passe travaille en BGRA 8 bits converti en sRGB
+                // par CoreImage — c'est du Rec.709, autant le dire.
+                //
+                // Les montages HDR ne passent pas par ici : le contrôleur
+                // renonce à la seconde passe pour eux plutôt que de les aplatir.
+                AVVideoColorPropertiesKey: [
+                    AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                    AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                    AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+                ],
             ])
         videoInput.expectsMediaDataInRealTime = false
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
@@ -273,6 +287,23 @@ enum MontageUpscaler {
                     }
                 }
             }
+            // LE STATUT DU LECTEUR FAIT FOI, pas la fin de la boucle.
+            //
+            // `copyNextSampleBuffer` rend nil aussi bien à la fin de la piste
+            // qu'à la première défaillance. Le lecteur audio est démarré avant
+            // la passe vidéo et attend pendant tout l'agrandissement — plusieurs
+            // minutes — ce qui laisse largement le temps à une réinitialisation
+            // des services média de le tuer. Sans ce test, l'écriture
+            // réussissait, le montage était déposé dans Photos et annoncé
+            // réussi : SANS MUSIQUE. Sur une app dont la musique est le cœur,
+            // c'est un échec qu'il vaut mieux dire.
+            if let audioReader, audioReader.status == .failed {
+                writer.cancelWriting()
+                try? FileManager.default.removeItem(at: output)
+                throw MontageUpscalerError.readerFailed(
+                    audioReader.error?.localizedDescription
+                        ?? "lecture de la musique interrompue")
+            }
         }
 
         await writer.finishWriting()
@@ -369,6 +400,19 @@ private final class OverlayImageCache {
         parent.isGeometryFlipped = false
         for overlay in visible {
             guard let layer = OverlayRenderer.makeLayer(overlay, renderSize: size) else { continue }
+            // SEULE LA POSITION EST MIROITÉE, jamais le contenu.
+            //
+            // `OverlayRenderer.frame` place ses calques pour Core Animation,
+            // dont l'origine est en BAS à gauche (d'où son `1 - centerY`).
+            // `CALayer.render(in:)` dans un contexte UIGraphics dessine, lui,
+            // depuis le HAUT — mais il dessine le contenu à l'endroit, c'est
+            // l'idiome ordinaire de capture d'une vue.
+            //
+            // Retourner le CONTEXTE corrigeait bien la position, et miroitait
+            // le contenu avec : un titre atterrissait au bon endroit, tête en
+            // bas. Renverser le seul cadre remet chaque calque à sa place sans
+            // toucher à ce qu'il dessine.
+            layer.frame.origin.y = size.height - layer.frame.maxY
             // Aucune fenêtre de visibilité ici : la sélection par le temps est
             // déjà faite, et une animation Core Animation n'aurait aucun sens
             // dans un rendu hors ligne image par image.
@@ -379,15 +423,6 @@ private final class OverlayImageCache {
         format.scale = 1
         format.opaque = false
         let uiImage = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
-            // RETOURNEMENT INDISPENSABLE. `OverlayRenderer.frame` calcule ses
-            // positions pour Core Animation, dont l'origine est EN BAS à
-            // gauche (d'où le `1 - centerY`). Le contexte d'UIGraphics a la
-            // sienne en HAUT à gauche : sans ce retournement, une incrustation
-            // posée en haut du cadre serait dessinée en bas dans les montages
-            // suréchantillonnés — et seulement dans ceux-là, ce qui aurait été
-            // long à comprendre.
-            ctx.cgContext.translateBy(x: 0, y: size.height)
-            ctx.cgContext.scaleBy(x: 1, y: -1)
             parent.render(in: ctx.cgContext)
         }
         guard let cgImage = uiImage.cgImage else { return nil }

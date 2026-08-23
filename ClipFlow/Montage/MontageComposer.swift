@@ -49,6 +49,17 @@ struct MontageComposition {
     /// Taille de l'image rendue — l'aperçu s'en sert pour retrouver le cadre
     /// réel de la vidéo dans le lecteur (qui la met en boîte aux lettres).
     var renderSize: CGSize
+    /// Taille FINALE visée, dans le format que cette composition a réellement
+    /// retenu.
+    ///
+    /// Égale à `renderSize` en une seule passe. En deux passes, `renderSize`
+    /// est la taille native et celle-ci la cible 4K : l'agrandisseur doit
+    /// prendre CELLE-CI, et surtout pas la recalculer de son côté. Les deux
+    /// calculs partaient d'orientations différentes — le contrôleur depuis le
+    /// rush du premier clip, le composeur depuis le fichier réellement inséré —
+    /// et un rush supprimé suffisait à les faire diverger. L'agrandisseur
+    /// étirait alors tout le montage à un rapport faux.
+    var outputSize: CGSize
 }
 
 enum MontageComposer {
@@ -59,6 +70,7 @@ enum MontageComposer {
     /// - `sources` : URL du fichier de chaque clip, par identifiant.
     static func build(plan: MontagePlan,
                       sources: [Int: URL],
+                      crops: [Int: CGPoint] = [:],
                       musicURL: URL,
                       overlays: [ResolvedOverlay] = [],
                       outputFormat: MontageOutputFormat = .auto,
@@ -87,6 +99,7 @@ enum MontageComposer {
                                  range: CMTimeRange, size: CGSize,
                                  transform: CGAffineTransform)] = [:]
         var renderSize = CGSize.zero
+        var outputSize = CGSize.zero
         var cursor = CMTime.zero
 
         for placement in plan.placements {
@@ -126,6 +139,9 @@ enum MontageComposer {
             let oriented = info.size.applying(info.transform)
             let orientedSize = CGSize(width: abs(oriented.width), height: abs(oriented.height))
             if renderSize == .zero {
+                // Cible finale RETENUE ICI, au même instant et depuis la même
+                // orientation que la taille de composition.
+                outputSize = outputFormat.renderSize(sourceOriented: orientedSize)
                 // Taille NATIVE quand une seconde passe agrandira : composer
                 // directement en 4K laisserait AVFoundation agrandir au filtre
                 // bilinéaire, et le suréchantillonnage n'aurait plus qu'un flou
@@ -192,7 +208,8 @@ enum MontageComposer {
 
             layerInstruction.setTransform(
                 fillTransform(size: info.size, transform: info.transform,
-                              into: renderSize, cropToFill: cropToFill),
+                              into: renderSize, cropToFill: cropToFill,
+                              cropCenter: crops[placement.clipID] ?? CropGeometry.centered),
                 at: placement.timelineStart
             )
             cursor = CMTimeAdd(placement.timelineStart, placement.timelineDuration)
@@ -259,7 +276,8 @@ enum MontageComposer {
 
         return MontageComposition(composition: composition,
                                   videoComposition: videoComposition,
-                                  renderSize: renderSize)
+                                  renderSize: renderSize,
+                                  outputSize: outputSize)
     }
 
     /// Transformation « remplir le cadre » : orientation native appliquée,
@@ -268,30 +286,41 @@ enum MontageComposer {
     ///   CONTENIR l'image entière, donc des bandes noires. Le remplissage est
     ///   le défaut : sur un montage vertical fait de rushes 16:9, contenir
     ///   laisse deux bandes qui occupent plus de la moitié de la hauteur.
+    /// - `cropCenter` : centre de la portion gardée, en fractions de l'image
+    ///   orientée (voir `CropGeometry`). La valeur par défaut redonne
+    ///   EXACTEMENT le centrage d'origine — condition pour qu'aucun montage
+    ///   déjà réglé ne change de cadrage.
     static func fillTransform(size: CGSize,
                               transform: CGAffineTransform,
                               into renderSize: CGSize,
-                              cropToFill: Bool = true) -> CGAffineTransform {
+                              cropToFill: Bool = true,
+                              cropCenter: CGPoint = CropGeometry.centered) -> CGAffineTransform {
         let oriented = size.applying(transform)
         let orientedSize = CGSize(width: abs(oriented.width), height: abs(oriented.height))
         guard orientedSize.width > 0, orientedSize.height > 0 else { return transform }
 
-        let scale = cropToFill
-            ? max(renderSize.width / orientedSize.width,
-                  renderSize.height / orientedSize.height)
-            : min(renderSize.width / orientedSize.width,
-                  renderSize.height / orientedSize.height)
+        let scale = CropGeometry.scale(orientedSize: orientedSize,
+                                       renderSize: renderSize,
+                                       cropToFill: cropToFill)
         // 1. Orientation native. 2. Recalage de l'origine (une rotation met
-        //    des coordonnées négatives). 3. Échelle. 4. Centrage.
+        //    des coordonnées négatives). 3. Échelle. 4. Cadrage.
         var result = transform
         let bounds = CGRect(origin: .zero, size: size).applying(transform)
         result = result.concatenating(CGAffineTransform(translationX: -bounds.minX, y: -bounds.minY))
         result = result.concatenating(CGAffineTransform(scaleX: scale, y: scale))
         let scaledSize = CGSize(width: orientedSize.width * scale,
                                 height: orientedSize.height * scale)
+        // CADRAGE APRÈS L'ÉCHELLE, et l'ordre n'est pas indifférent : glissé
+        // avant, le décalage serait multiplié par `scale` — jusqu'à trois fois
+        // et demie de trop — et l'erreur resterait invisible sur un montage
+        // 16:9 vers 16:9, où l'échelle vaut 1.
+        let safe = CropGeometry.clamp(cropCenter,
+                                      orientedSize: orientedSize,
+                                      renderSize: renderSize,
+                                      cropToFill: cropToFill)
         result = result.concatenating(CGAffineTransform(
-            translationX: (renderSize.width - scaledSize.width) / 2,
-            y: (renderSize.height - scaledSize.height) / 2
+            translationX: renderSize.width / 2 - safe.x * scaledSize.width,
+            y: renderSize.height / 2 - safe.y * scaledSize.height
         ))
         return result
     }

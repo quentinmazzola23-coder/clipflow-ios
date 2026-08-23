@@ -76,6 +76,7 @@ final class MontageExportController {
     /// viseraient le même fichier de sortie.
     func start(plan: MontagePlan,
                sources: [Int: URL],
+               crops: [Int: CGPoint] = [:],
                musicURL: URL,
                overlays: [ResolvedOverlay] = [],
                outputFormat: MontageOutputFormat = .auto,
@@ -132,7 +133,7 @@ final class MontageExportController {
                     && factor >= MontageUpscaler.minimumUsefulFactor
 
                 let montage = try await MontageComposer.build(
-                    plan: plan, sources: sources, musicURL: musicURL,
+                    plan: plan, sources: sources, crops: crops, musicURL: musicURL,
                     // Les incrustations sont dessinées par la SECONDE passe,
                     // à la définition finale : les laisser ici les ferait
                     // agrandir avec l'image, donc flouter.
@@ -163,7 +164,12 @@ final class MontageExportController {
                 if twoPass {
                     let upscaleBase = composeBase + composeSpan
                     let upscaleSpan = 1 - upscaleBase
-                    let target = outputFormat.renderSize(sourceOriented: sourceOriented)
+                    // CIBLE PRISE SUR LA COMPOSITION, jamais recalculée : le
+                    // format qu'elle a réellement retenu est le seul qui
+                    // corresponde aux images qu'elle a produites.
+                    let target = montage.outputSize == .zero
+                        ? outputFormat.renderSize(sourceOriented: sourceOriented)
+                        : montage.outputSize
                     let upscaled = try await MontageUpscaler.upscale(
                         source: fileURL, to: target, overlays: overlays,
                         frameRate: 60

@@ -165,6 +165,13 @@ struct ReviewView: View {
         if currentPassageID == passage.persistentModelID { stopPlayAll() }
         // MISE EN SURSIS, comme au dérushage : le fichier de plage reste en
         // place le temps qu'un « Annuler » puisse encore le rappeler.
+        // JAMAIS PENDANT UN EXPORT DE MONTAGE : il lit en ce moment la plage
+        // cachée de ce clip, et l'effacer sous lui ferait échouer la
+        // composition après plusieurs minutes de rendu.
+        if let reason = MediaAvailabilityService.blockingReason() {
+            blockedMessage = reason
+            return
+        }
         passage.isPendingDeletion = true
         try? modelContext.save()
         undo.schedule(label: "Clip supprimé") {

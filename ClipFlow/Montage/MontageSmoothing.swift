@@ -45,10 +45,39 @@ struct MontageSmoothingRequest: Sendable {
     var filename: String
 }
 
+/// Retient la plus haute progression déjà annoncée.
+///
+/// Une classe, et non une variable capturée : le rapporteur est `@Sendable` et
+/// traverse les files du pipeline de rendu.
+private final class ProgressHighWater: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Double = 0
+
+    func advance(to candidate: Double) -> Double {
+        lock.lock(); defer { lock.unlock() }
+        value = max(value, min(1, candidate))
+        return value
+    }
+}
+
 enum MontageSmoothing {
 
     /// Cadence de sortie du montage. Le lissage n'a de sens qu'en la visant.
     static let targetFPS = 60
+
+    /// Longueur maximale lissée pour un clip, en secondes.
+    ///
+    /// LE LISSAGE PORTE SUR UNE FENÊTRE, PAS SUR TOUTE LA PLAGE CACHÉE. En mode
+    /// « jusqu'à la fin du rush », cette plage va du point d'entrée jusqu'au
+    /// bout du rush : sur un POV de trois minutes, la phase 0 rendait dix mille
+    /// images au flux optique et déposait plus d'un gigaoctet, pour un clip
+    /// dont le montage n'utilise qu'une seconde. L'export paraissait figé.
+    ///
+    /// Quatre secondes couvrent très largement le plus long créneau qu'une
+    /// grille rythmique produise, tout en bornant le coût. Un créneau qui
+    /// dépasserait cette fenêtre ne serait simplement pas servi par le clip —
+    /// le planificateur sait déjà écarter un clip qui n'a pas assez de matière.
+    static let maxSmoothedSpan: Double = 4.0
 
     /// Ce clip mérite-t-il un lissage ?
     ///
@@ -84,6 +113,17 @@ enum MontageSmoothing {
         let total = Double(requests.count)
         var produced: [Int: String] = [:]
 
+        // PROGRESSION QUI NE RECULE JAMAIS.
+        //
+        // Quand le pipeline mesure des images aberrantes, il refait sa passe
+        // depuis le début avec le même rapporteur : la fraction repartait de
+        // zéro et la barre d'export DIMINUAIT en cours de route, sur un écran
+        // où ce chiffre est le seul retour disponible.
+        let highWater = ProgressHighWater()
+        let report: @Sendable (Double) -> Void = { value in
+            onProgress(highWater.advance(to: value))
+        }
+
         for (index, request) in requests.enumerated() {
             if Task.isCancelled { return produced }
             let base = Double(index) / total
@@ -106,10 +146,43 @@ enum MontageSmoothing {
                 forceFastEngine: false
             )
 
+            // DÉJÀ RENDU : on ne le refait pas.
+            //
+            // Les requêtes vivent aussi longtemps que le plan, et un second
+            // export dans la même visite — relance après annulation, ajout
+            // d'une incrustation, nouvelle tentative après échec — repassait
+            // par ici avec les mêmes noms de fichier. Chaque export refaisait
+            // donc plusieurs minutes de flux optique pour réécrire des
+            // fichiers identiques, alors que le contrat annoncé est « rendu
+            // une fois, réutilisé ensuite ».
+            let destination = StorageManager.url(
+                forCachedRangeRelativePath: request.filename)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                produced[request.clipID] = request.filename
+                report(Double(index + 1) / total)
+                continue
+            }
+
             guard let result = try? await VideoRenderPipeline.render(job: job, onProgress: { value in
-                onProgress(base + value / total)
+                report(base + value / total)
             }) else {
-                onProgress(Double(index + 1) / total)
+                report(Double(index + 1) / total)
+                continue
+            }
+
+            // FLUX OPTIQUE REJETÉ : le rendu ne vaut rien ici.
+            //
+            // Le pipeline a mesuré des images aberrantes et refait sa passe
+            // sans interpolation. Ce qu'il rend alors est, image pour image,
+            // la duplication que le montage fait déjà gratuitement depuis la
+            // plage cachée — sans aucun gain de fluidité, mais avec une
+            // génération d'encodage de plus devant une copie sans réencodage.
+            // Le garder aurait été le pire des deux : même saccade, moins de
+            // qualité, et plus jamais de nouvelle tentative puisque la présence
+            // du fichier suffit à désactiver le lissage de ce clip.
+            guard !result.opticalFlowRejected else {
+                try? FileManager.default.removeItem(at: result.outputURL)
+                report(Double(index + 1) / total)
                 continue
             }
 
@@ -117,9 +190,6 @@ enum MontageSmoothing {
             // lancement : le fichier lissé doit rejoindre les plages cachées
             // pour survivre à un redémarrage — c'est un cache durable, rendu
             // une fois et réutilisé à chaque export suivant.
-            let destination = StorageManager.url(
-                forCachedRangeRelativePath: request.filename)
-            try? FileManager.default.removeItem(at: destination)
             do {
                 try FileManager.default.moveItem(at: result.outputURL, to: destination)
                 StorageManager.excludeFromBackup(destination)
@@ -127,9 +197,9 @@ enum MontageSmoothing {
             } catch {
                 try? FileManager.default.removeItem(at: result.outputURL)
             }
-            onProgress(Double(index + 1) / total)
+            report(Double(index + 1) / total)
         }
-        onProgress(1)
+        report(1)
         return produced
     }
 

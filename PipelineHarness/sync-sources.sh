@@ -21,6 +21,7 @@ SOURCES=(
   "ClipFlow/Montage/BeatAnalyzer.swift"
   "ClipFlow/Montage/MontagePlanner.swift"
   "ClipFlow/Core/TimeMath.swift"
+  "ClipFlow/Montage/CropGeometry.swift"
   "ClipFlow/Interpolation/FrameInterpolationEngine.swift"
   "ClipFlow/Interpolation/PassthroughRetimeEngine.swift"
   "ClipFlow/Interpolation/VideoToolboxFrameInterpolationEngine.swift"

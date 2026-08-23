@@ -303,6 +303,22 @@ final class Rush {
         return rotated ? CGSize(width: height, height: width)
                        : CGSize(width: width, height: height)
     }
+    /// CADRAGE PAR DÉFAUT de ce rush, en fractions de l'image orientée.
+    ///
+    /// Sert quand le format de sortie du montage ne correspond pas à
+    /// l'orientation du rush : voir `CropGeometry`. C'est la valeur qu'hérite
+    /// tout clip validé ensuite — on cadre une fois pour un rush, pas cent
+    /// cinquante fois pour ses clips. 0,5/0,5 = le centre, comportement
+    /// d'origine.
+    var cropCenterX: Double = 0.5
+    var cropCenterY: Double = 0.5
+
+    /// Accès en un seul point, pour ne pas trimballer deux Double partout.
+    var cropCenter: CGPoint {
+        get { CGPoint(x: cropCenterX, y: cropCenterY) }
+        set { cropCenterX = newValue.x; cropCenterY = newValue.y }
+    }
+
     /// Colorimétrie : "sdr", "hlg", "pq", "appleLog", "dolbyVision", "inconnue".
     var colorimetry: String = "inconnue"
     var is10Bit: Bool = false
@@ -395,6 +411,21 @@ final class Passage {
     /// meme montage. Le fichier contient exactement le clip fini, demarrant a
     /// zero, a sa duree finale.
     var smoothedRangeRelativePath: String?
+
+    /// CADRAGE DE CE CLIP, figé à la validation depuis celui du rush.
+    ///
+    /// Figé, et non relu du rush à l'export, pour la même raison que
+    /// `colorimetry` l'est : le rush peut être recadré plus tard pour les
+    /// clips suivants, ou disparaître entièrement. Un clip déjà validé ne doit
+    /// pas changer de cadrage dans le dos de qui l'a validé.
+    var cropCenterX: Double = 0.5
+    var cropCenterY: Double = 0.5
+
+    /// Accès en un seul point, pour ne pas trimballer deux Double partout.
+    var cropCenter: CGPoint {
+        get { CGPoint(x: cropCenterX, y: cropCenterY) }
+        set { cropCenterX = newValue.x; cropCenterY = newValue.y }
+    }
 
     var cachedRangeOffsetValue: Int64 = 0
     var cachedRangeOffsetTimescale: Int32 = 600

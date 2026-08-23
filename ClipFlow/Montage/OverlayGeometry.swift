@@ -22,6 +22,30 @@ import UIKit
 
 enum OverlayGeometry {
 
+    /// Plus grand cadre du rapport voulu tenant dans l'espace, CENTRÉ.
+    ///
+    /// C'est la règle qui dit où se trouve réellement l'image dans une vue qui
+    /// la contient en boîte aux lettres — indispensable dès qu'un geste doit
+    /// être converti en fraction d'image, puisque la vue est plus grande que
+    /// l'image et que diviser par la taille de la vue donnerait un gain faux.
+    ///
+    /// Elle vivait en deux exemplaires (aperçu d'incrustations, éditeur
+    /// d'incrustations). Le recadrage déplaçable en aurait fait un troisième :
+    /// c'est exactement le défaut que l'en-tête de ce fichier raconte, un
+    /// élément posé par une formule et déplacé par une autre.
+    static func fittedRect(in available: CGSize, ratio: CGFloat) -> CGRect {
+        guard available.width > 0, available.height > 0, ratio > 0 else {
+            return CGRect(origin: .zero, size: available)
+        }
+        var size = CGSize(width: available.width, height: available.width / ratio)
+        if size.height > available.height {
+            size = CGSize(width: available.height * ratio, height: available.height)
+        }
+        return CGRect(x: (available.width - size.width) / 2,
+                      y: (available.height - size.height) / 2,
+                      width: size.width, height: size.height)
+    }
+
     /// Largeur RÉELLEMENT occupée, en fraction de la largeur de l'image.
     ///
     /// Pour une image, c'est la valeur réglée au curseur. Pour un texte, NON :

@@ -36,7 +36,7 @@ struct OverlayPreviewLayer: View {
             // Le lecteur affiche la vidéo en PLEINE VISIBILITÉ dans son cadre :
             // l'image occupe une sous-partie centrée. Poser les incrustations
             // sur tout le cadre les décalerait de la hauteur des bandes noires.
-            let videoRect = fittedRect(in: geometry.size, ratio: videoRatio)
+            let videoRect = OverlayGeometry.fittedRect(in: geometry.size, ratio: videoRatio)
 
             ZStack(alignment: .topLeading) {
                 ForEach(visibleOverlays(), id: \.stackOrder) { overlay in
@@ -114,17 +114,4 @@ struct OverlayPreviewLayer: View {
         return image
     }
 
-    /// Plus grand cadre du rapport voulu tenant dans l'espace, centré.
-    private func fittedRect(in available: CGSize, ratio: CGFloat) -> CGRect {
-        guard available.width > 0, available.height > 0, ratio > 0 else {
-            return CGRect(origin: .zero, size: available)
-        }
-        var size = CGSize(width: available.width, height: available.width / ratio)
-        if size.height > available.height {
-            size = CGSize(width: available.height * ratio, height: available.height)
-        }
-        return CGRect(x: (available.width - size.width) / 2,
-                      y: (available.height - size.height) / 2,
-                      width: size.width, height: size.height)
-    }
 }

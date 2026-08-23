@@ -50,6 +50,12 @@ struct ProjectEditorView: View {
     /// Passage validé en cours d'ÉDITION (tap sur un clip vert) : Rejeter
     /// devient « Suppr. clip », Valider met à jour la position.
     @State private var editingPassageID: PersistentIdentifier?
+    /// Cadrage suivi PENDANT le glissé, avant enregistrement.
+    ///
+    /// Purement transitoire : effacé au relâchement et au changement de rush.
+    /// Le garder au-delà le ferait fuir d'un rush au suivant pendant un
+    /// défilement, et on cadrerait un rush qu'on n'a jamais touché.
+    @State private var liveCropCenter: CGPoint?
     /// Stats développeur (menu ⋯).
     @AppStorage("devStatsEnabled") private var devStatsEnabled = false
 
@@ -125,8 +131,13 @@ struct ProjectEditorView: View {
 
     /// Charge les moments déjà calculés (cache disque) sans rien analyser.
     private func loadCachedPeaks() {
-        let spacing = fixedSourceDuration.seconds
         for rush in project.orderedRushes {
+            // ESPACEMENT PROPRE À CHAQUE RUSH : c'est celui avec lequel son
+            // analyse a été enregistrée. Un espacement unique, pris sur le rush
+            // sous la tête de lecture, ne correspondait qu'aux rushes de même
+            // cadence — les autres voyaient leur cache rejeté à chaque
+            // ouverture, et leurs repères ne revenaient jamais.
+            let spacing = sourceDuration(for: rush).seconds
             let key = motionKey(for: rush)
             guard motionPeaks[key] == nil,
                   let cached = MotionPeakStore.peaks(key: key, spacing: spacing) else { continue }
@@ -149,7 +160,7 @@ struct ProjectEditorView: View {
         guard analyzingRushKey == nil else { return }
 
         let url = StorageManager.url(forSourceRelativePath: path)
-        let spacing = fixedSourceDuration.seconds
+        let spacing = sourceDuration(for: rush).seconds
         analyzingRushKey = key
         analysisTask = Task {
             defer { analyzingRushKey = nil }
@@ -275,16 +286,22 @@ struct ProjectEditorView: View {
                                 sourceFrameRate: rush?.nominalFrameRate ?? 0)
     }
 
-    /// Durée SOURCE fixe de la sélection = durée finale × vitesse EFFECTIVE.
+    /// Durée SOURCE de la sélection = durée finale × vitesse EFFECTIVE.
     ///
     /// Sur un rush 30 i/s la vitesse retombe à 1×, donc la sélection couvre
     /// toute la durée finale demandée : un clip de 1,5 s prélève 1,5 s de rush
     /// au lieu de 0,75 s. La durée du clip produit ne change pas — seule la
     /// portion de rush consommée change.
-    private var fixedSourceDuration: CMTime {
+    ///
+    /// ELLE SE CALCULE SUR LE RUSH VISÉ, jamais sur celui qui se trouve sous la
+    /// tête de lecture. Les deux diffèrent dès qu'on tape un rush éloigné dans
+    /// une timeline dézoomée : la sélection était alors dimensionnée pour la
+    /// cadence d'un rush et posée dans un autre, et la validation figeait un
+    /// clip de moitié ou du double de la durée demandée — sans rien signaler.
+    private func sourceDuration(for rush: Rush?) -> CMTime {
         TimeMath.sourceDuration(
             final: project.finalDuration,
-            speed: speed(for: currentRush)
+            speed: speed(for: rush)
         )
     }
 
@@ -422,8 +439,12 @@ struct ProjectEditorView: View {
         .sheet(isPresented: $showCustomDuration) {
             CustomDurationSheet(
                 initial: project.finalDuration,
-                speed: RationalSpeed(numerator: project.speedNumerator,
-                                     denominator: project.speedDenominator)
+                // VITESSE EFFECTIVE du rush affiché, pas celle du projet : sur
+                // une source à 30 i/s le ralenti ne s'applique pas, et la
+                // feuille annonçait une longueur prélevée deux fois trop
+                // courte. On validait une durée en croyant ses rushes assez
+                // longs, puis chaque tap échouait sur « rush trop court ».
+                speed: speed(for: currentRush)
             ) { duration in
                 // Choisir une durée exacte, c'est choisir une durée FIXE :
                 // le mode « fin du rush » ne peut pas rester actif à côté.
@@ -469,6 +490,16 @@ struct ProjectEditorView: View {
             // Réglages globaux appliqués à l'ouverture (maintien entre projets).
             AppSettings.apply(to: project)
             rebuildSegments()
+            // AUSSI À L'OUVERTURE, pas seulement à la fin d'une importation.
+            //
+            // L'importation survit à la fermeture de cet écran : revenir à la
+            // liste des projets pendant qu'elle tourne faisait passer son jeton
+            // d'achèvement dans le vide. Le projet restait alors en mode
+            // automatique, et le format du fichier final dépendait de quel clip
+            // la musique avait mis en tête — c'est-à-dire du hasard. La
+            // proposition est déjà verrouillée par `didAskOutputFormat` : la
+            // rejouer ici ne peut pas la poser deux fois.
+            proposeOutputFormatIfUseful()
             RenderQueueController.shared.configure(container: modelContext.container)
             playback.lightPreview = project.previewLight
             playback.muted = previewMuted
@@ -549,9 +580,77 @@ struct ProjectEditorView: View {
                 .padding(.trailing, 8)
             }
         }
+        .overlay {
+            // EN SURIMPRESSION, jamais dans le VStack : une ligne de plus
+            // raboterait la visionneuse et ferait remonter la barre de
+            // commandes de sous le pouce.
+            if let rush = currentRush, cropIsAdjustable(rush) {
+                CropFrameOverlay(
+                    orientedSize: rush.orientedSize,
+                    renderSize: cropRenderSize,
+                    cropToFill: project.cropToFillOutput,
+                    center: liveCropCenter ?? cropCenter(for: rush),
+                    onMove: { liveCropCenter = $0 },
+                    onCommit: { commitCropCenter($0, rush: rush) }
+                )
+            }
+        }
         .onChange(of: currentRushIndex) { _, _ in
             playback.load(rush: currentRush)
+            liveCropCenter = nil
         }
+    }
+
+    // MARK: - Cadrage du montage
+
+    /// Cadre de rendu du montage, tel que l'export le calculera.
+    ///
+    /// Le mode automatique est tranché sur le PREMIER rush — la même règle que
+    /// la feuille de format montre à l'importation. L'écran de montage, lui,
+    /// tranche sur le premier clip PLACÉ, qu'aucun plan ne permet de connaître
+    /// ici : en automatique avec des orientations mêlées, les deux peuvent
+    /// différer. C'est précisément le cas où la feuille de format s'ouvre pour
+    /// faire choisir, ce qui supprime l'automatique et l'écart avec lui.
+    private var cropRenderSize: CGSize {
+        project.outputFormat.renderSize(
+            sourceOriented: project.orderedRushes.first?.orientedSize ?? .zero
+        )
+    }
+
+    /// Y a-t-il quelque chose à cadrer pour ce rush ?
+    private func cropIsAdjustable(_ rush: Rush) -> Bool {
+        CropGeometry.isAdjustable(orientedSize: rush.orientedSize,
+                                  renderSize: cropRenderSize,
+                                  cropToFill: project.cropToFillOutput)
+    }
+
+    /// Cadrage à AFFICHER : celui du clip en cours d'édition s'il y en a un,
+    /// celui du rush sinon.
+    private func cropCenter(for rush: Rush) -> CGPoint {
+        if let id = editingPassageID,
+           let passage = modelContext.model(for: id) as? Passage {
+            return passage.cropCenter
+        }
+        return rush.cropCenter
+    }
+
+    /// Enregistre le cadrage.
+    ///
+    /// EN COURS D'ÉDITION D'UN CLIP, les deux sont écrits : le clip, parce
+    /// qu'on cadrait celui-là, et le rush, pour que les clips suivants partent
+    /// du même cadrage. Sans le second, on recadrerait à la main chacun des
+    /// cent cinquante clips d'un même rush.
+    ///
+    /// Les clips DÉJÀ validés ne bougent pas : leur cadrage leur appartient,
+    /// comme leur colorimétrie.
+    private func commitCropCenter(_ center: CGPoint, rush: Rush) {
+        liveCropCenter = nil
+        rush.cropCenter = center
+        if let id = editingPassageID,
+           let passage = modelContext.model(for: id) as? Passage {
+            passage.cropCenter = center
+        }
+        touch()
     }
 
     private var statusBar: some View {
@@ -975,10 +1074,30 @@ struct ProjectEditorView: View {
     /// Durée finale réelle d'une plage sélectionnée, telle qu'elle sera figée
     /// dans le passage à la validation.
     private func clipDurationLabel(for range: CMTimeRange) -> String {
-        TimeMath.finalDuration(
-            source: range.duration,
-            speed: speed(for: currentRush)
-        ).label
+        // LA VITESSE AFFICHÉE DOIT ÊTRE CELLE QUI SERA APPLIQUÉE, sans quoi
+        // l'écran annonce une durée que la validation ne produira pas.
+        //
+        // En édition, c'est la vitesse DÉJÀ FIGÉE sur le clip que
+        // `validateSelection` réutilise : la recalculer depuis le rush
+        // affichait la moitié — ou le double — de ce qui allait être écrit sur
+        // un clip validé avant le plafond de cadence.
+        //
+        // Hors édition, c'est le rush DE LA SÉLECTION, pas celui qui se trouve
+        // sous la tête de lecture : les deux diffèrent dès qu'on tape un rush
+        // éloigné dans une timeline dézoomée.
+        let applied: RationalSpeed
+        if let id = editingPassageID,
+           let passage = modelContext.model(for: id) as? Passage {
+            applied = RationalSpeed(numerator: passage.speedNumerator,
+                                    denominator: passage.speedDenominator)
+        } else {
+            let rushes = project.orderedRushes
+            let rush = selectionRushIndex.flatMap { index -> Rush? in
+                index >= 0 && index < rushes.count ? rushes[index] : nil
+            } ?? currentRush
+            applied = speed(for: rush)
+        }
+        return TimeMath.finalDuration(source: range.duration, speed: applied).label
     }
 
     // MARK: - Actions timeline
@@ -1201,7 +1320,7 @@ struct ProjectEditorView: View {
             } else {
                 range = try SelectionEngine.makeSelection(
                     touchTime: local,
-                    sourceDuration: fixedSourceDuration,
+                    sourceDuration: sourceDuration(for: rush),
                     rushDuration: rush.duration,
                     anchorCenter: project.touchAnchorIsCenter
                 )
@@ -1222,6 +1341,16 @@ struct ProjectEditorView: View {
     private func deleteEditingPassage() {
         guard let id = editingPassageID,
               let passage = modelContext.model(for: id) as? Passage else { return }
+        // JAMAIS PENDANT UN EXPORT DE MONTAGE. L'export survit à la fermeture
+        // de cet écran, et il lit en ce moment même la plage cachée — voire le
+        // fichier lissé — de ce clip. Les effacer sous lui fait échouer la
+        // composition après plusieurs minutes de rendu, sur un message qui
+        // accuse l'app d'un défaut alors que c'est le geste qui a retiré le
+        // fichier.
+        if let reason = MediaAvailabilityService.blockingReason() {
+            errorMessage = reason
+            return
+        }
         playback.pause()
         passage.isPendingDeletion = true
         touch()
@@ -1363,6 +1492,9 @@ struct ProjectEditorView: View {
         passage.colorimetry = rush.colorimetry
         passage.is10Bit = rush.is10Bit
         passage.sourceNominalFrameRate = rush.nominalFrameRate
+        // CADRAGE HÉRITÉ du rush, puis figé comme le reste : on cadre une fois
+        // pour un rush, et chaque clip en garde une copie qui lui appartient.
+        passage.cropCenter = rush.cropCenter
         passage.rush = rush
         passage.project = project
         modelContext.insert(passage)
