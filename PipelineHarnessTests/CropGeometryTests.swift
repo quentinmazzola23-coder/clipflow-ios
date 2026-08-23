@@ -115,7 +115,7 @@ struct CropGeometryTests {
                                          cropToFill: true)
         #expect(limits.x == 0.5...0.5)
         #expect(limits.y == 0.5...0.5)
-        let safe = CropGeometry.clamp(CGPoint(x: .nan, y: .infinity),
+        let safe = CropGeometry.clamp(CGPoint(x: CGFloat.nan, y: CGFloat.infinity),
                                       orientedSize: wide,
                                       renderSize: portraitFrame,
                                       cropToFill: true)
