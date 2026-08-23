@@ -381,6 +381,21 @@ final class Passage {
     var cachedRangeRelativePath: String?
     /// Temps du RUSH correspondant au zéro du fichier de plage caché
     /// (le start du passage reste toujours exprimé dans la base du rush).
+    /// Version LISSEE de ce clip : 60 i/s obtenus par flux optique, rendue une
+    /// fois et reutilisee par le montage.
+    ///
+    /// Ne concerne que les sources a cadence basse (30 i/s ou moins), qui ne
+    /// sont plus ralenties (RationalSpeed.effective) et n'ont donc qu'une image
+    /// sur deux a fabriquer pour atteindre 60 i/s — le regime facile de
+    /// l'interpolation.
+    ///
+    /// Le montage assemble des plages cachees et les etire sans jamais
+    /// interpoler : sans ce fichier, un clip 30 i/s y serait DUPLIQUE vers
+    /// 60 i/s, et son mouvement trancherait avec celui des clips 60 i/s du
+    /// meme montage. Le fichier contient exactement le clip fini, demarrant a
+    /// zero, a sa duree finale.
+    var smoothedRangeRelativePath: String?
+
     var cachedRangeOffsetValue: Int64 = 0
     var cachedRangeOffsetTimescale: Int32 = 600
     var exportStateRaw: Int = ExportState.notExported.rawValue

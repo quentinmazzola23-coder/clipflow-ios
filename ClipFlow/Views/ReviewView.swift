@@ -173,6 +173,7 @@ struct ReviewView: View {
                     at: StorageManager.url(forCachedRangeRelativePath: cached)
                 )
             }
+            MontageSmoothing.discard(passage)
             modelContext.delete(passage)
             try? modelContext.save()
         } restore: {

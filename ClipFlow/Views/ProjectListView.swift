@@ -271,6 +271,10 @@ struct ProjectListView: View {
             if let path = passage.cachedRangeRelativePath {
                 try? FileManager.default.removeItem(at: StorageManager.url(forCachedRangeRelativePath: path))
             }
+            // Le fichier lissé vit dans le MÊME dossier que les plages cachées :
+            // sans cette ligne il y resterait après la suppression du projet,
+            // sans plus aucune référence pour le retrouver.
+            MontageSmoothing.discard(passage)
         }
         // Les IMAGES D'INCRUSTATION suivent le projet : contrairement à la
         // musique, elles n'ont aucun sens ailleurs. Sans cette boucle, la

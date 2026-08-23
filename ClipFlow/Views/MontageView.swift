@@ -37,6 +37,12 @@ struct MontageView: View {
     @State private var plan: MontagePlan?
     /// URL du fichier de chaque clip placé (id = index du passage).
     @State private var clipSources: [Int: URL] = [:]
+    /// Clips qui gagneraient à être lissés à 60 i/s, par identifiant de clip.
+    ///
+    /// Rempli à la construction du plan parce que la piste vidéo y est DÉJÀ
+    /// chargée : la refaire à l'export coûterait un aller-retour disque par
+    /// clip juste pour relire une durée.
+    @State private var smoothingRequests: [Int: MontageSmoothingRequest] = [:]
     @State private var windowStart: Double = 0
     @State private var showFileImporter = false
     @State private var showLibrary = false
@@ -981,17 +987,35 @@ struct MontageView: View {
 
         var candidates: [MontageClipCandidate] = []
         var sources: [Int: URL] = [:]
+        var smoothing: [Int: MontageSmoothingRequest] = [:]
 
         for (index, passage) in project.orderedPassages.enumerated() {
-            // Plage cachée d'abord (autonome), copie source sinon.
+            // VERSION LISSÉE D'ABORD si elle existe, plage cachée ensuite
+            // (autonome), copie source en dernier recours.
+            //
+            // Le fichier lissé est un rendu à 60 i/s de la plage cachée, MÊME
+            // BASE DE TEMPS : son point d'entrée se calcule exactement pareil.
             let url: URL
             let startInFile: CMTime
-            if let cachedPath = passage.cachedRangeRelativePath {
+            // Vrai seulement pour la plage cachée nue — la seule qu'il reste
+            // quelque chose à lisser.
+            let mayNeedSmoothing: Bool
+            if let smoothedPath = passage.smoothedRangeRelativePath,
+               FileManager.default.fileExists(
+                   atPath: StorageManager.url(forCachedRangeRelativePath: smoothedPath).path) {
+                url = StorageManager.url(forCachedRangeRelativePath: smoothedPath)
+                startInFile = CMTimeSubtract(passage.start, passage.cachedRangeOffset)
+                mayNeedSmoothing = false
+            } else if let cachedPath = passage.cachedRangeRelativePath {
                 url = StorageManager.url(forCachedRangeRelativePath: cachedPath)
                 startInFile = CMTimeSubtract(passage.start, passage.cachedRangeOffset)
+                mayNeedSmoothing = true
             } else if let sourcePath = passage.rush?.localSourceRelativePath {
+                // PAS DE LISSAGE SANS PLAGE CACHÉE : il faudrait rendre le rush
+                // entier pour en tirer deux secondes.
                 url = StorageManager.url(forSourceRelativePath: sourcePath)
                 startInFile = passage.start
+                mayNeedSmoothing = false
             } else {
                 continue // ni cache ni source : rien à monter pour ce passage
             }
@@ -1011,6 +1035,35 @@ struct MontageView: View {
                                      denominator: passage.speedDenominator)
             ))
             sources[index] = url
+
+            // LISSAGE : sur toute la plage cachée, pas sur la durée du clip
+            // dans CE plan. Changer de densité ou de fenêtre redistribue les
+            // durées ; un fichier taillé pour un plan serait à refaire au
+            // premier réglage, alors que la plage cachée, elle, ne bouge pas.
+            //
+            // Départ à zéro EXIGÉ : une piste qui commencerait ailleurs
+            // décalerait le fichier lissé par rapport au point d'entrée du
+            // plan, calculé sur la plage cachée.
+            if mayNeedSmoothing, trackRange.start == .zero,
+               MontageSmoothing.needsSmoothing(
+                   sourceFrameRate: passage.sourceNominalFrameRate,
+                   speedNumerator: passage.speedNumerator,
+                   speedDenominator: passage.speedDenominator,
+                   colorimetry: passage.colorimetry) {
+                // ARRONDI PAR EXCÈS au centième. Un fichier lissé plus COURT que
+                // la plage cachée priverait le montage des dernières images que
+                // le plan croit disponibles ; le dépassement inverse, lui, tient
+                // dans la tolérance de fin de rush du planificateur d'images.
+                let centiseconds = max(1, Int((trackRange.duration.seconds * 100).rounded(.up)))
+                smoothing[index] = MontageSmoothingRequest(
+                    clipID: index,
+                    sourceURL: url,
+                    sourceRange: trackRange,
+                    finalDuration: ExactDuration(centiseconds: centiseconds),
+                    colorimetry: passage.colorimetry,
+                    filename: "smooth-" + UUID().uuidString + ".mov"
+                )
+            }
         }
 
         // Deux reconstructions peuvent être en vol : celle qui n'est plus la
@@ -1019,6 +1072,7 @@ struct MontageView: View {
         let slots = map.slots(from: start, density: cutDensity)
         plan = MontagePlanner.plan(slots: slots, clips: candidates, windowStart: start)
         clipSources = sources
+        smoothingRequests = smoothing
         // Le PREMIER placement peut changer de clip, donc d'orientation : la
         // vignette de pose et la taille de rendu mémorisée décriraient un
         // montage qui n'existe plus.
@@ -1181,6 +1235,19 @@ struct MontageView: View {
         guard let plan, let filename = project.musicFilename else { return }
         stopPreview()
         stopAudition()
+        // LISSAGE DEMANDÉ POUR LES SEULS CLIPS RÉELLEMENT PLACÉS, et une seule
+        // fois chacun : un clip repris à deux endroits du montage se rendrait
+        // sinon deux fois, pour le même fichier.
+        var requested = Set<Int>()
+        let smoothing = plan.placements.compactMap { placement -> MontageSmoothingRequest? in
+            guard requested.insert(placement.clipID).inserted else { return nil }
+            return smoothingRequests[placement.clipID]
+        }
+        // IDENTITÉS FIGÉES MAINTENANT, pas relues au retour. L'export survit à
+        // la fermeture de l'écran : supprimer un clip pendant qu'il tourne
+        // décalerait les index, et le fichier lissé d'un clip atterrirait sur
+        // un autre — un contenu faux, présenté comme valide.
+        let passageIDs = project.orderedPassages.map(\.persistentModelID)
         MontageExportController.shared.start(
             plan: plan,
             sources: clipSources,
@@ -1190,6 +1257,23 @@ struct MontageView: View {
             cropToFill: project.cropToFillOutput,
             upscale: project.upscaleOnExport,
             sourceOriented: firstPlacedRushSize,
+            smoothing: smoothing,
+            onSmoothed: { produced in
+                for (clipID, name) in produced {
+                    guard clipID >= 0, clipID < passageIDs.count,
+                          let passage = modelContext.model(
+                            for: passageIDs[clipID]) as? Passage,
+                          !passage.isDeleted else {
+                        // Clip disparu pendant l'export : plus personne pour
+                        // réclamer ce fichier, et rien ne le retrouverait.
+                        try? FileManager.default.removeItem(
+                            at: StorageManager.url(forCachedRangeRelativePath: name))
+                        continue
+                    }
+                    passage.smoothedRangeRelativePath = name
+                }
+                try? modelContext.save()
+            },
             outputFilename: "Montage — \(project.name).mov",
             albumName: project.albumPerProject ? project.name : nil,
             projectName: project.name

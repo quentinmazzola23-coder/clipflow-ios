@@ -1234,6 +1234,7 @@ struct ProjectEditorView: View {
                     at: StorageManager.url(forCachedRangeRelativePath: cached)
                 )
             }
+            MontageSmoothing.discard(passage)
             modelContext.delete(passage)
             try? modelContext.save()
         } restore: {
@@ -1399,6 +1400,9 @@ struct ProjectEditorView: View {
                 )
                 passage.cachedRangeRelativePath = nil
             }
+            // La version lissée décrivait l'ANCIENNE plage : elle serait
+            // reprise telle quelle par le montage, avec le mauvais contenu.
+            MontageSmoothing.discard(passage)
             touch()
             validateHaptic.notificationOccurred(.success)
             editingPassageID = nil
@@ -1778,6 +1782,7 @@ struct ProjectEditorView: View {
                        transform.isIdentity {
                         try? FileManager.default.removeItem(at: url)
                         passage.cachedRangeRelativePath = nil
+                        MontageSmoothing.discard(passage)
                         try? modelContext.save()
                     }
                 }
@@ -1786,6 +1791,10 @@ struct ProjectEditorView: View {
             let missing = passage.cachedRangeRelativePath.map {
                 !FileManager.default.fileExists(atPath: StorageManager.url(forCachedRangeRelativePath: $0).path)
             } ?? true
+            // Plage cachée disparue : la version lissée qui en dérivait n'a
+            // plus de référence pour être vérifiée, et sera de toute façon
+            // refaite après la remise en cache.
+            if missing { MontageSmoothing.discard(passage) }
             guard missing,
                   let rush = passage.rush,
                   rush.localSourceRelativePath != nil else { continue }

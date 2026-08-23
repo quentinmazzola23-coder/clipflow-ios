@@ -100,8 +100,14 @@ struct StorageView: View {
     private func forgetCachedRanges() {
         let descriptor = FetchDescriptor<Passage>()
         guard let passages = try? modelContext.fetch(descriptor) else { return }
-        for passage in passages where passage.cachedRangeRelativePath != nil {
+        for passage in passages {
+            guard passage.cachedRangeRelativePath != nil
+                    || passage.smoothedRangeRelativePath != nil else { continue }
             passage.cachedRangeRelativePath = nil
+            // Le fichier lissé était dans le dossier purgé lui aussi : le
+            // passage doit cesser de le réclamer, sinon le montage viserait un
+            // fichier absent au lieu de retomber sur la copie source.
+            passage.smoothedRangeRelativePath = nil
         }
         try? modelContext.save()
     }

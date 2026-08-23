@@ -65,6 +65,11 @@ final class MontageExportController {
 
     private var task: Task<Void, Never>?
 
+    /// Part de la barre de progression revenant au lissage des clips a cadence
+    /// basse. Sans ce partage, la barre atteindrait 100 % avant meme que la
+    /// composition ne commence.
+    private static let smoothingShare = 0.2
+
     private init() {}
 
     /// Lance l'export. Refuse si un export tourne déjà — deux sessions
@@ -77,6 +82,8 @@ final class MontageExportController {
                cropToFill: Bool = true,
                upscale: Bool = true,
                sourceOriented: CGSize = .zero,
+               smoothing: [MontageSmoothingRequest] = [],
+               onSmoothed: (([Int: String]) -> Void)? = nil,
                outputFilename: String,
                albumName: String?,
                projectName: String) {
@@ -88,6 +95,30 @@ final class MontageExportController {
 
         task = Task { [weak self] in
             do {
+                // PHASE 0 — LISSAGE des clips à cadence basse.
+                //
+                // Elle précède la composition parce qu'elle CHANGE les fichiers
+                // sources : le montage insère la version 60 i/s à la place de la
+                // plage cachée. Sa base de temps est identique — même début,
+                // même durée, seule la cadence monte — donc les points d'entrée
+                // du plan restent valables tels quels.
+                //
+                // Un clip qui n'a pas pu être lissé garde simplement sa plage
+                // d'origine : l'export continue.
+                var sources = sources
+                if !smoothing.isEmpty {
+                    let produced = await MontageSmoothing.prepare(smoothing) { value in
+                        Task { @MainActor in self?.progress = value * Self.smoothingShare }
+                    }
+                    for (clipID, filename) in produced {
+                        sources[clipID] = StorageManager.url(
+                            forCachedRangeRelativePath: filename)
+                    }
+                    // Mémorisation APRÈS coup, sur l'acteur principal : rendu
+                    // une fois, réutilisé à tous les exports suivants.
+                    if !produced.isEmpty { onSmoothed?(produced) }
+                }
+
                 // DEUX PASSES ou une seule ?
                 //
                 // Le suréchantillonnage ne vaut une seconde passe d'encodage
@@ -111,24 +142,35 @@ final class MontageExportController {
                     forExport: true
                 )
                 try Task.checkCancellation()
-                // La première passe occupe la première moitié de la barre
-                // quand il y en a deux : sans cela la progression atteindrait
-                // 100 % à mi-chemin et paraîtrait bloquée.
-                let firstPassShare = twoPass ? 0.5 : 1.0
+                // BARRE PARTAGÉE ENTRE LES PHASES RÉELLEMENT PRÉVUES.
+                //
+                // L'export compte jusqu'à trois étapes — lissage, composition,
+                // agrandissement — et chacune rapporte sa propre progression de
+                // 0 à 1. Sans ce partage, la barre repartirait de zéro à chaque
+                // étape, ou atteindrait 100 % avant la dernière.
+                let composeBase = smoothing.isEmpty ? 0 : Self.smoothingShare
+                let remaining = 1 - composeBase
+                let composeSpan = twoPass ? remaining / 2 : remaining
                 var fileURL = try await MontageComposer.export(
                     montage, outputFilename: outputFilename
                 ) { value in
-                    Task { @MainActor in self?.progress = value * firstPassShare }
+                    Task { @MainActor in
+                        self?.progress = composeBase + value * composeSpan
+                    }
                 }
                 try Task.checkCancellation()
 
                 if twoPass {
+                    let upscaleBase = composeBase + composeSpan
+                    let upscaleSpan = 1 - upscaleBase
                     let target = outputFormat.renderSize(sourceOriented: sourceOriented)
                     let upscaled = try await MontageUpscaler.upscale(
                         source: fileURL, to: target, overlays: overlays,
                         frameRate: 60
                     ) { value in
-                        Task { @MainActor in self?.progress = 0.5 + value * 0.5 }
+                        Task { @MainActor in
+                            self?.progress = upscaleBase + value * upscaleSpan
+                        }
                     }
                     // Le fichier natif a joué son rôle : il ne sert plus qu'à
                     // occuper de la place.
