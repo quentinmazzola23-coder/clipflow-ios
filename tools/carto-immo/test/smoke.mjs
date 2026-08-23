@@ -318,6 +318,74 @@ check('la photo aérienne peut être embarquée dans la page', () => {
   assert.ok(!h.includes('data.geopf.fr'), 'aucune requête sortante');
 });
 
+// ── Vérification et recalage ──────────────────────────────────────────────
+
+const carre = (lon, lat, d) => [[[[lon-d,lat-d],[lon+d,lat-d],[lon+d,lat+d],[lon-d,lat+d],[lon-d,lat-d]]]];
+
+check('la carte embarque le voisinage cadastral et les communes', () => {
+  const f = path.join(out, 'carte-recal.html');
+  writeMap([{ ...records[0], codeInsee: '32235' }], f, {
+    voisinage: [{ i: '322350000AB0009', g: carre(0.1567, 43.5231, 4e-4), c: [0.1567, 43.5231], s: 900 }],
+    communes: [{ n: 'Marciac', c: '32235', g: [[[0.14, 43.51], [0.18, 43.51], [0.18, 43.54], [0.14, 43.51]]] }],
+  });
+  const html = fs.readFileSync(f, 'utf8');
+  assert.match(html, /322350000AB0009/);
+  assert.match(html, /const VOISINAGE = \[\{/);
+  assert.match(html, /"n":"Marciac"/);
+});
+
+check('sans voisinage fourni, la carte reste valide', () => {
+  const f = path.join(out, 'carte-sans-voisinage.html');
+  writeMap(records, f);
+  assert.match(fs.readFileSync(f, 'utf8'), /const VOISINAGE = \[\];/);
+});
+
+check('la fiche porte de quoi contester le rapprochement', () => {
+  const f = path.join(out, 'carte-verif.html');
+  writeMap([{
+    ...records[0],
+    numeroDpe: '2332E0123456X', confianceAdresse: 118, ecartSecond: 23,
+    qualiteGeocodage: 'numero', distanceFlouM: 412,
+    motifsLocalisation: ['date du diagnostic', 'surface'],
+    dpeAlternatives: [{ numeroDpe: 'Y', adresse: '4 Route de Plaisance', latitude: 43.52, longitude: 0.16, note: 95, confiance: 'bonne', surfaceDpe: 176, distanceFlouM: 610 }],
+  }], f);
+  const html = fs.readFileSync(f, 'utf8');
+  assert.match(html, /2332E0123456X/, 'le numéro de DPE doit figurer');
+  assert.match(html, /Route de Plaisance/, 'les diagnostics écartés doivent rester consultables');
+  assert.match(html, /data-recaler=/, 'le bouton de recalage doit être posé');
+});
+
+check('un recalage en base déplace le bien et garde l\'automatique', () => {
+  const f = path.join(out, 'carte-recale.html');
+  writeMap([{
+    ...records[0], latitude: 43.6, longitude: 0.2,
+    recalage: { latitude: 43.6, longitude: 0.2, parcelle: 'AB9', source: 'parcelle' },
+    auto: { latitude: 43.5231, longitude: 0.1567, parcelle: 'AB1', adresse: 'A', niveauConfiance: 'bonne' },
+  }], f);
+  const html = fs.readFileSync(f, 'utf8');
+  assert.match(html, /"rc":\{/, 'le recalage doit être transmis');
+  assert.match(html, /"au":\{/, 'la position automatique doit rester disponible');
+});
+
+check('plusieurs photos donnent une galerie feuilletable', () => {
+  const f = path.join(out, 'carte-galerie.html');
+  writeMap([{ ...records[0], photo: 'https://h/590x330/a.jpg', photos: ['https://h/590x330/a.jpg', 'https://h/590x330/b.jpg'] }], f);
+  const html = fs.readFileSync(f, 'utf8');
+  assert.match(html, /"phs":\["https:\/\/h\/590x330\/a.jpg","https:\/\/h\/590x330\/b.jpg"\]/);
+  assert.match(html, /class="galerie"/);
+  assert.match(html, /data-pas="1"/);
+});
+
+check('la carte autonome n\'emporte aucune photo distante', () => {
+  const f = path.join(out, 'carte-autonome-photos.html');
+  writeMap([{ ...records[0], codeInsee: '32233', photo: 'https://h/a.jpg', photos: ['https://h/a.jpg'] }], f, {
+    basemap: { departements: [], communes: [], attribution: 'x' },
+  });
+  const html = fs.readFileSync(f, 'utf8');
+  assert.match(html, /"phs":\[\]/);
+  assert.ok(!html.includes('https://h/a.jpg'), 'aucune URL de photo ne doit rester');
+});
+
 check('la carte est autonome (Leaflet embarqué)', () => {
   const h = fs.readFileSync(mapFile, 'utf8');
   assert.ok(h.includes('49.0022'), 'les coordonnées sont injectées');

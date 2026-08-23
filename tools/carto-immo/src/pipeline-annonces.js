@@ -50,29 +50,38 @@ export async function collecterEtLocaliser(zones, cfg) {
 
   // ── Localisation ────────────────────────────────────────────────────────
   log.step('Localisation par le registre des DPE');
-  const localisees = await localiserToutes(uniques);
+  const { resultats: localisees, bilan } = await localiserToutes(uniques);
 
   // ── Marché et mise en forme ─────────────────────────────────────────────
   log.step('Repères de marché');
   const fiches = [];
-  for (const { annonce, localisation } of localisees) {
+  for (const { annonce, localisation, motif } of localisees) {
     const insee = localisation?.codeInsee ?? null;
     const rep = insee ? await reperes(insee, annonce.typeBien, cacheDir) : null;
     const marche = situer(annonce.prix, annonce.surface, rep);
-    fiches.push(normaliserAnnonce(annonce, localisation, marche));
+    const fiche = normaliserAnnonce(annonce, localisation, marche);
+    fiche.motifNonLocalisee = motif ?? null;
+    fiches.push(fiche);
   }
 
   // ── Parcelle cadastrale ─────────────────────────────────────────────────
   let contexte = { parcelles: [], batiments: [] };
+  let voisinage = [];
   if (cadastre) {
     log.step('Parcelles cadastrales');
     const r = await enrichirParcelles(fiches, cacheDir, { rayon: rayonContexteM });
     contexte = r.contexte;
-    log.ok(`${r.trouvees} parcelles tracées`);
+    voisinage = r.voisinage;
+    log.ok(`${r.trouvees} parcelles tracées · ${voisinage.length} parcelles voisines référencées`);
   }
 
   const localisation = fiches.filter((f) => f.localisationPrecise).length;
   log.ok(`${localisation}/${fiches.length} annonces à l'adresse exacte`);
 
-  return { fiches, contexte, zones: zonesVues, total: uniques.length, localisees: localisation };
+  bilan.zones = zonesVues.map((z) => z.nom);
+  bilan.le = new Date().toISOString();
+  return {
+    fiches, contexte, voisinage, bilan,
+    zones: zonesVues, total: uniques.length, localisees: localisation,
+  };
 }

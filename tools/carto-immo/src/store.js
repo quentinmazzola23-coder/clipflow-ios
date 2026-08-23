@@ -252,10 +252,73 @@ export function enregistrerAnalyse(store, fiche, annonce) {
   return { bien, fusionAvec: null };
 }
 
-/** Champs issus de l'analyse, à écraser ; l'historique du bien est préservé. */
+/**
+ * Champs issus de l'analyse, à écraser ; l'historique du bien est préservé.
+ *
+ * `recalage` en fait partie : c'est une correction faite à la main, elle ne
+ * doit jamais être effacée par une nouvelle passe automatique.
+ */
 function fusionnable(fiche) {
-  const { annonces, premiereApparition, republications, suiviPrix, statut, cle, ...reste } = fiche;
+  const {
+    annonces, premiereApparition, republications, suiviPrix, statut, cle, recalage, ...reste
+  } = fiche;
   return reste;
+}
+
+/**
+ * Applique des recalages faits depuis la carte.
+ *
+ * Une correction est indexée par l'identifiant de l'annonce — c'est ce que la
+ * carte connaît — et se pose sur le bien qui la porte. Une valeur nulle annule
+ * le recalage et rend le bien à sa position automatique.
+ *
+ * @param {object} store
+ * @param {Record<string, object|null>} corrections
+ * @returns {{appliques:number, annules:number, inconnus:string[]}}
+ */
+export function appliquerRecalages(store, corrections) {
+  const parAnnonce = indexAnnonces(store);
+  const parCle = store.biens;
+  let appliques = 0;
+  let annules = 0;
+  const inconnus = [];
+
+  for (const [id, correction] of Object.entries(corrections ?? {})) {
+    const bien = parAnnonce.get(String(id)) ?? parCle[id] ?? null;
+    if (!bien) { inconnus.push(id); continue; }
+    if (!correction) {
+      if (bien.recalage) annules++;
+      delete bien.recalage;
+      continue;
+    }
+    bien.recalage = {
+      latitude: Number(correction.latitude),
+      longitude: Number(correction.longitude),
+      parcelle: correction.parcelle ?? null,
+      adresse: correction.adresse ?? null,
+      source: correction.source ?? 'manuel',
+      le: correction.le ?? new Date().toISOString(),
+    };
+    if (!Number.isFinite(bien.recalage.latitude) || !Number.isFinite(bien.recalage.longitude)) {
+      // Une parcelle sans point reste exploitable : son centre servira de point.
+      bien.recalage.latitude = null;
+      bien.recalage.longitude = null;
+      if (!bien.recalage.parcelle) { delete bien.recalage; inconnus.push(id); continue; }
+    }
+    appliques++;
+  }
+
+  return { appliques, annules, inconnus };
+}
+
+/** Recalages en base, indexés par identifiant d'annonce principal. */
+export function recalagesConnus(store) {
+  const out = {};
+  for (const bien of tousLesBiens(store)) {
+    if (!bien.recalage) continue;
+    for (const a of bien.annonces ?? []) out[String(a.id)] = bien.recalage;
+  }
+  return out;
 }
 
 /** Remet tous les biens en « connu » avant une nouvelle exécution. */
@@ -264,6 +327,49 @@ export function reinitialiserStatuts(store) {
     bien.statut = 'connu';
     bien.prixModifie = null;
   }
+}
+
+/**
+ * Retient le bilan de localisation d'une zone.
+ *
+ * Un bilan par zone, remplacé à chaque passage : deux analyses de Marciac ne
+ * doivent pas s'additionner, mais Marciac et Beaumarchés, si.
+ */
+export function enregistrerBilan(store, bilan) {
+  if (!bilan) return;
+  store.bilans ??= {};
+  for (const zone of bilan.zones?.length ? bilan.zones : ['—']) {
+    store.bilans[zone] = {
+      relevees: bilan.relevees, tentees: bilan.tentees, localisees: bilan.localisees,
+      motifs: bilan.motifs ?? {}, le: bilan.le ?? new Date().toISOString(),
+      // Une collecte portant sur plusieurs zones ne peut pas être ventilée :
+      // on l'inscrit une fois par zone en le disant.
+      partage: (bilan.zones?.length ?? 0) > 1,
+    };
+  }
+}
+
+/** Somme des bilans connus, pour l'afficher sur la carte. */
+export function resumerBilans(store) {
+  const zones = Object.entries(store.bilans ?? {});
+  if (!zones.length) return null;
+  // Une collecte multi-zones est inscrite à l'identique sous chacune : la
+  // compter une fois par zone tromperait sur le volume relevé.
+  const vus = new Set();
+  const total = { relevees: 0, tentees: 0, localisees: 0, motifs: {}, zones: [], le: null };
+  for (const [nom, b] of zones) {
+    total.zones.push({ nom, ...b });
+    if (!total.le || b.le > total.le) total.le = b.le;
+    const cle = b.partage ? `${b.le}|${b.relevees}` : nom;
+    if (vus.has(cle)) continue;
+    vus.add(cle);
+    total.relevees += b.relevees ?? 0;
+    total.tentees += b.tentees ?? 0;
+    total.localisees += b.localisees ?? 0;
+    for (const [m, n] of Object.entries(b.motifs ?? {})) total.motifs[m] = (total.motifs[m] ?? 0) + n;
+  }
+  total.zones.sort((a, b) => String(b.le).localeCompare(String(a.le)));
+  return total;
 }
 
 export function allRecords(store) {

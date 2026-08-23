@@ -35,7 +35,11 @@ export function tuileDe(lat, lon, z) {
  * @param {Record<number, number>} [opts.zooms] zoom → demi-largeur en tuiles
  * @returns {Promise<{tuiles: Record<string,string>, octets: number, zoomMax: number}>}
  */
-export async function tuilesAutour(points, { zooms = { 16: 0, 17: 1, 18: 1 }, cacheDir, delaiMs = 60 } = {}) {
+export async function tuilesAutour(
+  // Le niveau 19 pèse le plus lourd, et c'est le seul qui permette de
+  // reconnaître le bâti d'une photo d'annonce : il reste.
+  points, { zooms = { 16: 0, 17: 1, 18: 1, 19: 1 }, cacheDir, delaiMs = 60 } = {}
+) {
   // Une même tuile sert souvent plusieurs biens d'un même bourg.
   const voulues = new Set();
   for (const p of points) {

@@ -8,7 +8,7 @@
  *   node test/geoloc.mjs
  */
 import assert from 'node:assert/strict';
-import { noterDiagnostic } from '../src/geoloc.js';
+import { noterDiagnostic, qualiteGeocodage, niveauConfiance } from '../src/geoloc.js';
 import { dansAnneau, dansPolygone, aire, centroide, metres, distanceAuBord } from '../src/cadastre.js';
 
 let passed = 0;
@@ -102,6 +102,88 @@ check('une adresse sans numéro ni rue pèse moins', () => {
   // Le lieu-dit reste une adresse valable en campagne : la note ne chute pas,
   // c'est le niveau de confiance rendu par `localiser` qui en tient compte.
   assert.equal(vague.note, fine.note);
+});
+
+// ── Ce que le registre dit de son propre géocodage ────────────────────────
+
+check('une consommation en énergie finale est reconnue', () => {
+  // Les sites publient tantôt l'énergie primaire, tantôt la finale. Un
+  // diagnostic qui ne concorde que sur la finale doit tout de même être crédité.
+  const d = dpe({ conso_5_usages_par_m2_ep: 210, conso_5_usages_par_m2_ef: 143 });
+  const r = noterDiagnostic(annonce(), d);
+  assert.ok(r.motifs.includes('consommation'), r.motifs.join(', '));
+  assert.ok(r.note > noterDiagnostic(annonce(), dpe({ conso_5_usages_par_m2_ep: 210 })).note);
+});
+
+check('la finesse de l\'adresse se lit sur l\'adresse, pas ailleurs', () => {
+  assert.equal(qualiteGeocodage({ numero_voie_ban: '28', nom_rue_ban: 'Rue Morlas' }), 'numero');
+  assert.equal(qualiteGeocodage({ nom_rue_ban: 'Route de Plaisance' }), 'voie');
+  assert.equal(qualiteGeocodage({ adresse_ban: 'Lieu-dit Bourdette 32230 Marciac' }), 'inconnu');
+});
+
+check('le score BAN du registre ne juge pas la position', () => {
+  // Mesuré sur le secteur : le score médian vaut 0,46 pour des adresses
+  // exactes, et des lignes marquées « non géocodée » portent un numéro juste.
+  // S'en servir écarterait des biens parfaitement localisés.
+  const faible = dpe({ score_ban: 0.2, statut_geocodage: 'adresse non géocodée ban car aucune correspondance trouvée' });
+  assert.equal(noterDiagnostic(annonce(), faible).note, noterDiagnostic(annonce(), dpe()).note);
+  assert.equal(qualiteGeocodage(faible), 'numero');
+});
+
+check('un lieu-dit sans numéro ne perd pas de points', () => {
+  assert.equal(noterDiagnostic(annonce(), dpe({ numero_voie_ban: null, nom_rue_ban: null })).note,
+    noterDiagnostic(annonce(), dpe()).note);
+});
+
+check('« élevée » exige une adresse descendue au numéro', () => {
+  assert.equal(niveauConfiance(130, 'numero'), 'élevée');
+  assert.equal(niveauConfiance(130, 'voie'), 'bonne');
+  assert.equal(niveauConfiance(130, 'inconnu'), 'bonne');
+  assert.equal(niveauConfiance(85, 'numero'), 'moyenne');
+});
+
+// ── Ce que la géographie de l'annonce vaut, et ne vaut pas ────────────────
+
+check('le rayon de floutage publié n\'écarte rien', () => {
+  // Mesuré autour de Marciac : un rayon annoncé de 250 m accompagne
+  // couramment un bien situé à onze kilomètres, parce que le point de
+  // référence est la ville de diffusion, pas le bien. S'en servir comme
+  // contrainte écartait des rapprochements notés au-dessus de 120.
+  const serre = annonce({ flouRayon: 250 });
+  const loin = noterDiagnostic(serre, dpe({ _geopoint: '43.6131,0.1567' })); // ~10 km
+  assert.ok(loin, 'un bien de la commune voisine reste candidat');
+});
+
+check('commune et code postal concordants ne font qu\'un appoint', () => {
+  const a = annonce({ ville: 'Marciac', codePostal: '32230' });
+  const avec = noterDiagnostic(a, dpe({ nom_commune_ban: 'Marciac', code_postal_ban: '32230' }));
+  const sans = noterDiagnostic(a, dpe({ nom_commune_ban: 'Auch', code_postal_ban: '32000' }));
+  // Volontairement inférieur à l'écart exigé sur le second candidat : la ville
+  // de diffusion ne doit pas départager à elle seule.
+  assert.equal(avec.note - sans.note, 8);
+  assert.ok(avec.note - sans.note < 12);
+  assert.ok(avec.motifs.includes('commune') && avec.motifs.includes('code postal'));
+});
+
+check('l\'accent et la casse n\'empêchent pas la concordance', () => {
+  const a = annonce({ ville: 'BEAUMARCHÉS' });
+  assert.ok(noterDiagnostic(a, dpe({ nom_commune_ban: 'Beaumarches' })).motifs.includes('commune'));
+});
+
+check('un bien de la commune voisine reste candidat', () => {
+  // Une agence de Marciac vend à Tillac ou à Troncens : c'est la règle, pas
+  // l'exception. Seul le rayon de diffusion de 30 km est opposable.
+  const a = annonce({ ville: 'Marciac', codePostal: '32230' });
+  assert.ok(noterDiagnostic(a, dpe({ _geopoint: '43.6131,0.1567', nom_commune_ban: 'Tillac', code_postal_ban: '32170' })));
+  // Au-delà, plus aucune agence ne promeut : on écarte.
+  assert.equal(noterDiagnostic(a, dpe({ _geopoint: '43.9231,0.1567', nom_commune_ban: 'Auch' })), null);
+});
+
+check('une date voisine vaut moins qu\'une date exacte', () => {
+  const exact = noterDiagnostic(annonce(), dpe());
+  const voisin = noterDiagnostic(annonce(), dpe(), { dateExacte: false });
+  assert.equal(exact.note - voisin.note, 11);
+  assert.ok(voisin.motifs[0].includes('quelques jours'));
 });
 
 // ── Géométrie ─────────────────────────────────────────────────────────────

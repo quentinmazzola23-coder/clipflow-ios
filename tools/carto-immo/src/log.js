@@ -17,12 +17,27 @@ function stamp() {
   return new Date().toISOString().replace('T', ' ').slice(0, 19);
 }
 
+/**
+ * Observateurs du journal : l'agent local y branche la carte, pour montrer
+ * l'avancement d'une analyse lancée d'un clic.
+ */
+let observateurs = [];
+
+export function observerLog(fn) {
+  observateurs.push(fn);
+  return () => { observateurs = observateurs.filter((o) => o !== fn); };
+}
+
 function emit(level, icon, args) {
   if (LEVELS[level] < threshold) return;
   const line = args
     .map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
     .join(' ');
   const out = `${icon} ${line}`;
+  for (const o of observateurs) {
+    // Un observateur qui échoue ne doit pas interrompre l'exécution journalisée.
+    try { o({ level, line, texte: out }); } catch { /* rien */ }
+  }
   if (level === 'error' || level === 'warn') console.error(out);
   else console.log(out);
   if (logFile) {

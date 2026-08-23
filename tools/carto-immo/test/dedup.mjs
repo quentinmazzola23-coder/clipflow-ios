@@ -17,7 +17,9 @@ import { noterRapprochement, rapprocher, similitudeTitre, empreinte, cleBien } f
 import {
   loadStore, saveStore, trierAnnonces, enregistrerAnalyse,
   reinitialiserStatuts, tousLesBiens, besoinAnalyse,
+  appliquerRecalages, recalagesConnus,
 } from '../src/store.js';
+import { appliquerRecalage } from '../src/cadastre.js';
 import { construireRapport, resumerRapport, ecrireRapport } from '../src/report.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'carto-immo-dd-'));
@@ -401,6 +403,82 @@ check('besoinAnalyse respecte le délai de rafraîchissement', () => {
   assert.equal(besoinAnalyse({ analyseLe: new Date().toISOString() }, 14), false);
   assert.equal(besoinAnalyse({}, 14), true);
   assert.equal(besoinAnalyse(vieux, 0), false);
+});
+
+// ── Recalage manuel ───────────────────────────────────────────────────────
+// Une correction faite sur le terrain doit survivre à tout : à une nouvelle
+// analyse, à une régénération de la carte, au lendemain matin.
+
+const ficheBase = (o = {}) => ({
+  id: 'r1', urlAnnonce: 'https://www.bienici.com/annonce/r1', titre: 'Maison', prix: 200000,
+  surface: 120, ville: 'Marciac', codeInsee: '32235', latitude: 43.5231, longitude: 0.1567,
+  localisationPrecise: true, adresseEstimee: '1 Rue A 32230 Marciac', niveauConfiance: 'bonne',
+  parcelle: '322350000AB0001', collecteLe: '2026-08-01T07:00:00.000Z', ...o,
+});
+
+check('un recalage se pose sur le bien qui porte l\'annonce', () => {
+  const store = loadStore(path.join(tmp, 'recal.json'));
+  enregistrerAnalyse(store, ficheBase(), { id: 'r1', url: 'u', titre: 'Maison', prix: 200000 });
+  const bilan = appliquerRecalages(store, {
+    r1: { latitude: 43.5240, longitude: 0.1580, parcelle: '322350000AB0009', source: 'parcelle' },
+  });
+  assert.equal(bilan.appliques, 1);
+  assert.equal(tousLesBiens(store)[0].recalage.parcelle, '322350000AB0009');
+  assert.equal(recalagesConnus(store).r1.source, 'parcelle');
+});
+
+check('une annonce inconnue est signalée, pas inventée', () => {
+  const store = loadStore(path.join(tmp, 'recal2.json'));
+  const bilan = appliquerRecalages(store, { zzz: { latitude: 43, longitude: 0 } });
+  assert.deepEqual(bilan.inconnus, ['zzz']);
+  assert.equal(bilan.appliques, 0);
+});
+
+check('une nouvelle analyse n\'efface pas le recalage', () => {
+  const f = path.join(tmp, 'recal3.json');
+  const store = loadStore(f);
+  enregistrerAnalyse(store, ficheBase(), { id: 'r1', url: 'u', prix: 200000 });
+  appliquerRecalages(store, { r1: { latitude: 43.5240, longitude: 0.1580, parcelle: 'AB9' } });
+  // Le lendemain, l'annonce est réanalysée et l'automatique propose autre chose.
+  enregistrerAnalyse(
+    store,
+    ficheBase({ latitude: 43.5100, longitude: 0.1400, parcelle: 'AB1', collecteLe: '2026-08-02T07:00:00.000Z' }),
+    { id: 'r1', url: 'u', prix: 200000 }
+  );
+  const bien = tousLesBiens(store)[0];
+  assert.equal(bien.recalage.parcelle, 'AB9', 'le recalage doit survivre');
+  // Et il reprend le dessus au moment de tracer la parcelle.
+  appliquerRecalage(bien);
+  assert.equal(bien.parcelle, 'AB9');
+  assert.equal(bien.latitude, 43.5240);
+  assert.equal(bien.niveauConfiance, 'recalée');
+});
+
+check('la position automatique est gardée pour pouvoir revenir en arrière', () => {
+  const bien = ficheBase({ recalage: { latitude: 43.6, longitude: 0.2, parcelle: 'AB9' } });
+  appliquerRecalage(bien);
+  assert.equal(bien.auto.latitude, 43.5231);
+  assert.equal(bien.auto.parcelle, '322350000AB0001');
+  // Un second passage ne doit pas prendre la position recalée pour l'automatique.
+  appliquerRecalage(bien);
+  assert.equal(bien.auto.latitude, 43.5231);
+});
+
+check('un recalage annulé rend le bien à l\'automatique', () => {
+  const store = loadStore(path.join(tmp, 'recal4.json'));
+  enregistrerAnalyse(store, ficheBase(), { id: 'r1', url: 'u', prix: 200000 });
+  appliquerRecalages(store, { r1: { latitude: 43.6, longitude: 0.2, parcelle: 'AB9' } });
+  const bilan = appliquerRecalages(store, { r1: null });
+  assert.equal(bilan.annules, 1);
+  assert.equal(tousLesBiens(store)[0].recalage, undefined);
+});
+
+check('une parcelle désignée sans point reste exploitable', () => {
+  const store = loadStore(path.join(tmp, 'recal5.json'));
+  enregistrerAnalyse(store, ficheBase(), { id: 'r1', url: 'u', prix: 200000 });
+  const bilan = appliquerRecalages(store, { r1: { parcelle: 'AB9' } });
+  assert.equal(bilan.appliques, 1);
+  assert.equal(tousLesBiens(store)[0].recalage.latitude, null);
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });

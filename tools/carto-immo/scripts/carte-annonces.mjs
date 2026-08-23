@@ -35,7 +35,7 @@ const SANS_PHOTO = args.includes('--sans-photo');
 
 fs.mkdirSync(OUT, { recursive: true });
 
-const { fiches, contexte, total, localisees } = await collecterEtLocaliser(ZONES, {
+const { fiches, contexte, voisinage, bilan, total, localisees } = await collecterEtLocaliser(ZONES, {
   types: TYPES, max: MAX, cacheDir: CACHE, cadastre: true, rayonContexteM: 300,
 });
 
@@ -74,6 +74,7 @@ if (coms.length) log.ok(`  ${coms.length} communes`);
 
 const osm = writeMap(placees, path.join(OUT, 'carte-annonces.html'), {
   title: titre, note, filtres: FILTRES, fond: 'satellite',
+  voisinage, communes: coms, bilan,
 });
 
 const attribution =
@@ -96,6 +97,7 @@ if (!SANS_PHOTO) {
 const autonome = (deps.length || coms.length)
   ? writeMap(placees, path.join(OUT, 'carte-annonces-autonome.html'), {
       title: titre, note, filtres: FILTRES,
+      voisinage, bilan,
       basemap: {
         departements: deps,
         communes: coms,

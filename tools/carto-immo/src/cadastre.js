@@ -317,10 +317,16 @@ export async function chargerCommune(insee, cacheDir, opts = {}) {
     autour: (lat, lon, rayon) => {
       const proche = (g) => metres(lat, lon, g.centre[1], g.centre[0]) <= rayon;
       return [
-        ...listeParcelles.filter(proche).map((g) => ({ polys: g.polys, centre: g.centre, batiment: false })),
+        ...listeParcelles.filter(proche).map((g) => ({ id: g.id, polys: g.polys, centre: g.centre, batiment: false })),
         ...listeBatiments.filter(proche).map((g) => ({ polys: g.polys, centre: g.centre, batiment: true })),
       ];
     },
+    // Parcelles voisines avec leur référence : c'est ce qui permet, sur la
+    // carte, de désigner soi-même la bonne quand l'automatique s'est trompé.
+    voisinage: (lat, lon, rayon) =>
+      listeParcelles
+        .filter((g) => metres(lat, lon, g.centre[1], g.centre[0]) <= rayon)
+        .map((g) => ({ i: g.id, g: g.polys, c: g.centre, s: g.contenance })),
   };
 }
 
@@ -335,9 +341,14 @@ function arrondir2(polys) {
  * Les communes sont chargées une seule fois chacune, quel que soit le nombre
  * de biens qu'elles portent.
  */
-export async function enrichirParcelles(fiches, cacheDir, { rayon = 200, sansCache = false } = {}) {
+export async function enrichirParcelles(
+  fiches, cacheDir, { rayon = 200, rayonVoisinage = 170, sansCache = false } = {}
+) {
   const parCommune = new Map();
   for (const f of fiches) {
+    // Un recalage manuel prime sur tout : il vient de quelqu'un qui est allé
+    // voir. On efface le tracé automatique pour le refaire depuis son point.
+    appliquerRecalage(f);
     if (!f.codeInsee) continue;
     // Une fiche déjà tracée n'est pas recalculée : le pipeline qui l'a produite
     // en savait davantage que nous ici.
@@ -348,6 +359,7 @@ export async function enrichirParcelles(fiches, cacheDir, { rayon = 200, sansCac
   }
 
   const contexte = { parcelles: [], batiments: [] };
+  const voisinage = new Map();
   // Des biens voisins partagent leur voisinage : sans déduplication, le même
   // pâté de maisons serait embarqué autant de fois qu'il y a de biens autour.
   const dejaVues = new Set();
@@ -360,8 +372,15 @@ export async function enrichirParcelles(fiches, cacheDir, { rayon = 200, sansCac
     for (const f of lot) {
       let p = f.parcelle ? commune.parcelles.get(f.parcelle) : null;
       if (p) {
-        f.parcelleConfiance = 'certaine';
-        f.parcelleMotif = 'identifiant cadastral fourni';
+        f.parcelleConfiance = f.recalage?.parcelle === f.parcelle ? 'recalée' : 'certaine';
+        f.parcelleMotif = f.recalage?.parcelle === f.parcelle
+          ? 'parcelle désignée à la main'
+          : 'identifiant cadastral fourni';
+        f.parcelleSource = f.recalage?.parcelle === f.parcelle ? 'manuel' : 'fourni';
+        // Sans point de départ, le centre de la parcelle désignée fait l'affaire.
+        if (f.latitude == null || f.longitude == null) {
+          [f.longitude, f.latitude] = p.centre;
+        }
       } else if (f.latitude != null && f.longitude != null) {
         const trouvee = commune.localiserParcelle(f.latitude, f.longitude, { terrain: f.terrain });
         if (trouvee) {
@@ -369,6 +388,7 @@ export async function enrichirParcelles(fiches, cacheDir, { rayon = 200, sansCac
           f.parcelle = trouvee.id;
           f.parcelleConfiance = trouvee.confiance;
           f.parcelleMotif = trouvee.motif;
+          f.parcelleSource = f.recalage ? 'manuel' : 'dpe';
           f.batimentGeom = trouvee.batiment;
           f.ecartTerrainPct = trouvee.ecartTerrainPct;
           f.plusieursParcelles = trouvee.plusieursParcelles;
@@ -386,8 +406,47 @@ export async function enrichirParcelles(fiches, cacheDir, { rayon = 200, sansCac
         dejaVues.add(cle);
         (g.batiment ? contexte.batiments : contexte.parcelles).push(g.polys);
       }
+      // Voisinage immédiat, référencé : de quoi désigner soi-même la parcelle
+      // si le point est tombé chez le voisin. Rayon serré — au-delà, ce n'est
+      // plus un recalage mais un autre bien.
+      for (const g of commune.voisinage(f.latitude, f.longitude, rayonVoisinage)) {
+        if (!voisinage.has(g.i)) voisinage.set(g.i, g);
+      }
     }
   }
 
-  return { trouvees, contexte };
+  return { trouvees, contexte, voisinage: [...voisinage.values()] };
+}
+
+/**
+ * Rétablit sur une fiche la position choisie à la main, et efface le tracé
+ * automatique pour qu'il soit refait depuis ce point.
+ */
+export function appliquerRecalage(f) {
+  const r = f?.recalage;
+  if (!r) return false;
+  // Ce que l'automatique proposait, gardé une fois pour toutes : sans cela,
+  // annuler un recalage rendrait le bien à sa position… recalée.
+  f.auto ??= {
+    latitude: f.latitude ?? null,
+    longitude: f.longitude ?? null,
+    parcelle: f.parcelle ?? null,
+    adresse: f.adresseEstimee ?? null,
+    niveauConfiance: f.niveauConfiance ?? null,
+  };
+  if (r.parcelle) f.parcelle = r.parcelle;
+  else if (f.parcelleSource === 'dpe' || f.parcelleSource === 'manuel') f.parcelle = null;
+  if (Number.isFinite(r.latitude) && Number.isFinite(r.longitude)) {
+    f.latitude = r.latitude;
+    f.longitude = r.longitude;
+    f.localisationPrecise = true;
+  }
+  if (r.adresse) f.adresseEstimee = r.adresse;
+  f.parcelleGeom = null;
+  f.batimentGeom = null;
+  f.niveauConfiance = 'recalée';
+  f.urlMaps = Number.isFinite(f.latitude)
+    ? `https://www.google.com/maps/search/?api=1&query=${f.latitude},${f.longitude}`
+    : f.urlMaps;
+  return true;
 }

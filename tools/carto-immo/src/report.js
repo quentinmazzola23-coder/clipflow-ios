@@ -23,7 +23,7 @@ const etiquette = (b) =>
  * @param {object} triage   sortie de trierAnnonces
  * @param {object[]} analyses fiches effectivement analysées ce matin
  */
-export function construireRapport(triage, analyses, { maintenant = new Date().toISOString() } = {}) {
+export function construireRapport(triage, analyses, { maintenant = new Date().toISOString(), bilan = null } = {}) {
   const nouveaux = analyses.filter((b) => b.statut === 'nouveau');
 
   // Une remise en ligne peut être démasquée au triage — sur les caractéristiques
@@ -49,6 +49,7 @@ export function construireRapport(triage, analyses, { maintenant = new Date().to
 
   return {
     date: maintenant,
+    bilan,
     nouveaux,
     republies,
     baisses,
@@ -77,6 +78,23 @@ export function ecrireRapport(r, file) {
   const titre = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   lignes.push(`# Veille immobilière — ${titre}`, '');
   lignes.push(`${r.total} annonces relevées · ${resumerRapport(r)}`, '');
+
+  // Ce qu'on a cherché et ce qu'on a trouvé, avant même de parler des biens :
+  // un taux de localisation qui s'effondre est la première chose à voir.
+  const b = r.bilan;
+  if (b?.relevees) {
+    const taux = b.tentees ? Math.round((b.localisees / b.tentees) * 100) : 0;
+    lignes.push('## Localisation', '');
+    lignes.push(`- ${b.relevees} annonces relevées`);
+    lignes.push(`- ${b.tentees} portaient un diagnostic exploitable`);
+    lignes.push(`- **${b.localisees} replacées à leur adresse exacte** (${taux} % des tentatives)`);
+    const motifs = Object.entries(b.motifs ?? {}).sort((x, y) => y[1] - x[1]);
+    if (motifs.length) {
+      lignes.push('', 'Annonces écartées :', '');
+      for (const [motif, n] of motifs) lignes.push(`- ${n} — ${motif}`);
+    }
+    lignes.push('');
+  }
 
   if (r.nouveaux.length) {
     lignes.push(`## ${r.nouveaux.length} nouveau${r.nouveaux.length > 1 ? 'x' : ''} bien${r.nouveaux.length > 1 ? 's' : ''}`, '');

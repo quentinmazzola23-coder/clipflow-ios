@@ -16,6 +16,22 @@ la surface, la consommation et les émissions lèvent le reste. Le rapprochement
 est noté, et **sans candidat qui se détache nettement, l'annonce reste sans
 adresse** : mieux vaut un bien absent de la carte qu'un bien chez le voisin.
 
+Deux pièges ont été mesurés puis écartés, et méritent d'être connus :
+
+- **La ville de l'annonce est celle de l'agence, pas du bien.** Autour de
+  Marciac, des annonces diffusées sous ce nom désignent des maisons à Troncens,
+  Tillac ou Marseillan, sept à douze kilomètres plus loin. Une divergence de
+  commune n'écarte donc rien ; une concordance ne vaut qu'un petit appoint.
+- **Le rayon de floutage publié par le site ne borne pas le bien.** Un rayon
+  annoncé de 250 m accompagne couramment une maison située à onze kilomètres.
+  Seul le rayon de diffusion de 30 km est opposable.
+
+De même, le registre publie un `score_ban` et un `statut_geocodage` : ni l'un ni
+l'autre ne dit la précision du point. Le score médian vaut 0,46 pour des
+adresses parfaitement exactes, et des lignes marquées « non géocodée » portent
+un numéro et une rue justes. Seule la finesse de l'adresse elle-même — descend-
+elle au numéro, à la voie, ou pas plus loin qu'un lieu — plafonne la confiance.
+
 L'adresse mène ensuite à la **parcelle cadastrale**. Le point d'adresse tombe
 souvent au bord de la voie, pas au centre du terrain : prendre la parcelle sous
 le point désignerait la rue ou le voisin. On passe donc par le **bâtiment** —
@@ -112,9 +128,25 @@ Autres commandes :
 ```bash
 node src/cli.js add <url…>   # analyser une ou plusieurs annonces précises
 node src/cli.js map          # régénérer tableur et carte sans rien recollecter
+node src/cli.js carte        # ouvrir la carte en mode agent (voir plus bas)
+node src/cli.js recaler <f>  # reprendre des recalages exportés d'une carte
 node src/cli.js schedule     # rappeler comment programmer l'exécution quotidienne
 node src/cli.js run --max 10 # limiter le nombre d'analyses pour ce lancement
 ```
+
+### La carte comme console : `node src/cli.js carte`
+
+La carte ouverte en double-clic est une photographie du matin. Servie par
+l'agent, elle devient un poste de travail :
+
+- **Un clic sur un village propose d'analyser toutes ses annonces** et de les
+  ajouter à la carte. L'avancement s'affiche, puis la page se recharge.
+- **Les recalages sont enregistrés aussitôt en base** et survivent à la
+  prochaine exécution.
+
+Ouverte comme simple fichier, la carte ne ment pas sur ce qu'elle peut faire :
+elle affiche la commande à taper, et les recalages s'exportent en un fichier que
+`node src/cli.js recaler recalages.json` reprend.
 
 Depuis Claude Code, la commande `/carto-immo` lance la même chose.
 
@@ -155,10 +187,16 @@ Elle est faite pour décider d'aller frapper à une porte, pas pour tout savoir.
 
 - Fond **photo aérienne** (orthophotographies IGN) : on voit la maison, la cour,
   les dépendances, l'accès.
-- Une pastille par bien, avec son **prix**. La couleur dit l'**ancienneté** de
-  l'annonce — bleu sous deux mois, ambre jusqu'à quatre, orange jusqu'à huit,
-  rouge au-delà. C'est le temps passé en vitrine qui dit la disponibilité du
-  vendeur, pas l'écart de prix.
+- **De loin un point de couleur, de près le prix.** Une seule règle, qui ne
+  dépend que du zoom — jamais du nombre de biens affichés. La couleur dit
+  l'**ancienneté** de l'annonce — bleu sous deux mois, ambre jusqu'à quatre,
+  orange jusqu'à huit, rouge au-delà. C'est le temps passé en vitrine qui dit
+  la disponibilité du vendeur, pas l'écart de prix.
+- Un bandeau **bilan** en tête de liste : combien d'annonces relevées, combien
+  portaient un diagnostic exploitable, combien ont été replacées à leur adresse,
+  et la raison de chaque renoncement. Le taux se calcule sur les annonces qui
+  portaient de quoi chercher — compter en échec une annonce sans diagnostic
+  reviendrait à se reprocher un silence qui n'est pas le nôtre.
 - La liste est triée du plus ancien au plus récent, les biens déjà traités en fin.
 - Chaque fiche porte trois boutons de suivi — **à prospecter · contacté ·
   écarté** — conservés dans le navigateur : la carte se régénère chaque matin,
@@ -168,8 +206,20 @@ Elle est faite pour décider d'aller frapper à une porte, pas pour tout savoir.
   cadastrale du bien**, contour tracé sur la photo, emprise du bâtiment
   ombrée. La fiche donne l'adresse exacte, la référence de parcelle et sa
   contenance, l'écart au marché et le DPE.
-- Au zoom parcelle les pastilles laissent la place à de simples points : elles
-  masqueraient le contour du terrain, qui est justement ce qu'on vient regarder.
+- Au zoom parcelle le prix se pose **au-dessus** du point plutôt que dessus :
+  il masquerait le terrain, qui est justement ce qu'on vient regarder.
+- La photographie aérienne monte à **deux fois plus de pixels** au zoom
+  parcelle : deux couches empilées, un socle servi partout et une couche fine
+  qui va chercher le niveau le plus profond. Une dalle fine manquante laisse
+  voir le socle, jamais un carré vide.
+- La bulle porte les **photos de l'annonce**, allégées et feuilletables à la
+  flèche : le seul but est de comparer ce que montre l'annonce à ce qu'on voit
+  du ciel. Un clic ouvre la photo en pleine définition.
+- **Vérifier / recaler** ouvre le dossier du rapprochement — numéro de
+  diagnostic, note, avance sur le second candidat, concordances retenues — et
+  permet de le corriger : désigner soi-même la bonne parcelle parmi les
+  voisines surlignées, poser le point à la main, ou adopter un diagnostic
+  écarté de peu. Un retour à la position automatique reste toujours possible.
 - Le bloc de filtres est masqué par défaut (`filtresCarte` dans la config) :
   prix, surface, texte libre, et cinq raccourcis — *nouveaux*, *remis en ligne*,
   *sous le marché*, *prix baissé*, *adresse exacte*.
@@ -283,7 +333,7 @@ régulièrement 503, et les fichiers ne bougent pas.
 npm test
 ```
 
-Quatre campagnes, toutes **sans accès réseau** :
+Six campagnes, toutes **sans accès réseau** :
 
 - `test/smoke.mjs` — décodage d'une vraie page lacquereur.fr enregistrée,
   normalisation, base locale, tableur, carte.
@@ -292,13 +342,20 @@ Quatre campagnes, toutes **sans accès réseau** :
   maisons voisines de même taille ; rattrapage par la parcelle cadastrale ;
   rapport du matin.
 - `test/geoloc.mjs` — géométrie cadastrale (trous, centroïdes, distance au bord)
-  et appariement annonce ↔ diagnostic : ce qui doit être
-  accepté (surface annoncée plus large, consommation divergente, commune
-  voisine) et surtout ce qui doit être refusé (étiquette climat différente,
-  appartement pour une maison, distance excessive).
+  et appariement annonce ↔ diagnostic : ce qui doit être accepté (surface
+  annoncée plus large, consommation en énergie finale, commune voisine, lieu-dit
+  sans numéro) et surtout ce qui doit être refusé (étiquette climat différente,
+  appartement pour une maison, distance excessive). Les règles écartées après
+  mesure y sont verrouillées à leur tour, pour qu'on ne les réintroduise pas.
 - `test/integration.mjs` — pilotage réel du navigateur, requêtes interceptées :
   collecte, analyse, session expirée, mur anti-bot, annonce sans localisation,
   et un scénario complet sur deux matins consécutifs.
+- `test/agent.mjs` — l'agent local : état, carte servie, recalage écrit en base
+  et annulé, refus d'une requête mal formée, chemins hors périmètre.
+- `test/interface.mjs` — la carte **exécutée dans un navigateur** : la règle
+  d'affichage des marqueurs à chaque zoom, la galerie photo, le bloc de
+  vérification, le recalage par désignation de parcelle et son annulation, le
+  clic sur un village, et le même parcours en mode agent.
 
 ---
 
@@ -312,7 +369,9 @@ Quatre campagnes, toutes **sans accès réseau** :
 - Les données collectées (adresses, coordonnées) restent **sur ta machine** :
   aucun serveur, aucun envoi.
 - L'adresse est **reconstituée**, pas publiée : la colonne « Confiance »
-  indique la solidité du rapprochement. À vérifier avant toute démarche.
+  indique la solidité du rapprochement. À vérifier avant toute démarche — et
+  **Vérifier / recaler**, sur la carte, sert exactement à cela : voir sur quoi
+  le rapprochement repose, et le corriger quand il est faux.
 - Les données mobilisées sont ouvertes et publiques — registre des DPE, cadastre,
   ventes DVF. Le rapprochement se fait sur des biens en vente, à des fins
   d'estimation professionnelle.

@@ -91,6 +91,10 @@ export function normalize(ad, analysis, { collectedAt = new Date().toISOString()
         : 'moyenne',
     sourceAdresse: addr.source ?? null,
     parcelle: addr.parcelle_id ?? null,
+    parcelleSource: addr.parcelle_id ? 'fourni' : null,
+    // Position automatique de référence, remise à zéro à chaque analyse : c'est
+    // elle qu'on retrouve si un recalage manuel est annulé.
+    auto: null,
     banId: addr.ban_id ?? null,
     codeInsee: addr.commune_insee_code ?? provider.insee_code_hint ?? null,
 
@@ -205,6 +209,17 @@ export function normaliserAnnonce(annonce, localisation, marche = {}, { collecte
     banId: loc.banId ?? null,
     codeInsee: loc.codeInsee ?? null,
     numeroDpe: loc.numeroDpe ?? null,
+
+    // De quoi vérifier — et contester — le rapprochement : ce qui a été retenu,
+    // de combien il devançait le suivant, et les diagnostics écartés de peu.
+    qualiteGeocodage: loc.qualiteGeocodage ?? null,
+    dateDpeExacte: loc.dateExacte ?? null,
+    ecartSecond: loc.ecartSecond ?? null,
+    dpeAlternatives: loc.alternatives ?? [],
+    parcelleSource: null,
+    // Position automatique de référence, remise à zéro à chaque analyse : c'est
+    // elle qu'on retrouve si un recalage manuel est annulé.
+    auto: null,
 
     dpe: loc.dpe ?? annonce.dpeAnnonce ?? null,
     ges: loc.ges ?? annonce.gesAnnonce ?? null,

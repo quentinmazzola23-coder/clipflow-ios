@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
@@ -10,13 +11,12 @@ import { analyseAll } from './lacquereur.js';
 import { normalize } from './normalize.js';
 import {
   loadStore, saveStore, trierAnnonces, enregistrerAnalyse,
-  reinitialiserStatuts, allRecords,
+  reinitialiserStatuts, appliquerRecalages, enregistrerBilan,
 } from './store.js';
 import { construireRapport, ecrireRapport, resumerRapport } from './report.js';
-import { writeSpreadsheet, writeCsv } from './sheet.js';
-import { writeMap } from './map.js';
-import { enrichirParcelles } from './cadastre.js';
+import { construireSorties } from './sorties.js';
 import { collecterEtLocaliser } from './pipeline-annonces.js';
+import { demarrerServeur } from './serveur.js';
 
 const USAGE = `
 carto-immo — veille immobilière leboncoin → lacquereur.fr → tableur + carte
@@ -29,10 +29,16 @@ carto-immo — veille immobilière leboncoin → lacquereur.fr → tableur + car
   node src/cli.js run       Exécution complète : collecte, analyse, tableur, carte
   node src/cli.js add <url…>  Analyse une ou plusieurs annonces précises
   node src/cli.js map       Régénère tableur et carte depuis les données locales
+  node src/cli.js carte     Ouvre la carte en mode agent : un clic sur un village
+                            lance son analyse, les recalages sont enregistrés
+  node src/cli.js recaler <fichier.json>
+                            Reprend les recalages exportés depuis une carte
+                            ouverte en simple fichier
   node src/cli.js schedule  Affiche comment programmer l'exécution quotidienne
 
 Options : --config <fichier>  --headless  --max <n>  --quiet
           --zone <commune>   secteur pour la commande annonces
+          --port <n>         port de la commande carte (défaut 4173)
 `;
 
 function parseArgs(argv) {
@@ -49,6 +55,14 @@ function parseArgs(argv) {
       args.max = v;
     }
     else if (a === '--zone') (args.zones ??= []).push(argv[++i]);
+    else if (a === '--port') {
+      const v = Number(argv[++i]);
+      if (!Number.isInteger(v) || v < 1 || v > 65535) {
+        console.error('--port attend un numéro de port valide.');
+        process.exit(2);
+      }
+      args.port = v;
+    }
     else if (a === '--headless') args.headless = true;
     else if (a === '--quiet') args.quiet = true;
     else args._.push(a);
@@ -74,34 +88,6 @@ function openInBrowser(file) {
 function ask(question) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((r) => rl.question(question, (a) => { rl.close(); r(a); }));
-}
-
-/** Écrit tableur, CSV et carte à partir de la base locale. */
-async function buildOutputs(cfg, store) {
-  const records = allRecords(store);
-  if (!records.length) {
-    log.warn('Aucune fiche en base — rien à exporter.');
-    return null;
-  }
-
-  // Contour exact du terrain. Le fond OpenStreetMap montre déjà bâtiments et
-  // rues au zoom parcelle : seul le contour manque, on l'ajoute.
-  if (cfg.cadastre) {
-    const { trouvees } = await enrichirParcelles(records, cfg.paths.cache);
-    log.info(`${trouvees} parcelle(s) tracée(s) depuis le cadastre`);
-  }
-
-  await writeSpreadsheet(records, cfg.paths.spreadsheet);
-  writeCsv(records, cfg.paths.csv);
-  const map = writeMap(records, cfg.paths.map, {
-    title: 'Veille immobilière',
-    filtres: cfg.filtresCarte,
-  });
-
-  log.ok(`Tableur  : ${cfg.paths.spreadsheet}`);
-  log.ok(`CSV      : ${cfg.paths.csv}`);
-  log.ok(`Carte    : ${cfg.paths.map}  (${map.plotted} biens placés${map.skipped ? `, ${map.skipped} sans coordonnées` : ''})`);
-  return map;
 }
 
 async function cmdLogin(cfg) {
@@ -223,7 +209,7 @@ async function cmdRun(cfg, args) {
     log.ok(`Bilan    : ${resumerRapport(rapport)}`);
   }
 
-  const map = await buildOutputs(cfg, store);
+  const map = await construireSorties(cfg, store);
   if (map && cfg.openMapWhenDone) openInBrowser(cfg.paths.map);
 }
 
@@ -245,7 +231,7 @@ async function cmdAdd(cfg, urls) {
   }
 
   saveStore(cfg.paths.store, store);
-  const map = await buildOutputs(cfg, store);
+  const map = await construireSorties(cfg, store);
   if (map && cfg.openMapWhenDone) openInBrowser(cfg.paths.map);
 }
 
@@ -266,7 +252,7 @@ async function cmdAnnonces(cfg, args) {
   const store = loadStore(cfg.paths.store);
   reinitialiserStatuts(store);
 
-  const { fiches, total, localisees } = await collecterEtLocaliser(zones, {
+  const { fiches, bilan, total, localisees } = await collecterEtLocaliser(zones, {
     types: cfg.bienici?.types ?? ['house'],
     max: args.max ?? cfg.bienici?.max ?? 200,
     cacheDir: cfg.paths.cache,
@@ -284,6 +270,7 @@ async function cmdAnnonces(cfg, args) {
     });
     enregistres.push(bien);
   }
+  enregistrerBilan(store, bilan);
   saveStore(cfg.paths.store, store);
 
   const nouveaux = enregistres.filter((b) => b.statut === 'nouveau').length;
@@ -294,14 +281,64 @@ async function cmdAnnonces(cfg, args) {
   const inchanges = enregistres.filter((b) => b.statut === 'connu').length;
   const rapport = construireRapport(
     { nouveaux: [], republies: [], connus: Array.from({ length: inchanges }, () => ({ bien: null, prixModifie: null })) },
-    enregistres
+    enregistres,
+    { bilan }
   );
   const texte = ecrireRapport(rapport, cfg.paths.report);
   console.log('\n' + texte);
   log.ok(`Rapport  : ${cfg.paths.report}`);
 
-  const map = await buildOutputs(cfg, store);
+  const map = await construireSorties(cfg, store);
   if (map && cfg.openMapWhenDone) openInBrowser(cfg.paths.map);
+}
+
+/**
+ * Reprend des recalages exportés depuis une carte ouverte en simple fichier.
+ *
+ * Sans cela, la correction faite dans le navigateur disparaîtrait à la
+ * prochaine génération : c'est ce qui la rend durable.
+ */
+async function cmdRecaler(cfg, fichier) {
+  if (!fs.existsSync(fichier)) {
+    log.error(`Fichier introuvable : ${fichier}`);
+    process.exitCode = 1;
+    return;
+  }
+  let corrections;
+  try {
+    corrections = JSON.parse(fs.readFileSync(fichier, 'utf8'));
+  } catch (e) {
+    log.error(`JSON illisible : ${e.message}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const store = loadStore(cfg.paths.store);
+  const bilan = appliquerRecalages(store, corrections);
+  saveStore(cfg.paths.store, store);
+  log.ok(`${bilan.appliques} recalage(s) appliqué(s), ${bilan.annules} annulé(s)`);
+  if (bilan.inconnus.length) {
+    log.warn(`${bilan.inconnus.length} annonce(s) inconnue(s) en base : ${bilan.inconnus.slice(0, 5).join(', ')}`);
+  }
+  await construireSorties(cfg, store);
+}
+
+/** Ouvre la carte en mode agent : elle peut alors lancer des analyses. */
+async function cmdCarte(cfg, args) {
+  const store = loadStore(cfg.paths.store);
+  if (!fs.existsSync(cfg.paths.map)) await construireSorties(cfg, store);
+
+  const { url } = await demarrerServeur(cfg, { port: args.port ?? 4173 });
+  log.ok(`Carte    : ${url}`);
+  console.log(`
+  La carte est servie en local. Depuis cette page :
+    · un clic sur un village propose d'analyser toutes ses annonces ;
+    · « Vérifier / recaler » corrige la position d'un bien, et la correction
+      est enregistrée aussitôt en base.
+
+  Ctrl+C pour arrêter.
+`);
+  if (cfg.openMapWhenDone) openInBrowser(url);
 }
 
 function cmdSchedule(cfg) {
@@ -348,7 +385,15 @@ async function main() {
       return cmdAdd(cfg, urls);
     }
     case 'map':
-      return void (await buildOutputs(cfg, loadStore(cfg.paths.store)));
+      return void (await construireSorties(cfg, loadStore(cfg.paths.store)));
+    case 'carte':
+    case 'serveur':
+      return cmdCarte(cfg, args);
+    case 'recaler': {
+      const fichier = args._[1];
+      if (!fichier) { console.log(USAGE); process.exitCode = 1; return; }
+      return cmdRecaler(cfg, fichier);
+    }
     case 'schedule':
       return cmdSchedule(cfg);
     case 'help':
