@@ -619,9 +619,15 @@ function afficherBilan(){
     .sort((x, y) => y[1] - x[1])
     .map(([m, n]) => '<li><b>' + n + '</b><span>' + esc(m) + '</span></li>').join('');
 
-  const zones = (BILAN.zones || []).map((z) =>
-    esc(z.nom) + ' — ' + z.localisees + '/' + z.tentees +
-    ' le ' + new Date(z.le).toLocaleDateString('fr-FR')).join('<br>');
+  // Le bilan d'une exécution ne connaît que des noms de zones ; celui tenu en
+  // base porte le détail par zone. On affiche ce qui est disponible.
+  const zones = (BILAN.zones || []).map((z) => {
+    const nom = typeof z === 'string' ? z : z.nom;
+    if (!nom) return '';
+    if (typeof z === 'string' || !Number.isFinite(z.tentees)) return esc(nom);
+    return esc(nom) + ' — ' + z.localisees + '/' + z.tentees +
+      (z.le ? ' le ' + new Date(z.le).toLocaleDateString('fr-FR') : '');
+  }).filter(Boolean).join('<br>');
 
   b.innerHTML =
     '<summary><span class="taux">' + BILAN.localisees + '/' + BILAN.tentees + '</span>' +

@@ -128,6 +128,17 @@ try {
     assert.match(corps, /62\s*annonces relevées/);
     assert.match(corps, /aucun diagnostic compatible/);
     assert.match(corps, /14/);
+    assert.match(corps, /Marciac — 34\/58/);
+  });
+
+  await check('un bilan d’exécution, sans détail par zone, reste lisible', async () => {
+    // Le bilan d'une collecte ne connaît que des noms de zones ; celui tenu en
+    // base porte le détail. La carte doit accepter les deux.
+    const brut = path.join(tmp, 'brut.html');
+    writeMap(BIENS, brut, { title: 'Brut', bilan: { ...BILAN, zones: ['Marciac'] } });
+    const html = fs.readFileSync(brut, 'utf8');
+    assert.ok(!html.includes('undefined/undefined'));
+    assert.match(html, /"zones":\["Marciac"\]/);
   });
 
   await check('de loin : des points de couleur, aucun prix', async () => {
