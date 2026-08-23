@@ -23,6 +23,9 @@ import { log, observerLog } from './log.js';
  */
 
 const TAILLE_MAX_CORPS = 512 * 1024;
+// Plafond d'un balayage « toute la commune ». Assez haut pour qu'aucune commune
+// française n'en approche, assez bas pour qu'une erreur ne parte pas en boucle.
+const BALAYAGE_INTEGRAL = 2000;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.csv': 'text/csv; charset=utf-8' };
 
 export function demarrerServeur(cfg, { port = 4173, hote = '127.0.0.1' } = {}) {
@@ -54,6 +57,9 @@ export function demarrerServeur(cfg, { port = 4173, hote = '127.0.0.1' } = {}) {
         biens: tousLesBiens(store).length,
         occupe,
         zones: cfg.bienici?.zones ?? [],
+        // Communes déjà balayées : la carte s'en sert pour distinguer « jamais
+        // vue » de « à rebalayer ».
+        balayees: Object.keys(store.bilans ?? {}),
       });
     }
 
@@ -71,14 +77,14 @@ export function demarrerServeur(cfg, { port = 4173, hote = '127.0.0.1' } = {}) {
     }
 
     if (chemin === '/api/zone' && req.method === 'POST') {
-      const { zone } = await corps(req);
+      const { zone, tout } = await corps(req);
       if (!zone || typeof zone !== 'string') return repondre(res, 400, { erreur: 'zone manquante' });
       if (occupe) return repondre(res, 409, { erreur: 'une analyse est déjà en cours' });
       const id = randomUUID();
       travaux.set(id, { lignes: [], fini: false, resume: null, erreur: null });
       // On répond tout de suite : la collecte dure des minutes, la carte suit
       // l'avancement en interrogeant /api/travail.
-      analyserZone(id, zone);
+      analyserZone(id, zone, { tout: !!tout });
       return repondre(res, 202, { id, zone });
     }
 
@@ -91,8 +97,13 @@ export function demarrerServeur(cfg, { port = 4173, hote = '127.0.0.1' } = {}) {
     repondre(res, 404, { erreur: 'inconnu' });
   }
 
-  /** Collecte une commune, l'ajoute à la base, régénère les sorties. */
-  async function analyserZone(id, zone) {
+  /**
+   * Collecte une commune, l'ajoute à la base, régénère les sorties.
+   *
+   * @param {boolean} [opts.tout] balayage intégral, sans le plafond quotidien —
+   *   c'est ce que demande un clic sur un village qu'on veut couvrir en entier.
+   */
+  async function analyserZone(id, zone, { tout = false } = {}) {
     const t = travaux.get(id);
     occupe = true;
     const detacher = observerLog(({ level, line }) => {
@@ -108,13 +119,14 @@ export function demarrerServeur(cfg, { port = 4173, hote = '127.0.0.1' } = {}) {
 
       const { fiches, bilan, total, localisees } = await collecterEtLocaliser([zone], {
         types: cfg.bienici?.types ?? ['house'],
-        max: cfg.bienici?.max ?? 200,
+        max: tout ? BALAYAGE_INTEGRAL : cfg.bienici?.max ?? 200,
         cacheDir: cfg.paths.cache,
         cadastre: cfg.cadastre,
         filtres: cfg.filters,
       });
 
       let ajoutes = 0;
+      let deja = 0;
       for (const fiche of fiches) {
         // Une annonce sans adresse établie ne rentre pas : on ne place pas un
         // bien sur un point qu'on n'a pas établi.
@@ -123,13 +135,14 @@ export function demarrerServeur(cfg, { port = 4173, hote = '127.0.0.1' } = {}) {
           id: fiche.id, url: fiche.urlAnnonce, titre: fiche.titre,
           prix: fiche.prix, vendeur: fiche.vendeur,
         });
-        if (bien.statut === 'nouveau') ajoutes++;
+        if (bien.statut === 'nouveau') ajoutes++; else deja++;
       }
       enregistrerBilan(store, bilan);
       saveStore(cfg.paths.store, store);
       await construireSorties(cfg, store);
 
-      t.resume = `${localisees}/${total} localisées, ${ajoutes} nouvelle${ajoutes > 1 ? 's' : ''}`;
+      t.resume = `${localisees}/${total} localisées, ${ajoutes} nouvelle${ajoutes > 1 ? 's' : ''}` +
+        (deja ? `, ${deja} déjà connue${deja > 1 ? 's' : ''}` : '');
       log.ok(`${zone} : ${t.resume}`);
     } catch (e) {
       t.erreur = e.message;

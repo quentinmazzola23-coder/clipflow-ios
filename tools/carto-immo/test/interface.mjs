@@ -75,6 +75,10 @@ const COMMUNES = [{
 const BILAN = {
   relevees: 62, tentees: 58, localisees: 34,
   motifs: { 'aucun diagnostic compatible': 14, 'concordance trop faible': 7, 'deux logements également plausibles': 3 },
+  diffusion: {
+    Marciac: { vues: 47, tentees: 44, localisees: 28, certaines: 9, le: '2026-08-23T07:00:00.000Z' },
+    Beaumarchés: { vues: 15, tentees: 14, localisees: 6, certaines: 2, le: '2026-08-23T07:00:00.000Z' },
+  },
   zones: [{ nom: 'Marciac', relevees: 62, tentees: 58, localisees: 34, le: '2026-08-23T07:00:00.000Z' }],
   le: '2026-08-23T07:00:00.000Z',
 };
@@ -129,6 +133,20 @@ try {
     assert.match(corps, /aucun diagnostic compatible/);
     assert.match(corps, /14/);
     assert.match(corps, /Marciac — 34\/58/);
+  });
+
+  await check('le bilan détaille chaque commune : vues, placés, certains', async () => {
+    const t = await page.textContent('#bilan .parcommune');
+    assert.match(t, /Marciac/);
+    assert.match(t, /Beaumarchés/);
+    const marciac = await page.evaluate(() => {
+      const tr = [...document.querySelectorAll('#bilan .parcommune tbody tr')]
+        .find((x) => x.textContent.startsWith('Marciac'));
+      return [...tr.querySelectorAll('td')].map((td) => td.textContent);
+    });
+    // 47 annonces vues sous ce nom, 1 bien effectivement situé là, certain
+    // parce que sa position a été confirmée à la main.
+    assert.deepEqual(marciac, ['47', '1', '1']);
   });
 
   await check('un bilan d’exécution, sans détail par zone, reste lisible', async () => {
@@ -215,6 +233,39 @@ try {
     assert.ok(apres.y > apres.hauteur * 0.45, `le bien se pose à ${Math.round(apres.y)} px`);
   });
 
+  await check('la fiche se pose à côté du terrain, jamais dessus ni hors écran', async () => {
+    await zoom(19);
+    await page.evaluate(() => {
+      const m = [...document.querySelectorAll('.leaflet-marker-icon')]
+        .find((x) => x.textContent.includes('299k'));
+      m.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 1, clientY: 1 }));
+    });
+    await page.waitForTimeout(1500);
+    const g = await page.evaluate(() => {
+      const bulle = document.querySelector('.leaflet-popup').getBoundingClientRect();
+      const carte = document.getElementById('map').getBoundingClientRect();
+      const p = document.querySelector('.leaflet-overlay-pane path').getBoundingClientRect();
+      const chevauche = !(bulle.right < p.left || bulle.left > p.right
+        || bulle.bottom < p.top || bulle.top > p.bottom);
+      return {
+        dansLEcran: bulle.top >= carte.top - 1 && bulle.bottom <= carte.bottom + 1
+          && bulle.left >= carte.left - 1 && bulle.right <= carte.right + 1,
+        chevauche, haut: Math.round(bulle.top),
+      };
+    });
+    assert.equal(g.dansLEcran, true, `la fiche déborde de la carte (haut ${g.haut})`);
+    assert.equal(g.chevauche, false, 'la fiche ne doit pas recouvrir le terrain');
+  });
+
+  await check('la photo de la fiche reste visible à l’écran', async () => {
+    const v = await page.evaluate(() => {
+      const img = document.querySelector('.leaflet-popup .galerie img').getBoundingClientRect();
+      const carte = document.getElementById('map').getBoundingClientRect();
+      return img.top >= carte.top - 1 && img.bottom <= carte.bottom + 1 && img.height > 20;
+    });
+    assert.equal(v, true, 'la photo doit être entièrement dans la fenêtre');
+  });
+
   await check('la bulle défile au lieu de déborder', async () => {
     const style = await page.evaluate(() => getComputedStyle(document.querySelector('.leaflet-popup-content')).overflowY);
     assert.equal(style, 'auto');
@@ -284,11 +335,17 @@ try {
     assert.equal(await page.isVisible('#recal'), false);
   });
 
-  await check('sans agent, un clic sur un village donne la commande à taper', async () => {
+  await check('cliquer un village annonce ce qu’on y a vu et ce qu’on y a placé', async () => {
     await page.evaluate(() => window.cartoImmo.map.fire('click', { latlng: { lat: 43.52, lng: 0.16 } }));
     await page.waitForSelector('.zonepop');
     const t = await page.textContent('.zonepop');
     assert.match(t, /Marciac/);
+    assert.match(t, /47 annonces relevées sous ce nom/);
+    assert.match(t, /28 identifiées/);
+    assert.match(t, /9 avec certitude/);
+    assert.match(t, /1 bien situé ici/);
+    assert.match(t, /Dernier balayage le 23\/08\/2026/);
+    // Sans agent, la carte ne promet rien qu'elle ne puisse tenir.
     assert.match(t, /annonces --zone "Marciac"/);
   });
 

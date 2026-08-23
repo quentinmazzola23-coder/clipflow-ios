@@ -139,8 +139,11 @@ node src/cli.js run --max 10 # limiter le nombre d'analyses pour ce lancement
 La carte ouverte en double-clic est une photographie du matin. Servie par
 l'agent, elle devient un poste de travail :
 
-- **Un clic sur un village propose d'analyser toutes ses annonces** et de les
-  ajouter à la carte. L'avancement s'affiche, puis la page se recharge.
+- **Un clic sur un village dit ce qu'on y a déjà vu** — annonces relevées sous
+  ce nom, identifiées, dont combien avec certitude, et la date du dernier
+  balayage — puis propose de **reprendre toute la commune**, sans le plafond de
+  la veille quotidienne. Seul ce qui manque est ajouté ; l'avancement s'affiche,
+  puis la page se recharge.
 - **Les recalages sont enregistrés aussitôt en base** et survivent à la
   prochaine exécution.
 
@@ -197,6 +200,12 @@ Elle est faite pour décider d'aller frapper à une porte, pas pour tout savoir.
   et la raison de chaque renoncement. Le taux se calcule sur les annonces qui
   portaient de quoi chercher — compter en échec une annonce sans diagnostic
   reviendrait à se reprocher un silence qui n'est pas le nôtre.
+- Le bilan se déplie en **un tableau par commune** : *vues* (annonces relevées
+  sous ce nom), *placés* (biens dont l'adresse retrouvée tombe sur la commune),
+  *certains* (adresse au numéro nettement détachée, ou position confirmée à la
+  main). Les deux premiers comptes diffèrent volontairement : une agence de
+  Marciac vend à Tillac, ce qui alimente les *vues* de Marciac et les *placés*
+  de Tillac.
 - La liste est triée du plus ancien au plus récent, les biens déjà traités en fin.
 - Chaque fiche porte trois boutons de suivi — **à prospecter · contacté ·
   écarté** — conservés dans le navigateur : la carte se régénère chaque matin,
@@ -215,6 +224,9 @@ Elle est faite pour décider d'aller frapper à une porte, pas pour tout savoir.
 - La bulle porte les **photos de l'annonce**, allégées et feuilletables à la
   flèche : le seul but est de comparer ce que montre l'annonce à ce qu'on voit
   du ciel. Un clic ouvre la photo en pleine définition.
+- La fiche se pose **à côté** du terrain, jamais dessus, et jamais hors de
+  l'écran : c'est le contour de la parcelle qu'on vient regarder, et la photo
+  de l'annonce doit rester visible en même temps.
 - **Vérifier / recaler** ouvre le dossier du rapprochement — numéro de
   diagnostic, note, avance sur le second candidat, concordances retenues — et
   permet de le corriger : désigner soi-même la bonne parcelle parmi les

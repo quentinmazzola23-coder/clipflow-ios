@@ -341,7 +341,8 @@ export function enregistrerBilan(store, bilan) {
   for (const zone of bilan.zones?.length ? bilan.zones : ['—']) {
     store.bilans[zone] = {
       relevees: bilan.relevees, tentees: bilan.tentees, localisees: bilan.localisees,
-      motifs: bilan.motifs ?? {}, le: bilan.le ?? new Date().toISOString(),
+      motifs: bilan.motifs ?? {}, diffusion: bilan.diffusion ?? {},
+      le: bilan.le ?? new Date().toISOString(),
       // Une collecte portant sur plusieurs zones ne peut pas être ventilée :
       // on l'inscrit une fois par zone en le disant.
       partage: (bilan.zones?.length ?? 0) > 1,
@@ -356,7 +357,9 @@ export function resumerBilans(store) {
   // Une collecte multi-zones est inscrite à l'identique sous chacune : la
   // compter une fois par zone tromperait sur le volume relevé.
   const vus = new Set();
-  const total = { relevees: 0, tentees: 0, localisees: 0, motifs: {}, zones: [], le: null };
+  const total = {
+    relevees: 0, tentees: 0, localisees: 0, motifs: {}, diffusion: {}, zones: [], le: null,
+  };
   for (const [nom, b] of zones) {
     total.zones.push({ nom, ...b });
     if (!total.le || b.le > total.le) total.le = b.le;
@@ -367,6 +370,12 @@ export function resumerBilans(store) {
     total.tentees += b.tentees ?? 0;
     total.localisees += b.localisees ?? 0;
     for (const [m, n] of Object.entries(b.motifs ?? {})) total.motifs[m] = (total.motifs[m] ?? 0) + n;
+    // Une même commune peut avoir été balayée depuis deux zones voisines : le
+    // dernier passage fait foi, additionner compterait deux fois les annonces.
+    for (const [ville, c] of Object.entries(b.diffusion ?? {})) {
+      const connu = total.diffusion[ville];
+      if (!connu || String(b.le) > String(connu.le)) total.diffusion[ville] = { ...c, le: b.le };
+    }
   }
   total.zones.sort((a, b) => String(b.le).localeCompare(String(a.le)));
   return total;

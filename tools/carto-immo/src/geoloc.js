@@ -408,6 +408,10 @@ export async function localiser(annonce) {
 export async function localiserToutes(annonces, { delaiMs = 400 } = {}) {
   const resultats = [];
   const motifs = {};
+  // Par commune de diffusion : c'est sous ce nom que l'annonce a été vue, et
+  // c'est ce nom qu'on clique sur la carte. La commune réelle du bien, elle,
+  // n'est connue que pour les annonces qui ont abouti.
+  const diffusion = {};
   let trouvees = 0;
   let tentees = 0;
 
@@ -422,8 +426,17 @@ export async function localiserToutes(annonces, { delaiMs = 400 } = {}) {
     const tentee = r.motif !== 'annonce sans date de diagnostic'
       && r.motif !== 'annonce sans position approchée';
     if (tentee) tentees++;
+
+    const sousCeNom = (diffusion[a.ville || '—'] ??= { vues: 0, tentees: 0, localisees: 0, certaines: 0 });
+    sousCeNom.vues++;
+    if (tentee) sousCeNom.tentees++;
+
     if (r.localisation) {
       trouvees++;
+      sousCeNom.localisees++;
+      // « Avec certitude » : une adresse descendue au numéro et nettement
+      // détachée de ses concurrentes. Le reste demande un coup d'œil.
+      if (r.localisation.confiance === 'élevée') sousCeNom.certaines++;
       log.debug(`  ${a.url} -> ${r.localisation.adresse} (${r.localisation.confiance})`);
     } else {
       motifs[r.motif] = (motifs[r.motif] ?? 0) + 1;
@@ -433,7 +446,7 @@ export async function localiserToutes(annonces, { delaiMs = 400 } = {}) {
     if (i < annonces.length - 1) await sleep(delaiMs, 0.2);
   }
 
-  const bilan = { relevees: annonces.length, tentees, localisees: trouvees, motifs };
+  const bilan = { relevees: annonces.length, tentees, localisees: trouvees, motifs, diffusion };
   log.info(`${trouvees}/${tentees} annonces localisées (${annonces.length} relevées)`);
   for (const [m, n] of Object.entries(motifs).sort((a, b) => b[1] - a[1])) {
     log.info(`  ${n} × ${m}`);

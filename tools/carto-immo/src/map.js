@@ -369,6 +369,7 @@ input[type=search]{padding-left:10px}
 .pill{width:max-content;white-space:nowrap;color:#fff;font-size:11.5px;font-weight:650;padding:3px 8px;border-radius:999px;border:1.5px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.35)}
 .marker.on{outline:3px solid rgba(31,58,95,.35);outline-offset:2px;border-radius:999px}
 .j0{background:#8b9099} .j1{background:#4a7fb5} .j2{background:#c08a2e} .j3{background:#c25a1e} .j4{background:#b3261e}
+.leaflet-popup.deportee .leaflet-popup-tip-container{display:none}
 .leaflet-popup-content{margin:0;width:296px!important;max-height:min(62vh,470px);overflow-y:auto;overscroll-behavior:contain}
 .leaflet-popup-content-wrapper{border-radius:12px;padding:0;overflow:hidden}
 .pop img{width:100%;height:132px;object-fit:cover;display:block;background:#e9e7e1}
@@ -414,6 +415,13 @@ input[type=search]{padding-left:10px}
 #bilan .motifs li{display:flex;gap:9px;padding:2px 0;color:var(--muted)}
 #bilan .motifs b{min-width:2.2em;text-align:right;color:var(--ink);font-variant-numeric:tabular-nums}
 #bilan .zones{margin:8px 0 0;color:var(--muted);font-size:11.5px;line-height:1.5}
+#bilan .parcommune{width:100%;border-collapse:collapse;margin-top:10px;font-size:11.5px;font-variant-numeric:tabular-nums}
+#bilan .parcommune caption{text-align:left;color:var(--ink);font-weight:600;font-size:12px;padding-bottom:4px}
+#bilan .parcommune th[scope=col]{color:var(--muted);font-weight:500;text-align:right;padding:3px 0 5px;border-bottom:1px solid var(--line)}
+#bilan .parcommune th[scope=col]:first-child{text-align:left}
+#bilan .parcommune th[scope=row]{font-weight:500;text-align:left;padding:3px 8px 3px 0}
+#bilan .parcommune td{text-align:right;padding:3px 0;color:var(--muted)}
+#bilan .parcommune tbody tr:nth-child(even){background:rgba(0,0,0,.02)}
 .empty{padding:34px 18px;text-align:center;color:var(--muted);font-size:13px}
 .verif{margin-top:11px;padding-top:10px;border-top:1px dashed var(--line);font-size:12px;color:var(--muted)}
 .verif b{color:var(--ink);font-weight:600}
@@ -447,7 +455,8 @@ input[type=search]{padding-left:10px}
 .zonepop b{display:block;font-size:13.5px;margin-bottom:2px}
 .zonepop button{margin-top:8px;width:100%;border:none;background:var(--accent);color:#fff;border-radius:8px;padding:8px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer}
 .zonepop code{display:block;margin-top:7px;padding:7px 8px;background:#f4f1ea;border-radius:7px;font-size:11px;word-break:break-all;user-select:all}
-.zonepop .quoi{color:var(--muted);font-size:11.5px;margin-top:4px}
+.zonepop .quoi{color:var(--muted);font-size:11.5px;margin-top:4px;line-height:1.45}
+.zonepop .chiffre{color:var(--ink);font-variant-numeric:tabular-nums}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
 #poignee{display:none}
 #credits{display:none;margin:0;padding:12px 18px 18px;font-size:11px;line-height:1.5;color:var(--muted);border-top:1px solid var(--line)}
@@ -601,12 +610,75 @@ document.getElementById('stamp').textContent =
 document.getElementById('credits').innerHTML = 'Fond de carte : ' + ATTRIBUTION;
 
 /**
+ * Ce qu'on sait d'une commune : ce qui y a été vu, et ce qui y a été placé.
+ *
+ * Deux comptes bien distincts. « Vues sous ce nom » se rapporte à la commune de
+ * diffusion de l'annonce — celle de l'agence. « Placés ici » se rapporte à la
+ * commune réelle du bien, connue seulement une fois l'adresse retrouvée. Une
+ * agence de Marciac vendant à Tillac alimente la première ligne de Marciac et
+ * la seconde de Tillac.
+ */
+function statsCommune(nom, insee){
+  const vus = (BILAN && BILAN.diffusion && BILAN.diffusion[nom]) || null;
+  let places = 0;
+  let certains = 0;
+  for (const d of DATA) {
+    const ici = insee ? d.ins === insee : d.v === nom;
+    if (!ici) continue;
+    places++;
+    const e = etat(d);
+    // « Avec certitude » : adresse au numéro nettement détachée, ou position
+    // confirmée à la main.
+    if (e.rec || d.cf === 'élevée') certains++;
+  }
+  return {
+    nom,
+    vues: vus ? vus.vues : 0,
+    tentees: vus ? vus.tentees : 0,
+    localisees: vus ? vus.localisees : 0,
+    certaines: vus ? vus.certaines : 0,
+    le: vus ? vus.le : null,
+    places,
+    certains,
+    connue: !!vus,
+  };
+}
+
+/** Toutes les communes dont on sait quelque chose, les plus fournies d'abord. */
+function communesConnues(){
+  const noms = new Set();
+  if (BILAN && BILAN.diffusion) for (const n of Object.keys(BILAN.diffusion)) noms.add(n);
+  for (const d of DATA) if (d.v) noms.add(d.v);
+  const insees = new Map(DATA.map((d) => [d.v, d.ins]));
+  return [...noms]
+    .map((n) => statsCommune(n, insees.get(n)))
+    .sort((a, b) => (b.vues + b.places) - (a.vues + a.places));
+}
+
+/**
  * Ce qui a été relevé, ce qui a été tenté, ce qui a abouti.
  *
  * Le taux se calcule sur les annonces qui portaient de quoi chercher : compter
  * en échec une annonce sans diagnostic reviendrait à se reprocher un silence
  * qui n'est pas le nôtre.
  */
+/** Une ligne par commune : vues sous ce nom, placées ici, dont certaines. */
+function tableauCommunes(){
+  const lignes = communesConnues();
+  if (!lignes.length) return '';
+  const corps = lignes.map((c) =>
+    '<tr><th scope="row">' + esc(c.nom) + '</th>' +
+    '<td>' + (c.vues || '—') + '</td>' +
+    '<td>' + (c.places || '—') + '</td>' +
+    '<td>' + (c.certains || '—') + '</td></tr>').join('');
+  return '<table class="parcommune"><caption>Par commune</caption><thead><tr>' +
+    '<th scope="col">Commune</th>' +
+    '<th scope="col" title="Annonces relevées sous ce nom de commune">Vues</th>' +
+    '<th scope="col" title="Biens dont l’adresse retrouvée tombe sur cette commune">Placés</th>' +
+    '<th scope="col" title="Adresse au numéro nettement détachée, ou position confirmée à la main">Certains</th>' +
+    '</tr></thead><tbody>' + corps + '</tbody></table>';
+}
+
 function afficherBilan(){
   const b = document.getElementById('bilan');
   if (!BILAN || !BILAN.relevees) { b.hidden = true; return; }
@@ -644,10 +716,10 @@ function afficherBilan(){
         '<dt>' + BILAN.localisees + '</dt><dd>replacées à leur adresse exacte</dd>' +
       '</dl>' +
       (motifs ? '<ul class="motifs">' + motifs + '</ul>' : '') +
+      tableauCommunes() +
       (zones ? '<p class="zones">' + zones + '</p>' : '') +
     '</div>';
 }
-afficherBilan();
 
 /** GeoJSON [lon, lat] → Leaflet [lat, lon], en conservant trous et multi-parties. */
 const versLatLng = (geom) => geom.map((poly) => poly.map((anneau) => anneau.map(([x, y]) => [y, x])));
@@ -964,7 +1036,7 @@ function matches(d){
 const ZOOM_BIEN = 18;
 const ZOOM_BIEN_MIN = 16;
 const ZOOM_BIEN_MAX = 20;
-const DECALAGE_BULLE_MAX = 140;
+const MARGE_BULLE = 18;
 
 /**
  * Exécute une fois le déplacement terminé.
@@ -997,26 +1069,10 @@ function select(id, fly, { bulleDejaGeree = false } = {}){
       entry.parcelle.setStyle({ color: '#0f2742', weight: 3.5, fillColor: '#3b6fb0', fillOpacity: 0.38 });
       entry.parcelle.bringToFront();
     }
-    // La bulle s'ancre au même point que la parcelle : sans décalage, elle la
-    // recouvre. On la remonte de la demi-hauteur réelle du terrain à l'écran.
-    const decalerBulle = () => {
-      const bulle = entry.m.getPopup();
-      if (!bulle || !entry.parcelle) return;
-      const b = entry.parcelle.getBounds();
-      const haut = map.latLngToContainerPoint(b.getNorthWest()).y;
-      const bas = map.latLngToContainerPoint(b.getSouthEast()).y;
-      // Demi-hauteur du terrain, plus la pointe de la bulle et une marge — mais
-      // plafonnée : au zoom parcelle le terrain occupe tout l'écran, et une
-      // bulle ancrée huit cents pixels plus haut ferait descendre la carte
-      // jusqu'à coller le bien contre le bord inférieur.
-      const decalage = Math.min(DECALAGE_BULLE_MAX, Math.abs(bas - haut) / 2 + 40);
-      bulle.options.offset = L.point(0, -decalage);
-      if (entry.m.isPopupOpen()) entry.m.openPopup(); // réapplique le décalage
-    };
     const ouvrirBulle = () => {
       if (!entry.m.getPopup()) return;
-      decalerBulle();
       entry.m.openPopup();
+      placerBulle(entry);
     };
 
     const mobile = MOBILE();
@@ -1052,10 +1108,58 @@ function select(id, fly, { bulleDejaGeree = false } = {}){
     } else if (!mobile && !bulleDejaGeree) {
       ouvrirBulle();
     } else if (!mobile) {
-      // Bulle ouverte par Leaflet : on n'a plus qu'à la décaler de la parcelle.
-      decalerBulle();
+      // Bulle ouverte par Leaflet : il reste à la poser à côté du terrain.
+      placerBulle(entry);
     }
   }
+}
+
+/**
+ * Pose la fiche **à côté** du terrain, jamais dessus.
+ *
+ * Une bulle ancrée au-dessus du point recouvre la parcelle — c'est-à-dire
+ * exactement ce qu'on vient regarder — et, au zoom parcelle, sort par le haut
+ * de l'écran en emportant la photo avec elle. On la place donc sur le flanc
+ * qui offre le plus de place, centrée sur le terrain, et bornée à la fenêtre.
+ */
+function placerBulle(entry){
+  const bulle = entry.m.getPopup();
+  if (!bulle || !entry.m.isPopupOpen()) return;
+  const element = bulle.getElement();
+  if (!element) return;
+
+  const carte = map.getSize();
+  const boite = element.getBoundingClientRect();
+  const l = boite.width || 300;
+  const h = boite.height || 300;
+  const ancre = map.latLngToContainerPoint(entry.m.getLatLng());
+
+  // Emprise du terrain à l'écran : c'est elle qu'il ne faut pas recouvrir.
+  let gauche = ancre.x, droite = ancre.x, milieuY = ancre.y;
+  if (entry.parcelle) {
+    const b = entry.parcelle.getBounds();
+    const nw = map.latLngToContainerPoint(b.getNorthWest());
+    const se = map.latLngToContainerPoint(b.getSouthEast());
+    gauche = Math.min(nw.x, se.x);
+    droite = Math.max(nw.x, se.x);
+    milieuY = (nw.y + se.y) / 2;
+  }
+
+  // Le flanc le plus dégagé l'emporte ; à égalité, la droite, plus naturelle
+  // à lire.
+  const placeDroite = carte.x - droite;
+  const placeGauche = gauche;
+  const aDroite = placeDroite >= placeGauche;
+  let centreX = aDroite ? droite + MARGE_BULLE + l / 2 : gauche - MARGE_BULLE - l / 2;
+
+  // Bornage : la fiche doit tenir entière dans la fenêtre, photo comprise.
+  centreX = Math.max(l / 2 + 8, Math.min(carte.x - l / 2 - 8, centreX));
+  const centreY = Math.max(h / 2 + 8, Math.min(carte.y - h / 2 - 8, milieuY));
+
+  // Leaflet pose le bas de la bulle sur l'ancre décalée.
+  bulle.options.offset = L.point(Math.round(centreX - ancre.x), Math.round(centreY + h / 2 - ancre.y));
+  element.classList.add('deportee');
+  bulle.update();
 }
 
 /** Contour de la parcelle cadastrale du bien, en évidence quand il est choisi. */
@@ -1137,13 +1241,9 @@ function render(){
       .on('click', () => select(d.id, true, { bulleDejaGeree: !MOBILE() }));
     // Sur mobile la bulle recouvrirait la carte : le détail se déplie dans la liste.
     if (!MOBILE()) {
-      m.bindPopup(popup(d), {
-        closeButton: true,
-        // De la place sous le point : sans cette réserve, le recentrage colle
-        // le bien au bord inférieur et on ne voit plus ses abords.
-        autoPanPaddingTopLeft: [30, 30],
-        autoPanPaddingBottomRight: [30, 200],
-      });
+      // Pas de recentrage automatique : le placement latéral décide seul, et
+      // deux mécanismes qui se contrarient renvoyaient la fiche hors écran.
+      m.bindPopup(popup(d), { closeButton: true, autoPan: false });
     }
     layer.addLayer(m);
     markers.set(d.id, { m, d, parcelle: tracerParcelle(d, e, false) });
@@ -1217,6 +1317,11 @@ if (AVEC_FILTRES) {
 }
 
 // De loin les pastilles de prix se chevaucheraient : on bascule sur le point.
+// Une fiche posée sur le flanc du terrain doit y rester quand la carte bouge.
+map.on('moveend zoomend', () => {
+  if (selected && markers.has(selected)) placerBulle(markers.get(selected));
+});
+
 map.on('zoomend', () => {
   const veut = renduMarqueur();
   if (veut === rendu) return;
@@ -1600,26 +1705,52 @@ async function proposerCommune(lat, lon){
       .catch(() => null);
   }
   if (!com) return;
-
-  const dejaLa = DATA.filter((d) => d.ins === com.insee).length;
-  const zone = com.nom;
-  montrerZone(lat, lon, com, dejaLa, zone);
+  montrerZone(lat, lon, com);
 }
 
-function montrerZone(lat, lon, com, dejaLa, zone){
-  const etatLigne = dejaLa
-    ? dejaLa + ' bien' + (dejaLa > 1 ? 's' : '') + ' déjà sur la carte'
-    : 'aucun bien sur la carte pour cette commune';
+const jourCourt = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString('fr-FR');
+};
+
+/**
+ * Ce qu'on sait déjà de cette commune, et ce qu'on propose d'y faire.
+ *
+ * Une commune jamais balayée mérite un balayage complet ; une commune déjà
+ * traitée mérite qu'on le dise, avec ses chiffres, avant de proposer de
+ * recommencer.
+ */
+function montrerZone(lat, lon, com){
+  const c = statsCommune(com.nom, com.insee);
+  const quand = c.le ? jourCourt(c.le) : null;
+
+  const lignes = [];
+  if (c.connue) {
+    lignes.push('<b class="chiffre">' + c.vues + '</b> annonce' + (c.vues > 1 ? 's' : '') +
+      ' relevée' + (c.vues > 1 ? 's' : '') + ' sous ce nom, <b class="chiffre">' + c.localisees +
+      '</b> identifiée' + (c.localisees > 1 ? 's' : '') +
+      (c.certaines ? ' dont <b class="chiffre">' + c.certaines + '</b> avec certitude' : ''));
+  }
+  if (c.places) {
+    lignes.push('<b class="chiffre">' + c.places + '</b> bien' + (c.places > 1 ? 's' : '') +
+      ' situé' + (c.places > 1 ? 's' : '') + ' ici sur la carte' +
+      (c.certains ? ', dont <b class="chiffre">' + c.certains + '</b> sûr' + (c.certains > 1 ? 's' : '') : ''));
+  }
+  if (!lignes.length) lignes.push('Jamais balayée.');
+  if (quand) lignes.push('Dernier balayage le ' + quand + '.');
+
+  const libelle = c.connue ? 'Rebalayer toute la commune' : 'Analyser toutes les annonces';
+  const action = SERVEUR
+    ? '<button type="button" data-zone="' + esc(com.nom) + '">' + libelle + '</button>' +
+      '<div class="quoi">Reprend toutes les annonces de la commune, sans plafond, et' +
+      ' n’ajoute que ce qui manque.</div>'
+    : '<div class="quoi">À lancer depuis le terminal :</div>' +
+      '<code>node src/cli.js annonces --zone "' + esc(com.nom) + '"</code>';
+
   L.popup({ closeButton: true, autoPanPadding: [30, 30] })
     .setLatLng([lat, lon])
-    .setContent(
-      '<div class="zonepop"><b>' + esc(com.nom) + '</b>' +
-      '<div class="quoi">' + etatLigne + '</div>' +
-      (SERVEUR
-        ? '<button type="button" data-zone="' + esc(zone) + '">Analyser toutes les annonces</button>' +
-          '<div class="quoi">Relève les annonces, retrouve leur adresse, et les ajoute ici.</div>'
-        : '<div class="quoi">À lancer depuis le terminal :</div>' +
-          '<code>node src/cli.js annonces --zone "' + esc(zone) + '"</code>'))
+    .setContent('<div class="zonepop"><b>' + esc(com.nom) + '</b>' +
+      lignes.map((l) => '<div class="quoi">' + l + '</div>').join('') + action + '</div>')
     .openOn(map);
 }
 
@@ -1633,8 +1764,12 @@ document.addEventListener('click', (ev) => {
 async function lancerZone(zone){
   map.closePopup();
   montrer('<b>Analyse de ' + esc(zone) + '…</b><div class="lignes">démarrage</div>');
+  // On reprend l'intégralité de la commune, sans le plafond de la veille
+  // quotidienne : c'est un geste délibéré, pas une exécution de routine.
   const r = await fetch('api/zone', {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ zone }),
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ zone, tout: true }),
   }).then((x) => x.json()).catch((e) => ({ erreur: String(e && e.message ? e.message : e) }));
   if (!r || r.erreur) {
     montrer('<b>Analyse impossible</b><div class="lignes">' + esc(r && r.erreur ? r.erreur : 'agent injoignable') + '</div>');
@@ -1680,6 +1815,9 @@ detecterAgent();
 // automatisées la pilotent, et qu'on l'inspecte quand quelque chose cloche.
 window.cartoImmo = { map, DATA, recal, etat, render, ouvrirRecal, fermerRecal };
 
+// Le bilan lit l'état effectif de chaque bien, recalages compris : il ne peut
+// être dressé qu'une fois ceux-ci chargés.
+afficherBilan();
 render();
 if (MOBILE()) allerA(2, false);
 </script>

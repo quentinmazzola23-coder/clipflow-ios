@@ -62,8 +62,9 @@ remplace la commande dans la tâche par `src/cli.js annonces --zone <commune>`.
 `node src/cli.js carte` sert la carte depuis un petit agent local. Elle cesse
 alors d'être une photographie du matin :
 
-- **un clic sur un village propose d'analyser toutes ses annonces** et de les
-  ajouter ;
+- **un clic sur un village dit ce qu'on y a déjà vu** — annonces relevées sous
+  ce nom, identifiées, dont combien avec certitude, date du dernier balayage —
+  et propose de reprendre toute la commune, sans plafond ;
 - **« Vérifier / recaler »**, sur chaque fiche, montre sur quoi le rapprochement
   repose — numéro de diagnostic, note, avance sur le second candidat — et permet
   de le corriger : désigner la bonne parcelle parmi les voisines, poser le point
@@ -98,7 +99,9 @@ dessus, ne le reconstruis pas. Reprends en quelques lignes :
 
 - le **bilan de localisation** : combien d'annonces relevées, combien portaient
   un diagnostic exploitable, combien ont été replacées à leur adresse — et la
-  raison des renoncements. Un taux qui chute est la première chose à signaler ;
+  raison des renoncements. Un taux qui chute est la première chose à signaler.
+  Le détail par commune est dans la carte : *vues* sous ce nom, *placés* ici,
+  *certains* ;
 - combien de **nouveaux biens**, combien de **remises en ligne**, combien de
   baisses de prix ;
 - les biens **sous le marché** parmi les nouveautés — c'est l'information utile ;
