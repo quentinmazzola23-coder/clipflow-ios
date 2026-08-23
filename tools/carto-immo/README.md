@@ -41,6 +41,8 @@ as posé tes filtres sur le site. Tu peux en mettre autant que tu veux.
 | `maxAnalysesPerRun` | Plafond d'analyses par exécution — évite les longues sessions |
 | `reanalyseAfterDays` | Rafraîchir une annonce déjà connue au bout de N jours |
 | `filters` | Écarte les annonces hors budget/surface **avant** analyse |
+| `cadastre` | Trace le contour exact de la parcelle de chaque bien |
+| `filtresCarte` | Affiche le bloc de recherche et de filtres dans la carte |
 | `headless` | Laisse `false` : le navigateur visible passe bien mieux les protections |
 | `openMapWhenDone` | Ouvre la carte automatiquement en fin d'exécution |
 
@@ -116,10 +118,15 @@ Tout arrive dans `data/` :
 
 - Une pastille par bien, avec son prix. **Vert** = sous le marché,
   **orange** = dans le marché, **rouge** = au-dessus, **gris** = pas d'estimation.
-- Clic sur une pastille ou sur la liste de gauche : photo, prix au m², surface,
-  DPE, adresse estimée, écart au marché, ancienneté de l'annonce, liens.
-- Filtres : prix, surface, texte libre, et cinq raccourcis — *nouveaux*,
-  *remis en ligne*, *sous le marché*, *prix baissé*, *adresse exacte*.
+- Clic sur une pastille ou sur la liste de gauche : la carte cadre **la parcelle
+  cadastrale du bien**, contour tracé, et affiche photo, prix au m², surface,
+  adresse exacte, référence de parcelle et contenance, DPE, écart au marché,
+  ancienneté de l'annonce, liens.
+- Au zoom parcelle les pastilles laissent la place à de simples points : elles
+  masqueraient le contour du terrain, qui est justement ce qu'on vient regarder.
+- Le bloc de filtres est masqué par défaut (`filtresCarte` dans la config) :
+  prix, surface, texte libre, et cinq raccourcis — *nouveaux*, *remis en ligne*,
+  *sous le marché*, *prix baissé*, *adresse exacte*.
 - Le fichier est autonome (Leaflet embarqué) ; seul le fond de carte
   OpenStreetMap se charge en ligne.
 
@@ -201,9 +208,18 @@ ventes réelles des communes retenues. Rien n'est inventé.
 Ce sont des ventes déjà conclues, pas des annonces en cours : la démonstration
 montre la mise en forme, pas un état du marché.
 
+Chaque bien retenu a son **adresse confirmée par un DPE** et sa **parcelle
+présente au cadastre** : la carte montre une localisation certaine, pas une
+approximation à la commune.
+
 Deux cartes sont produites : `carte-demo.html` avec le fond OpenStreetMap comme
-en production, et `carte-demo-autonome.html` avec un fond vectoriel embarqué
-(contours communaux IGN) qui fonctionne **sans aucune requête sortante**.
+en production, et `carte-demo-autonome.html` avec un fond vectoriel embarqué —
+contours communaux en vue d'ensemble, **plan cadastral** (parcelles et
+bâtiments) au zoom parcelle — qui fonctionne **sans aucune requête sortante**.
+
+Les téléchargements sont mis en cache dans `data-demo/.cache` : ces API
+publiques répondent régulièrement 503, et les fichiers ne bougent pas.
+`--sans-cache` force le rafraîchissement.
 
 ```bash
 node scripts/demo-donnees-reelles.mjs --communes 32013,32107 --out /tmp/demo

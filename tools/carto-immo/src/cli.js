@@ -15,6 +15,7 @@ import {
 import { construireRapport, ecrireRapport, resumerRapport } from './report.js';
 import { writeSpreadsheet, writeCsv } from './sheet.js';
 import { writeMap } from './map.js';
+import { enrichirParcelles } from './cadastre.js';
 
 const USAGE = `
 carto-immo — veille immobilière leboncoin → lacquereur.fr → tableur + carte
@@ -65,9 +66,20 @@ async function buildOutputs(cfg, store) {
     log.warn('Aucune fiche en base — rien à exporter.');
     return null;
   }
+
+  // Contour exact du terrain. Le fond OpenStreetMap montre déjà bâtiments et
+  // rues au zoom parcelle : seul le contour manque, on l'ajoute.
+  if (cfg.cadastre) {
+    const { trouvees } = await enrichirParcelles(records, cfg.paths.cache);
+    log.info(`${trouvees} parcelle(s) tracée(s) depuis le cadastre`);
+  }
+
   await writeSpreadsheet(records, cfg.paths.spreadsheet);
   writeCsv(records, cfg.paths.csv);
-  const map = writeMap(records, cfg.paths.map, { title: 'Veille immobilière' });
+  const map = writeMap(records, cfg.paths.map, {
+    title: 'Veille immobilière',
+    filtres: cfg.filtresCarte,
+  });
 
   log.ok(`Tableur  : ${cfg.paths.spreadsheet}`);
   log.ok(`CSV      : ${cfg.paths.csv}`);

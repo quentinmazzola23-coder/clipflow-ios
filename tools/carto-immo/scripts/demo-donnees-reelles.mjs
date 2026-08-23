@@ -7,21 +7,41 @@
  *
  *   Prix, surfaces, parcelles ..... DVF (files.data.gouv.fr/geo-dvf)
  *   Adresses, coordonnées, DPE .... ADEME (data.ademe.fr)
+ *   Parcelles et bâtiments ........ cadastre Etalab (cadastre.data.gouv.fr)
  *   Contours communaux ............ geo.api.gouv.fr
+ *
+ * Seuls les biens dont l'adresse exacte est retrouvée dans le DPE *et* dont la
+ * parcelle est présente au cadastre sont retenus : la carte doit montrer une
+ * localisation certaine, pas une approximation à la commune.
  *
  * Ce sont des ventes déjà conclues, pas des annonces en cours : la carte
  * montre la mise en forme, pas un état du marché à l'instant présent.
  *
  *   node scripts/demo-donnees-reelles.mjs [--communes 32233,32256] [--out data-demo]
+ *                                         [--par-commune 2] [--filtres] [--sans-cache]
+ *
+ * Les téléchargements sont mis en cache sur disque : ces API publiques tombent
+ * régulièrement en 503, et les fichiers DVF comme cadastraux ne bougent pas.
  */
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { ROOT } from '../src/config.js';
 import { writeMap } from '../src/map.js';
 import { writeSpreadsheet, writeCsv } from '../src/sheet.js';
 import { log } from '../src/log.js';
+import { chargerCommune } from '../src/cadastre.js';
 
-const DEFAUT = ['32233', '32256', '32344', '32296', '32319']; // Marciac, Mirande, Riscle, Nogaro, Plaisance
+// Secteur sud du Gers.
+const DEFAUT = [
+  '32013', // Auch
+  '32256', // Mirande
+  '32233', // Marciac
+  '32344', // Riscle
+  '32242', // Masseube
+  '32462', // Vic-Fezensac
+];
+const RAYON_CONTEXTE_M = 200; // parcelles voisines dessinées autour de chaque bien
 const ANNEES = [2024, 2023];
 const DEPARTEMENT = '32';
 
@@ -32,11 +52,19 @@ const opt = (nom, def) => {
 };
 const COMMUNES = opt('communes', DEFAUT.join(',')).split(',');
 const OUT = path.resolve(ROOT, opt('out', 'data-demo'));
+const PAR_COMMUNE = Number(opt('par-commune', '2'));
+const FILTRES = args.includes('--filtres');
+const CACHE = path.join(OUT, '.cache');
+const SANS_CACHE = args.includes('--sans-cache');
 
 // ── Utilitaires ───────────────────────────────────────────────────────────
 
 /** GET avec quelques reprises : ces API publiques renvoient parfois un 503. */
-async function texte(url, essais = 4) {
+async function texte(url, essais = 5) {
+  return (await enCache(url, () => texteBrut(url, essais).then(Buffer.from))).toString('utf8');
+}
+
+async function texteBrut(url, essais = 5) {
   let derniere;
   for (let i = 0; i < essais; i++) {
     try {
@@ -47,7 +75,37 @@ async function texte(url, essais = 4) {
     } catch (e) {
       derniere = e;
     }
-    await new Promise((r) => setTimeout(r, 1500 * 2 ** i));
+    await new Promise((r) => setTimeout(r, 2500 * 2 ** i));
+  }
+  throw derniere;
+}
+
+/** Cache disque par URL : évite de retélécharger, et sauve les jours de 503. */
+async function enCache(url, telecharger) {
+  const f = path.join(CACHE, createHash('sha1').update(url).digest('hex').slice(0, 16));
+  if (!SANS_CACHE && fs.existsSync(f)) return fs.readFileSync(f);
+  const buf = await telecharger();
+  fs.mkdirSync(CACHE, { recursive: true });
+  fs.writeFileSync(f, buf);
+  return buf;
+}
+
+async function binaire(url, essais = 5) {
+  return enCache(url, () => binaireBrut(url, essais));
+}
+
+async function binaireBrut(url, essais = 5) {
+  let derniere;
+  for (let i = 0; i < essais; i++) {
+    try {
+      const r = await fetch(url);
+      if (r.ok) return Buffer.from(await r.arrayBuffer());
+      derniere = new Error(`${r.status} sur ${url}`);
+      if (r.status < 500 && r.status !== 429) break;
+    } catch (e) {
+      derniere = e;
+    }
+    await new Promise((r) => setTimeout(r, 2500 * 2 ** i));
   }
   throw derniere;
 }
@@ -203,6 +261,8 @@ async function contours() {
 
 fs.mkdirSync(OUT, { recursive: true });
 const fiches = [];
+const contexteParcelles = [];
+const contexteBatiments = [];
 let totalVentes = 0;
 
 for (const insee of COMMUNES) {
@@ -217,69 +277,79 @@ for (const insee of COMMUNES) {
   const haut = Math.round(quantile(pm2s, 0.75));
 
   const dpes = await dpeCommune(insee);
+  const cadastre = await chargerCommune(insee, CACHE, { sansCache: SANS_CACHE });
   const adressees = ventes.filter((v) => v.voie && v.numero);
 
-  // On privilégie une vente rapprochable d'un DPE réel : c'est ce qui donne
-  // l'adresse exacte et les coordonnées, comme le fait lacquereur.fr.
-  let choisie = null, dpe = null;
+  // On ne retient que les biens dont l'adresse est confirmée par un DPE **et**
+  // dont la parcelle existe au cadastre : la carte montre une localisation
+  // certaine, pas une approximation à la commune.
+  let retenus = 0;
   for (const v of adressees) {
-    const d = trouverDpe(v, dpes);
-    if (d) { choisie = v; dpe = d; break; }
+    if (retenus >= PAR_COMMUNE) break;
+    const dpe = trouverDpe(v, dpes);
+    if (!dpe) continue;
+    const parcelle = cadastre.parcelles.get(v.parcelle);
+    if (!parcelle) continue;
+
+    const [lat, lon] = dpe._geopoint.split(',').map(Number);
+    const maintenant = new Date().toISOString();
+
+    // Voisinage cadastral, pour que la parcelle se lise dans son contexte.
+    for (const g of cadastre.autour(lat, lon, RAYON_CONTEXTE_M)) {
+      (g.batiment ? contexteBatiments : contexteParcelles).push(g.anneaux);
+    }
+
+    fiches.push({
+      id: v.id,
+      cle: `parcelle:${v.parcelle}`,
+      statut: 'nouveau',
+      collecteLe: maintenant,
+      premiereApparition: maintenant,
+      annonces: [{ id: v.id }],
+      titre: `Maison ${v.surface} m²${v.pieces ? ` · ${v.pieces} pièces` : ''} — ${v.commune}`,
+      typeBien: 'Maison',
+      prix: v.prix,
+      prixM2: Math.round(v.pm2),
+      surface: v.surface,
+      terrain: v.terrain,
+      pieces: v.pieces,
+      ville: v.commune,
+      codePostal: v.cp,
+      adresseEstimee: dpe.adresse_ban,
+      latitude: lat,
+      longitude: lon,
+      localisationPrecise: true,
+      confianceAdresse: 90,
+      sourceAdresse: 'dpe',
+      parcelle: v.parcelle,
+      parcelleGeom: parcelle.anneaux,
+      contenance: parcelle.contenance,
+      codeInsee: insee,
+      dpe: dpe.etiquette_dpe ?? null,
+      ges: dpe.etiquette_ges ?? null,
+      consoEnergie: Math.round(nb(dpe.conso_5_usages_par_m2_ep) ?? 0) || null,
+      dateDpe: dpe.date_etablissement_dpe ?? null,
+      anneeConstruction: nb(dpe.annee_construction),
+      publieeLe: v.date,
+      joursEnLigne: Math.round((Date.now() - new Date(v.date)) / 86400000),
+      ecartMarchePct: Number((((v.pm2 - med) / med) * 100).toFixed(1)),
+      medianeSecteurM2: med,
+      fourchetteBasse: Math.round(bas * v.surface),
+      fourchetteHaute: Math.round(haut * v.surface),
+      positionMarche: v.pm2 < bas ? 'Sous le marché'
+        : v.pm2 > haut ? 'Au-dessus du marché' : 'Dans le marché',
+      nbVentesComparables: ventes.length,
+      urlAnnonce: `https://app.dvf.etalab.gouv.fr/?code_commune=${insee}`,
+      urlAnalyse: `https://www.geoportail.gouv.fr/carte?c=${lon},${lat}&z=19&l0=CADASTRALPARCELS.PARCELLAIRE_EXPRESS::GEOPORTAIL:OGC:WMTS(1)`,
+      urlMaps: `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`,
+    });
+    retenus++;
+    log.ok(`  ${dpe.adresse_ban} · parcelle ${v.parcelle} (${parcelle.contenance ?? '?'} m²)` +
+      ` · ${v.prix} € / ${v.surface} m² = ${Math.round(v.pm2)} €/m² · DPE ${dpe.etiquette_dpe ?? '—'}`);
   }
-  choisie ??= adressees[0] ?? ventes[0];
 
-  const geo = dpe?._geopoint?.split(',').map(Number);
-  const lat = geo?.[0] ?? choisie.lat;
-  const lon = geo?.[1] ?? choisie.lon;
-  const adresse = dpe?.adresse_ban
-    ?? [choisie.numero, choisie.voie, choisie.cp, choisie.commune].filter(Boolean).join(' ');
-  const maintenant = new Date().toISOString();
-
-  fiches.push({
-    id: choisie.id,
-    cle: `parcelle:${choisie.parcelle}`,
-    statut: 'nouveau',
-    collecteLe: maintenant,
-    premiereApparition: maintenant,
-    annonces: [{ id: choisie.id }],
-    titre: `Maison ${choisie.surface} m²${choisie.pieces ? ` · ${choisie.pieces} pièces` : ''} — ${choisie.commune}`,
-    typeBien: 'Maison',
-    prix: choisie.prix,
-    prixM2: Math.round(choisie.pm2),
-    surface: choisie.surface,
-    terrain: choisie.terrain,
-    pieces: choisie.pieces,
-    ville: choisie.commune,
-    codePostal: choisie.cp,
-    adresseEstimee: adresse,
-    latitude: lat,
-    longitude: lon,
-    localisationPrecise: !!dpe,
-    confianceAdresse: dpe ? 90 : 70,
-    sourceAdresse: dpe ? 'dpe' : 'dvf',
-    parcelle: choisie.parcelle,
-    codeInsee: insee,
-    dpe: dpe?.etiquette_dpe ?? null,
-    ges: dpe?.etiquette_ges ?? null,
-    consoEnergie: Math.round(nb(dpe?.conso_5_usages_par_m2_ep) ?? 0) || null,
-    dateDpe: dpe?.date_etablissement_dpe ?? null,
-    anneeConstruction: nb(dpe?.annee_construction),
-    publieeLe: choisie.date,
-    joursEnLigne: Math.round((Date.now() - new Date(choisie.date)) / 86400000),
-    ecartMarchePct: Number((((choisie.pm2 - med) / med) * 100).toFixed(1)),
-    medianeSecteurM2: med,
-    fourchetteBasse: Math.round(bas * choisie.surface),
-    fourchetteHaute: Math.round(haut * choisie.surface),
-    positionMarche: choisie.pm2 < bas ? 'Sous le marché'
-      : choisie.pm2 > haut ? 'Au-dessus du marché' : 'Dans le marché',
-    nbVentesComparables: ventes.length,
-    urlAnnonce: `https://app.dvf.etalab.gouv.fr/?code_commune=${insee}`,
-    urlAnalyse: `https://www.geoportail.gouv.fr/carte?c=${lon},${lat}&z=18&l0=CADASTRALPARCELS.PARCELLAIRE_EXPRESS::GEOPORTAIL:OGC:WMTS(1)`,
-    urlMaps: `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`,
-  });
-
-  log.ok(`  ${ventes.length} ventes · médiane ${med} €/m² · retenue : ${adresse}` +
-    ` · ${choisie.prix} € / ${choisie.surface} m² · DPE ${dpe?.etiquette_dpe ?? '—'}`);
+  if (!retenus) log.warn(`  aucun bien avec adresse et parcelle confirmées (médiane ${med} €/m²)`);
+  else log.info(`  ${ventes.length} ventes analysées · médiane ${med} €/m²`);
 }
 
 if (!fiches.length) {
@@ -288,10 +358,11 @@ if (!fiches.length) {
 }
 
 const note =
-  `Test sur données réelles. Les ${fiches.length} biens sont de véritables maisons du Gers : ` +
-  'adresse et coordonnées issues du DPE ADEME, prix et surfaces des ventes publiées au fichier ' +
-  `DVF (${ANNEES.at(-1)}-${ANNEES[0]}), écart au marché calculé sur ${totalVentes} ventes réelles ` +
-  'des communes retenues. Ce sont des ventes déjà conclues, pas des annonces en cours — l\'agent, ' +
+  `Données réelles. ${fiches.length} maisons du Gers, chacune à son adresse exacte et sur sa ` +
+  'parcelle cadastrale : adresse et coordonnées confirmées par le DPE ADEME, contour de parcelle ' +
+  'issu du cadastre, prix et surfaces des ventes publiées au fichier DVF ' +
+  `(${ANNEES.at(-1)}-${ANNEES[0]}), écart au marché calculé sur ${totalVentes} ventes réelles des ` +
+  'communes parcourues. Ce sont des ventes déjà conclues, pas des annonces en cours — l\'agent, ' +
   'lui, alimente cette même carte avec les annonces leboncoin du matin.';
 
 log.step('contours communaux');
@@ -301,22 +372,26 @@ try {
   log.ok(`  ${communes.length} communes`);
 } catch (e) {
   // Le fond vectoriel est un confort : sans lui, seule la carte OpenStreetMap
-  // est produite, et la démonstration reste utilisable.
+  // est produite, et la démonstration reste utilisable. En revanche on efface
+  // toute version précédente, qui passerait pour la sortie de cette exécution.
   log.warn(`  indisponible (${e.message}) — carte autonome non générée`);
+  fs.rmSync(path.join(OUT, 'carte-demo-autonome.html'), { force: true });
 }
 
 // Deux cartes : l'une avec le fond OpenStreetMap comme en production, l'autre
 // avec un fond vectoriel embarqué, qui fonctionne sans aucune requête sortante.
 const osm = writeMap(fiches, path.join(OUT, 'carte-demo.html'), {
-  title: 'Veille immobilière — Gers', note,
+  title: 'Veille immobilière — Gers', note, filtres: FILTRES,
 });
 const hors = communes.length
   ? writeMap(fiches, path.join(OUT, 'carte-demo-autonome.html'), {
       title: 'Veille immobilière — Gers',
       note,
+      filtres: FILTRES,
       basemap: {
         communes,
-        attribution: 'Contours communaux © IGN / Etalab · Prix ' +
+        cadastre: { parcelles: contexteParcelles, batiments: contexteBatiments },
+        attribution: 'Cadastre et contours © IGN / Etalab · Prix ' +
           '<a href="https://app.dvf.etalab.gouv.fr/">DVF</a> · DPE ' +
           '<a href="https://data.ademe.fr/">ADEME</a>',
       },
@@ -331,3 +406,4 @@ if (hors) {
   log.ok(`Carte (autonome)      : ${hors.file}  ${(fs.statSync(hors.file).size / 1024).toFixed(0)} Ko`);
 }
 log.ok(`Tableur               : ${path.join(OUT, 'annonces-demo.xlsx')}`);
+log.info(`Contexte cadastral    : ${contexteParcelles.length} parcelles, ${contexteBatiments.length} bâtiments`);

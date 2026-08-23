@@ -28,7 +28,13 @@ const DEFAULTS = {
     store: 'data/annonces.json',
     report: 'data/rapport.md',
     log: 'data/agent.log',
+    cache: 'data/.cache',
   },
+  // Contour cadastral des parcelles sur la carte. Nécessite un téléchargement
+  // par commune, mis en cache : la première exécution est plus longue.
+  cadastre: true,
+  // Bloc de recherche et de filtres dans la carte.
+  filtresCarte: false,
   // headless: false est nettement plus fiable face aux protections anti-bot.
   headless: false,
   // 'chrome' utilise le Chrome installé sur la machine, sinon le Chromium de Playwright.

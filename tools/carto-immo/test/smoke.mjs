@@ -219,6 +219,34 @@ check('la carte accepte un fond vectoriel et une note', () => {
   assert.ok(h.includes('"32233"'), 'la commune du bien est marquée');
 });
 
+check('la parcelle cadastrale est tracée et détaillée', () => {
+  const f = path.join(out, 'carte-parcelle.html');
+  writeMap([{
+    ...records[0],
+    parcelle: '78403000AB0604',
+    contenance: 372,
+    parcelleGeom: [[[1.8785, 49.0022], [1.8788, 49.0022], [1.8788, 49.0025], [1.8785, 49.0025], [1.8785, 49.0022]]],
+  }], f);
+  const h = fs.readFileSync(f, 'utf8');
+  assert.ok(h.includes('"78403000AB0604"'), 'la référence de parcelle est transmise');
+  assert.ok(h.includes('49.0025'), 'le contour est transmis');
+  assert.ok(h.includes('au cadastre'), 'la contenance est affichée');
+  assert.ok(h.includes('tracerParcelle'), 'le tracé est présent');
+});
+
+check('la carte peut se passer du bloc de filtres', () => {
+  const avec = path.join(out, 'carte-filtres.html');
+  const sans = path.join(out, 'carte-sans-filtres.html');
+  writeMap(records, avec, { filtres: true });
+  writeMap(records, sans, { filtres: false });
+  const a = fs.readFileSync(avec, 'utf8');
+  const b = fs.readFileSync(sans, 'utf8');
+  assert.ok(a.includes('class="filters"') && a.includes('Sous le marché'));
+  assert.ok(!b.includes('class="filters"'), 'aucun bloc de filtres');
+  assert.ok(!b.includes('id="reset"'), 'aucun bouton de réinitialisation');
+  assert.ok(b.includes('AVEC_FILTRES = false'), 'le filtrage est désactivé côté page');
+});
+
 check('sans fond vectoriel, la carte utilise OpenStreetMap', () => {
   assert.ok(fs.readFileSync(mapFile, 'utf8').includes('tile.openstreetmap.org'));
 });

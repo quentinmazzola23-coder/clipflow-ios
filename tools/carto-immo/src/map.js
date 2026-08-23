@@ -25,6 +25,7 @@ const FOND_OSM = `L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.pn
 // Fond vectoriel embarqué : la page reste lisible sans aucune requête sortante.
 const FOND_VECTORIEL = `document.querySelector('.leaflet-container').style.background = '#f3f1ec';
 const avecBien = new Set(BASEMAP.communesAvecBien || []);
+const communesPolys = [];
 for (const com of BASEMAP.communes) {
   const marque = avecBien.has(com.c);
   const poly = L.polygon(com.g.map(r => r.map(([x, y]) => [y, x])), {
@@ -35,9 +36,56 @@ for (const com of BASEMAP.communes) {
     fillOpacity: 1,
     interactive: marque,
   }).addTo(map);
+  communesPolys.push({ poly, marque });
   if (marque) poly.bindTooltip(com.n, { direction: 'top', sticky: true });
 }
 map.attributionControl.addAttribution(BASEMAP.attribution || '');`;
+
+/**
+ * Fond cadastral : parcelles et bâtiments autour de chaque bien. Il n'apparaît
+ * qu'au zoom parcelle, où le maillage communal ne dit plus rien.
+ */
+const FOND_CADASTRE = `const cadastre = L.layerGroup();
+const ZOOM_CADASTRE = 15;
+for (const poly of (BASEMAP.cadastre?.parcelles ?? [])) {
+  L.polygon(poly.map(r => r.map(([x, y]) => [y, x])), {
+    pane: 'tilePane', color: '#cfc8ba', weight: 0.7,
+    fillColor: '#f6f3ec', fillOpacity: 1, interactive: false,
+  }).addTo(cadastre);
+}
+for (const poly of (BASEMAP.cadastre?.batiments ?? [])) {
+  L.polygon(poly.map(r => r.map(([x, y]) => [y, x])), {
+    pane: 'tilePane', color: '#b9b0a0', weight: 0.6,
+    fillColor: '#ddd6c8', fillOpacity: 1, interactive: false,
+  }).addTo(cadastre);
+}
+function majFondCadastre() {
+  const veut = map.getZoom() >= ZOOM_CADASTRE;
+  if (veut && !map.hasLayer(cadastre)) cadastre.addTo(map);
+  else if (!veut && map.hasLayer(cadastre)) map.removeLayer(cadastre);
+  for (const { poly, marque } of communesPolys) {
+    poly.setStyle(veut
+      ? { fillOpacity: 0, weight: marque ? 1.2 : 0, color: '#c9c1b2' }
+      : { fillOpacity: 1, weight: marque ? 1.5 : 0.6, color: marque ? '#8fa9cd' : '#dcd7cc' });
+  }
+}
+map.on('zoomend', majFondCadastre);
+majFondCadastre();`;
+
+const BLOC_FILTRES = `<div class="filters">
+      <input type="search" id="q" placeholder="Filtrer par ville, titre, adresse…">
+      <div class="row"><label for="pmin">Prix</label>
+        <input type="number" id="pmin" placeholder="min €"><input type="number" id="pmax" placeholder="max €"></div>
+      <div class="row"><label for="smin">Surface</label>
+        <input type="number" id="smin" placeholder="min m²"><input type="number" id="smax" placeholder="max m²"></div>
+      <div class="chips">
+        <button class="chip" id="f-new" aria-pressed="false">Nouveaux</button>
+        <button class="chip" id="f-again" aria-pressed="false">Remis en ligne</button>
+        <button class="chip" id="f-under" aria-pressed="false">Sous le marché</button>
+        <button class="chip" id="f-drop" aria-pressed="false">Prix baissé</button>
+        <button class="chip" id="f-exact" aria-pressed="false">Adresse exacte</button>
+      </div>
+    </div>`;
 
 const escapeJson = (obj) =>
   JSON.stringify(obj).replace(/</g, '\\u003c').replace(/-->/g, '--\\u003e');
@@ -49,10 +97,16 @@ const escapeJson = (obj) =>
  * @param {string} [opts.title]
  * @param {string} [opts.note] Ligne de contexte affichée sous l'en-tête.
  * @param {object} [opts.basemap] Fond vectoriel autonome, à la place des tuiles
- *   OpenStreetMap : `{ communes: [{ n, c, g }], attribution }`. Utile quand la
- *   page doit fonctionner sans accès réseau.
+ *   OpenStreetMap : `{ communes: [{ n, c, g }], cadastre: { parcelles, batiments },
+ *   attribution }`. Utile quand la page doit fonctionner sans accès réseau.
+ * @param {boolean} [opts.filtres] Affiche le bloc de recherche et de filtres.
+ *   À `false`, la carte va droit aux biens et à leur localisation exacte.
  */
-export function writeMap(records, file, { title = 'Veille immobilière', note = null, basemap = null } = {}) {
+export function writeMap(
+  records,
+  file,
+  { title = 'Veille immobilière', note = null, basemap = null, filtres = true } = {}
+) {
   const points = records
     .filter((r) => Number.isFinite(r.latitude) && Number.isFinite(r.longitude))
     .map((r) => ({
@@ -70,6 +124,9 @@ export function writeMap(records, file, { title = 'Veille immobilière', note = 
       ad: r.adresseEstimee,
       cf: r.confianceAdresse,
       pr: r.localisationPrecise,
+      pcl: r.parcelle ?? null,
+      pg: r.parcelleGeom ?? null,
+      ct: r.contenance ?? null,
       la: r.latitude,
       lo: r.longitude,
       dpe: r.dpe,
@@ -183,21 +240,8 @@ input[type=search]{padding-left:10px}
       <div class="sub" id="stamp"></div>
       ${note ? `<p class="note">${note}</p>` : ''}
     </header>
-    <div class="filters">
-      <input type="search" id="q" placeholder="Filtrer par ville, titre, adresse…">
-      <div class="row"><label for="pmin">Prix</label>
-        <input type="number" id="pmin" placeholder="min €"><input type="number" id="pmax" placeholder="max €"></div>
-      <div class="row"><label for="smin">Surface</label>
-        <input type="number" id="smin" placeholder="min m²"><input type="number" id="smax" placeholder="max m²"></div>
-      <div class="chips">
-        <button class="chip" id="f-new" aria-pressed="false">Nouveaux</button>
-        <button class="chip" id="f-again" aria-pressed="false">Remis en ligne</button>
-        <button class="chip" id="f-under" aria-pressed="false">Sous le marché</button>
-        <button class="chip" id="f-drop" aria-pressed="false">Prix baissé</button>
-        <button class="chip" id="f-exact" aria-pressed="false">Adresse exacte</button>
-      </div>
-    </div>
-    <div id="count"><span></span><button id="reset">Réinitialiser</button></div>
+    ${filtres ? BLOC_FILTRES : ''}
+    <div id="count"><span></span>${filtres ? '<button id="reset">Réinitialiser</button>' : ''}</div>
     <div id="list"></div>
   </aside>
   <div id="map"></div>
@@ -207,6 +251,7 @@ input[type=search]{padding-left:10px}
 const DATA = ${escapeJson(points)};
 const GENERATED = ${escapeJson(new Date().toISOString())};
 const SANS_COORDS = ${sansCoords};
+const AVEC_FILTRES = ${filtres};
 const BASEMAP = ${basemap ? escapeJson(basemap) : 'null'};
 
 const eur = n => n == null ? '—' : new Intl.NumberFormat('fr-FR').format(Math.round(n)) + ' €';
@@ -233,15 +278,23 @@ document.getElementById('stamp').textContent =
 const map = L.map('map', { zoomControl: true, scrollWheelZoom: true });
 
 ${basemap ? FOND_VECTORIEL : FOND_OSM}
+${basemap?.cadastre ? FOND_CADASTRE : ''}
 
 const layer = L.layerGroup().addTo(map);
+const parcelles = L.layerGroup().addTo(map);
 const markers = new Map();
 let selected = null;
 let shownCount = 0;
 let showPills = true;
 
-/** Pastilles de prix tant que la carte reste lisible, points sinon. */
-function pillsWanted(){ return shownCount <= 80 || map.getZoom() >= 12; }
+/**
+ * Pastilles de prix tant que la carte reste lisible. Au zoom parcelle on
+ * repasse au point : la pastille masquerait le contour du terrain, qui est
+ * justement ce qu'on vient regarder.
+ */
+function pillsWanted(){
+  return (shownCount <= 80 || map.getZoom() >= 12) && map.getZoom() < 17;
+}
 
 function icon(d, sel){
   const c = tone(d);
@@ -263,6 +316,10 @@ function popup(d){
   push('Surface', d.s ? num(d.s) + ' m²' + (d.pc ? ' · ' + d.pc + ' pièces' : '') : null);
   push('Terrain', d.te ? num(d.te) + ' m²' : null);
   push('Adresse', d.ad ? esc(d.ad) + (d.cf ? ' <span style="color:var(--muted)">(' + d.cf + '%)</span>' : '') : (d.v ? esc(d.v) + ' — localisation approchée' : null));
+  push('Parcelle', d.pcl
+    ? '<span style="font-variant-numeric:tabular-nums">' + esc(d.pcl) + '</span>' +
+      (d.ct ? ' <span style="color:var(--muted)">· ' + num(d.ct) + ' m² au cadastre</span>' : '')
+    : null);
   push('DPE', d.dpe ? dpeBadge(d.dpe) + (d.ges ? ' &nbsp;GES ' + dpeBadge(d.ges) : '') : null);
   push('Construit en', d.an);
   if (d.ec != null) {
@@ -316,6 +373,7 @@ function card(d){
 const F = { q:'', pmin:null, pmax:null, smin:null, smax:null, nw:false, again:false, under:false, drop:false, exact:false };
 
 function matches(d){
+  if (!AVEC_FILTRES) return true;
   if (F.q) {
     const hay = ((d.t || '') + ' ' + (d.v || '') + ' ' + (d.ad || '') + ' ' + (d.cp || '')).toLowerCase();
     if (!hay.includes(F.q)) return false;
@@ -333,7 +391,11 @@ function matches(d){
 }
 
 function select(id, fly){
-  if (selected && markers.has(selected)) markers.get(selected).m.setIcon(icon(markers.get(selected).d, false));
+  if (selected && markers.has(selected)) {
+    const p = markers.get(selected);
+    p.m.setIcon(icon(p.d, false));
+    if (p.parcelle) p.parcelle.setStyle({ color: '#3b6fb0', weight: 2.2, fillColor: '#5c86bd', fillOpacity: 0.18 });
+  }
   selected = id;
   document.querySelectorAll('.card.sel').forEach(e => e.classList.remove('sel'));
   const el = document.querySelector('.card[data-id="' + id + '"]');
@@ -341,13 +403,56 @@ function select(id, fly){
   const entry = markers.get(id);
   if (entry) {
     entry.m.setIcon(icon(entry.d, true));
-    if (fly) map.flyTo(entry.m.getLatLng(), Math.max(map.getZoom(), 15), { duration:.6 });
-    entry.m.openPopup();
+    if (entry.parcelle) {
+      entry.parcelle.setStyle({ color: '#0f2742', weight: 3.5, fillColor: '#3b6fb0', fillOpacity: 0.38 });
+      entry.parcelle.bringToFront();
+    }
+    // La fiche s'ancre au même point que la parcelle : sans décalage, elle la
+    // recouvre. On la remonte de la demi-hauteur réelle du terrain à l'écran.
+    const ouvrirFiche = () => {
+      if (entry.parcelle) {
+        const b = entry.parcelle.getBounds();
+        const haut = map.latLngToContainerPoint(b.getNorthWest()).y;
+        const bas = map.latLngToContainerPoint(b.getSouthEast()).y;
+        entry.m.getPopup().options.offset = L.point(0, -(Math.abs(bas - haut) / 2 + 14));
+      }
+      entry.m.openPopup();
+    };
+
+    if (fly) {
+      // Cadrer la parcelle plutôt que le point : on voit la forme du terrain.
+      map.once('moveend', ouvrirFiche);
+      if (entry.parcelle) {
+        map.flyToBounds(entry.parcelle.getBounds().pad(1.2), {
+          duration: .6,
+          maxZoom: 19,
+          paddingTopLeft: [20, 360],
+          paddingBottomRight: [20, 40],
+        });
+      } else {
+        map.flyTo(entry.m.getLatLng(), Math.max(map.getZoom(), 17), { duration: .6 });
+      }
+    } else {
+      ouvrirFiche();
+    }
   }
+}
+
+/** Contour de la parcelle cadastrale du bien, en évidence quand il est choisi. */
+function tracerParcelle(d, sel){
+  if (!d.pg) return null;
+  return L.polygon(d.pg.map(r => r.map(([x, y]) => [y, x])), {
+    color: sel ? '#0f2742' : '#3b6fb0',
+    weight: sel ? 3.5 : 2.2,
+    fillColor: sel ? '#3b6fb0' : '#5c86bd',
+    fillOpacity: sel ? 0.38 : 0.18,
+    interactive: false,
+  }).addTo(parcelles);
 }
 
 function render(){
   layer.clearLayers();
+  parcelles.clearLayers();
   markers.clear();
   const shown = DATA.filter(matches);
   shownCount = shown.length;
@@ -358,7 +463,7 @@ function render(){
       .bindPopup(popup(d), { closeButton:true, autoPanPadding:[30,30] })
       .on('click', () => select(d.id, false));
     layer.addLayer(m);
-    markers.set(d.id, { m, d });
+    markers.set(d.id, { m, d, parcelle: tracerParcelle(d, false) });
   }
 
   const list = document.getElementById('list');
@@ -376,25 +481,27 @@ function render(){
 }
 
 const numOrNull = v => v === '' || v == null ? null : Number(v);
-const on = (id, ev, fn) => document.getElementById(id).addEventListener(ev, fn);
+const on = (id, ev, fn) => document.getElementById(id)?.addEventListener(ev, fn);
 
-on('q', 'input', e => { F.q = e.target.value.trim().toLowerCase(); render(); });
-for (const [id, key] of [['pmin','pmin'],['pmax','pmax'],['smin','smin'],['smax','smax']]) {
-  on(id, 'input', e => { F[key] = numOrNull(e.target.value); render(); });
-}
-for (const [id, key] of [['f-new','nw'],['f-again','again'],['f-under','under'],['f-drop','drop'],['f-exact','exact']]) {
-  on(id, 'click', e => {
-    F[key] = !F[key];
-    e.currentTarget.setAttribute('aria-pressed', String(F[key]));
+if (AVEC_FILTRES) {
+  on('q', 'input', e => { F.q = e.target.value.trim().toLowerCase(); render(); });
+  for (const [id, key] of [['pmin','pmin'],['pmax','pmax'],['smin','smin'],['smax','smax']]) {
+    on(id, 'input', e => { F[key] = numOrNull(e.target.value); render(); });
+  }
+  for (const [id, key] of [['f-new','nw'],['f-again','again'],['f-under','under'],['f-drop','drop'],['f-exact','exact']]) {
+    on(id, 'click', e => {
+      F[key] = !F[key];
+      e.currentTarget.setAttribute('aria-pressed', String(F[key]));
+      render();
+    });
+  }
+  on('reset', 'click', () => {
+    Object.assign(F, { q:'', pmin:null, pmax:null, smin:null, smax:null, nw:false, again:false, under:false, drop:false, exact:false });
+    document.querySelectorAll('.filters input').forEach(i => { i.value = ''; });
+    document.querySelectorAll('.chip').forEach(c => c.setAttribute('aria-pressed','false'));
     render();
   });
 }
-on('reset', 'click', () => {
-  Object.assign(F, { q:'', pmin:null, pmax:null, smin:null, smax:null, nw:false, again:false, under:false, drop:false, exact:false });
-  document.querySelectorAll('.filters input').forEach(i => { i.value = ''; });
-  document.querySelectorAll('.chip').forEach(c => c.setAttribute('aria-pressed','false'));
-  render();
-});
 
 // Quand les marqueurs deviennent nombreux ou la carte très dézoomée, les
 // pastilles de prix se chevauchent : on bascule sur de simples points.
