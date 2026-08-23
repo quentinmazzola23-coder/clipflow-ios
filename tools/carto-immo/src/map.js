@@ -282,7 +282,17 @@ export function writeMap(
 
   // En mode autonome la page ne doit émettre aucune requête : les photos, qui
   // sont hébergées par le site d'annonces, laisseraient des cadres vides.
-  if (basemap) for (const p of points) { p.ph = null; p.phs = []; }
+  // Une page autonome ne doit émettre aucune requête : les photos hébergées par
+  // le site d'annonces laisseraient des cadres vides. Celles déjà embarquées en
+  // data-URI, elles, restent — c'est justement ce qui permet de comparer
+  // l'annonce à la vue du ciel hors ligne.
+  const embarquee = (u) => typeof u === 'string' && u.startsWith('data:');
+  if (basemap) {
+    for (const p of points) {
+      p.phs = (p.phs ?? []).filter(embarquee);
+      if (!embarquee(p.ph)) p.ph = p.phs[0] ?? null;
+    }
+  }
 
   const sansCoords = records.length - points.length;
   const { css, js } = inlineLeaflet();
@@ -1667,19 +1677,24 @@ function majBoutonCorrections(){
 const banniere = document.getElementById('travaux');
 const montrer = (html) => { banniere.innerHTML = html; banniere.classList.add('on'); };
 
-on('corrections', 'click', () => {
+on('corrections', 'click', async () => {
   const contenu = JSON.stringify(recal, null, 1);
   if (SERVEUR) {
     montrer('<b>Recalages enregistrés</b><div class="lignes">Ils seront repris à la prochaine carte.</div>');
     setTimeout(() => banniere.classList.remove('on'), 3000);
     return;
   }
-  const a = document.createElement('a');
-  a.href = 'data:application/json;charset=utf-8,' + encodeURIComponent(contenu);
-  a.download = 'recalages.json';
-  a.click();
-  montrer('<b>recalages.json exporté</b><div class="lignes">' +
-    'node src/cli.js recaler recalages.json</div>');
+  // Le presse-papiers plutôt qu'un téléchargement : une carte consultée depuis
+  // un lien n'a pas le droit de déposer un fichier, et un bouton qui ne fait
+  // rien vaut moins que pas de bouton du tout.
+  try {
+    await navigator.clipboard.writeText(contenu);
+    montrer('<b>Recalages copiés</b><div class="lignes">' +
+      'Colle-les dans recalages.json, puis :<br>node src/cli.js recaler recalages.json</div>');
+  } catch {
+    montrer('<b>Recalages à reporter</b><div class="lignes">' +
+      esc(contenu).slice(0, 2000) + '</div>');
+  }
 });
 
 // ── Analyser une commune ─────────────────────────────────────────────────
