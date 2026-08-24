@@ -415,14 +415,32 @@ final class RenderQueueController {
                 // même chose. Elle ne fait rien quand le rapport colle déjà et
                 // que le cadrage est au centre, ce qui est le cas courant.
                 var exportURL = result.outputURL
+                // Dimensions et poids RÉELLEMENT livrés, quand le recadrage a
+                // eu lieu : le bilan décrivait sinon le fichier intermédiaire,
+                // que personne ne verra jamais.
+                var deliveredWidth = result.width
+                var deliveredHeight = result.height
+                var deliveredBytes = result.fileSizeBytes
                 if let framed = try? await ClipReframer.reframe(
                     source: result.outputURL,
                     outputFormat: project.outputFormat,
                     cropToFill: project.cropToFillOutput,
-                    cropCenter: passage.cropCenter
+                    cropCenter: passage.cropCenter,
+                    colorimetry: passage.colorimetry
                 ) {
                     try? FileManager.default.removeItem(at: result.outputURL)
                     exportURL = framed
+                    let framedAsset = AVURLAsset(url: framed)
+                    if let track = try? await framedAsset.loadTracks(withMediaType: .video).first,
+                       let natural = try? await track.load(.naturalSize),
+                       let transform = try? await track.load(.preferredTransform) {
+                        let oriented = natural.applying(transform)
+                        deliveredWidth = Int(abs(oriented.width).rounded())
+                        deliveredHeight = Int(abs(oriented.height).rounded())
+                    }
+                    deliveredBytes = Int64(
+                        (try? framed.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                    )
                 }
                 // Album par projet (réglage global) : sinon album commun.
                 let assetID = try await PhotoExportService.saveToPhotos(
@@ -505,8 +523,8 @@ final class RenderQueueController {
                 snapshot.lastResultSummary = String(
                     format: "%@ — %.2f s, %d images, %@, %d×%d, %@, moteur : %@%@, rendu en %.0f s",
                     filename, result.durationSeconds, result.frameCount,
-                    result.codec.uppercased(), result.width, result.height,
-                    StorageManager.formatBytes(result.fileSizeBytes),
+                    result.codec.uppercased(), deliveredWidth, deliveredHeight,
+                    StorageManager.formatBytes(deliveredBytes),
                     result.engineName, corrected, result.processingSeconds
                 )
             } catch is CancellationError {

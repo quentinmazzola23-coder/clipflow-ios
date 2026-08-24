@@ -23,6 +23,7 @@
 
 import Foundation
 import AVFoundation
+import CoreVideo
 import CoreGraphics
 
 enum ClipReframer {
@@ -39,7 +40,8 @@ enum ClipReframer {
     static func reframe(source: URL,
                         outputFormat: MontageOutputFormat,
                         cropToFill: Bool,
-                        cropCenter: CGPoint) async throws -> URL? {
+                        cropCenter: CGPoint,
+                        colorimetry: String) async throws -> URL? {
         let asset = AVURLAsset(url: source)
         guard let track = try? await asset.loadTracks(withMediaType: .video).first,
               let naturalSize = try? await track.load(.naturalSize),
@@ -60,7 +62,16 @@ enum ClipReframer {
         // d'encodage.
         let sameShape = abs(orientedSize.width / orientedSize.height
                             - target.width / target.height) < 0.001
-        let centred = abs(cropCenter.x - 0.5) < 0.001 && abs(cropCenter.y - 0.5) < 0.001
+        // LE CENTRE BORNÉ, jamais celui du modèle. Un cadrage posé pour un
+        // format vertical reste enregistré tel quel si l'on repasse en 16:9 ;
+        // il est alors ramené au centre par le bornage, et la transformation
+        // appliquée est l'identité. Comparer la valeur brute faisait réencoder
+        // tout le clip pour produire un fichier identique au précédent.
+        let safe = CropGeometry.clamp(cropCenter,
+                                      orientedSize: orientedSize,
+                                      renderSize: target,
+                                      cropToFill: cropToFill)
+        let centred = abs(safe.x - 0.5) < 0.001 && abs(safe.y - 0.5) < 0.001
         if sameShape && centred { return nil }
 
         let composition = AVMutableVideoComposition()
@@ -71,6 +82,25 @@ enum ClipReframer {
         composition.frameDuration = CMTime(
             value: 1, timescale: CMTimeScale(max(1, nominal.rounded()))
         )
+
+        // ESPACE DÉCLARÉ EXPLICITEMENT EN SDR.
+        //
+        // Laissé à nil, AVFoundation propage celui de la source — ce qui est
+        // correct, mais implicite : le rendu et l'étiquetage dépendent alors de
+        // ce que la piste porte, et le fichier rendu en amont est le seul à le
+        // savoir. Le poser ici rend cette passe DÉTERMINISTE sur le chemin qui
+        // représente la quasi-totalité des exports.
+        //
+        // EN HDR, ON NE TOUCHE À RIEN. Les combinaisons acceptées par
+        // AVVideoComposition sont limitées, et forcer un triplet BT.2020 sur ce
+        // chemin risquerait d'abîmer des montages HDR qui, eux, n'ont jamais
+        // été signalés comme fautifs. La propagation reste le comportement le
+        // moins présomptueux.
+        if colorimetry == "sdr" {
+            composition.colorPrimaries = kCVImageBufferColorPrimaries_ITU_R_709_2 as String
+            composition.colorTransferFunction = kCVImageBufferTransferFunction_ITU_R_709_2 as String
+            composition.colorYCbCrMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String
+        }
 
         let instruction = AVMutableVideoCompositionInstruction()
         let duration = try await asset.load(.duration)

@@ -75,6 +75,9 @@ enum MontageComposer {
                       overlays: [ResolvedOverlay] = [],
                       outputFormat: MontageOutputFormat = .auto,
                       cropToFill: Bool = true,
+                      /// Colorimétrie COMMUNE des clips ("sdr" si tous le sont).
+                      /// Sert uniquement à déclarer l'espace de la composition.
+                      colorimetry: String = "inconnue",
                       renderAtNativeSize: Bool = false,
                       forExport: Bool = false) async throws -> MontageComposition {
         guard !plan.placements.isEmpty else { throw MontageComposerError.emptyPlan }
@@ -252,6 +255,20 @@ enum MontageComposer {
         let videoComposition = AVMutableVideoComposition()
         videoComposition.instructions = [instruction]
         videoComposition.renderSize = renderSize
+        // ESPACE DÉCLARÉ EXPLICITEMENT EN SDR, comme au recadrage clip par clip.
+        //
+        // À nil, AVFoundation propage celui des pistes — correct, mais implicite,
+        // et la piste réunit des segments venus de fichiers différents (plage
+        // cachée, version lissée, copie source). Le déclarer supprime cette
+        // inconnue là où elle n'a pas lieu d'être.
+        //
+        // EN HDR, RIEN N'EST FORCÉ : les combinaisons acceptées sont limitées, et
+        // un montage HDR n'a jamais été signalé comme fautif.
+        if colorimetry == "sdr" {
+            videoComposition.colorPrimaries = kCVImageBufferColorPrimaries_ITU_R_709_2 as String
+            videoComposition.colorTransferFunction = kCVImageBufferTransferFunction_ITU_R_709_2 as String
+            videoComposition.colorYCbCrMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String
+        }
         // 60 i/s, demandé explicitement, avec la conséquence assumée : un clip
         // ralenti 0,5× depuis une source 60 i/s ne produit une image NOUVELLE
         // qu'une fois sur deux, et l'encodeur duplique l'autre. Le fichier est

@@ -29,6 +29,7 @@
 
 import Foundation
 import SwiftUI
+import SwiftData
 
 @Observable
 @MainActor
@@ -77,10 +78,14 @@ final class MontageExportController {
     func start(plan: MontagePlan,
                sources: [Int: URL],
                crops: [Int: CGPoint] = [:],
+               /// Clips à enfiler dans la file d'export UNE FOIS le montage
+               /// enregistré. Vide = montage seul.
+               clipsAfterwards: [PersistentIdentifier] = [],
                musicURL: URL,
                overlays: [ResolvedOverlay] = [],
                outputFormat: MontageOutputFormat = .auto,
                cropToFill: Bool = true,
+               colorimetry: String = "inconnue",
                upscale: Bool = true,
                sourceOriented: CGSize = .zero,
                smoothing: [MontageSmoothingRequest] = [],
@@ -139,6 +144,7 @@ final class MontageExportController {
                     // agrandir avec l'image, donc flouter.
                     overlays: twoPass ? [] : overlays,
                     outputFormat: outputFormat, cropToFill: cropToFill,
+                    colorimetry: colorimetry,
                     renderAtNativeSize: twoPass,
                     forExport: true
                 )
@@ -187,6 +193,20 @@ final class MontageExportController {
                 _ = try await PhotoExportService.saveToPhotos(fileURL: fileURL,
                                                              projectName: albumName)
                 try? FileManager.default.removeItem(at: fileURL)
+                // ANNULATION RESPECTÉE JUSQU'AU BOUT. L'écriture dans Photos
+                // dure des dizaines de secondes sur un montage long, barre à
+                // 100 % : c'est précisément là qu'on croit à un blocage et
+                // qu'on touche la croix. Sans ce point de contrôle, l'export
+                // s'annonçait « enregistré » et lançait quand même toute la
+                // file de clips, que rien n'arrêtait ensuite.
+                try Task.checkCancellation()
+                // CLIPS ENFILÉS APRÈS, jamais pendant : deux rendus 4K
+                // simultanés se disputeraient l'encodeur et l'appareil
+                // chaufferait pour rien. La file démarre d'elle-même et
+                // survit à la fermeture de l'écran, comme cet export.
+                if !clipsAfterwards.isEmpty {
+                    RenderQueueController.shared.enqueue(passageIDs: clipsAfterwards)
+                }
                 self?.finish(.saved)
             } catch is CancellationError {
                 self?.finish(.cancelled)

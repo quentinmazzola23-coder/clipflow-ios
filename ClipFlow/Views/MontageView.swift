@@ -43,6 +43,21 @@ struct MontageView: View {
     /// que `passageIDs` ferme déjà à l'export : `clipID` est une POSITION dans
     /// `orderedPassages`, et supprimer un clip décale tous les suivants.
     @State private var clipCrops: [Int: CGPoint] = [:]
+    @State private var showClips = false
+    /// Vrai tant qu'une reconstruction de plan est en vol.
+    ///
+    /// Le plan, les sources, les cadrages et les requêtes de lissage sont
+    /// publiés ENSEMBLE, à la fin. Exporter entre-temps partait sur l'ancien
+    /// plan : le montage ignorait le réordonnancement, et les fichiers lissés
+    /// s'écrivaient sur les identités du NOUVEL ordre — un clip recevait les
+    /// images d'un autre, définitivement.
+    ///
+    /// `rebuildTask` ne pouvait pas servir de témoin : il n'est jamais remis à
+    /// nil, le bouton serait resté grisé à vie.
+    @State private var isRebuilding = false
+    /// Identités des passages TELLES QUE LE PLAN COURANT les numérote.
+    /// `clipID` est l'index dans CE tableau, jamais dans une liste relue plus tard.
+    @State private var planPassageIDs: [PersistentIdentifier] = []
     /// Clips qui gagneraient à être lissés à 60 i/s, par identifiant de clip.
     ///
     /// Rempli à la construction du plan parce que la piste vidéo y est DÉJÀ
@@ -182,6 +197,7 @@ struct MontageView: View {
         // elle-même quand le projet n'a pas encore de musique, et l'aperçu
         // continuait alors sous la feuille — bande-son du montage mêlée aux
         // extraits écoutés. Même patron que ProjectEditorView.
+        .onChange(of: showClips) { _, presented in if presented { silence() } }
         .onChange(of: showOverlays) { _, presented in if presented { silence() } }
         .onChange(of: showLibrary) { _, presented in if presented { silence() } }
         .onChange(of: showFileImporter) { _, presented in if presented { silence() } }
@@ -201,6 +217,14 @@ struct MontageView: View {
                                       backdrop: overlayBackdrop,
                                       videoRatio: overlayVideoRatio)
                 }
+            }
+        }
+        .sheet(isPresented: $showClips) {
+            MontageClipsSheet(project: project) {
+                // L'ordre ou le contenu a changé : le plan décrit un montage
+                // qui n'existe plus.
+                rebuildTask?.cancel()
+                rebuildTask = Task { await rebuildPlan() }
             }
         }
         .sheet(isPresented: $showLibrary) {
@@ -319,6 +343,28 @@ struct MontageView: View {
                             currentTime: previewTime,
                             videoRatio: previewVideoRatio
                         )
+                        // NUMÉRO DU PLAN EN COURS, discret mais toujours là.
+                        //
+                        // Sans lui, repérer un plan raté ne menait à rien : on
+                        // le voyait passer sans pouvoir le nommer. C'est le
+                        // même numéro que celui de la liste des clips — c'est
+                        // toute son utilité.
+                        if let number = currentClipNumber {
+                            VStack {
+                                HStack {
+                                    Spacer()
+                                    Text("\(number)")
+                                        .font(.caption2.monospacedDigit().weight(.semibold))
+                                        .foregroundStyle(.white.opacity(0.85))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 3)
+                                        .background(.black.opacity(0.45), in: Capsule())
+                                        .padding(8)
+                                }
+                                Spacer()
+                            }
+                            .allowsHitTesting(false)
+                        }
                     } else {
                         RoundedRectangle(cornerRadius: 12)
                             .fill(.black.opacity(0.6))
@@ -712,6 +758,20 @@ struct MontageView: View {
             // actif et ne répondait pas, ce qui se lit comme une panne.
             .opacity(isExporting ? 0.35 : 1)
 
+            // LES CLIPS DU MONTAGE : leur ordre, leur numéro, leur retrait.
+            //
+            // L'écran montrait le résultat sans jamais donner accès à la
+            // matière : on voyait bien qu'un plan tombait mal, sans pouvoir
+            // dire lequel ni le retirer sans ressortir vers le dérushage.
+            Button {
+                showClips = true
+            } label: {
+                Image(systemName: "square.grid.3x3")
+            }
+            .buttonStyle(GlassIconButtonStyle(tint: .secondary, diameter: 46))
+            .accessibilityLabel("Clips du montage (\(project.orderedPassages.count))")
+            .disabled(isExporting || project.orderedPassages.isEmpty)
+
             Button {
                 togglePreview()
             } label: {
@@ -728,7 +788,7 @@ struct MontageView: View {
             .accessibilityLabel(isBuildingPreview
                                 ? "Préparation de l'aperçu"
                                 : (isPreviewing ? "Pause" : "Aperçu"))
-            .disabled(isExporting || isBuildingPreview
+            .disabled(isExporting || isBuildingPreview || isRebuilding
                       || (plan?.placements.isEmpty ?? true))
 
             Spacer()
@@ -757,7 +817,9 @@ struct MontageView: View {
                 }
                 .buttonStyle(.glassProminent)
                 .tint(Theme.accent)
-                .disabled(plan?.placements.isEmpty ?? true)
+                // GRISÉ PENDANT LA RECONSTRUCTION : le plan affiché n'est pas
+                // encore celui qui partirait.
+                .disabled(isRebuilding || (plan?.placements.isEmpty ?? true))
             }
         }
         .padding(.horizontal, 16)
@@ -1003,12 +1065,18 @@ struct MontageView: View {
         player = nil
         playerGeneration = nil
 
+        isRebuilding = true
+        // CAPTURE UNIQUE de la liste : la boucle saute les passages sans média
+        // (`continue`), donc `index` numérote TOUS les passages, sautés compris.
+        // Relire `orderedPassages` plus tard donnerait une autre numérotation.
+        let passages = project.orderedPassages
+
         var candidates: [MontageClipCandidate] = []
         var sources: [Int: URL] = [:]
         var crops: [Int: CGPoint] = [:]
         var smoothing: [Int: MontageSmoothingRequest] = [:]
 
-        for (index, passage) in project.orderedPassages.enumerated() {
+        for (index, passage) in passages.enumerated() {
             // VERSION LISSÉE D'ABORD si elle existe, plage cachée ensuite
             // (autonome), copie source en dernier recours.
             //
@@ -1106,6 +1174,8 @@ struct MontageView: View {
         clipSources = sources
         clipCrops = crops
         smoothingRequests = smoothing
+        planPassageIDs = passages.map { $0.persistentModelID }
+        isRebuilding = false
         // Le PREMIER placement peut changer de clip, donc d'orientation : la
         // vignette de pose et la taille de rendu mémorisée décriraient un
         // montage qui n'existe plus.
@@ -1154,10 +1224,13 @@ struct MontageView: View {
             isPreviewing = true
             return
         }
-        guard let plan, let filename = project.musicFilename else { return }
+        // JAMAIS PENDANT UNE RECONSTRUCTION : le plan affiché n'est pas encore
+        // celui qui sera exporté.
+        guard let plan, !isRebuilding, let filename = project.musicFilename else { return }
         let generation = planGeneration
         let sources = clipSources
         let crops = clipCrops
+        let colorimetry = montageColorimetry
         let token = UUID()
         previewToken = token
         isBuildingPreview = true
@@ -1172,7 +1245,8 @@ struct MontageView: View {
                     musicURL: MusicStore.url(forMusicFilename: filename),
                     overlays: resolvedOverlays, // dessinées par-dessus, pas incrustées ici
                     outputFormat: project.outputFormat,
-                    cropToFill: project.cropToFillOutput
+                    cropToFill: project.cropToFillOutput,
+                    colorimetry: colorimetry
                 )
                 // La construction dure plusieurs secondes : l'écran a pu être
                 // fermé, ou le plan reconstruit, entre-temps. Installer ce
@@ -1251,6 +1325,51 @@ struct MontageView: View {
 
     // MARK: - Export
 
+    /// Numéro du clip actuellement à l'écran, tel qu'il apparaît dans la liste.
+    ///
+    /// C'EST `clipID + 1`, c'est-à-dire le rang du PASSAGE — jamais le rang du
+    /// placement dans le montage. Les deux coïncident tant que tous les clips
+    /// sont placés, et divergent dès qu'un seul est écarté faute de matière
+    /// (l'en-tête l'annonce : « 39/40 clips »). On lisait alors 8 à l'écran, on
+    /// supprimait la ligne 8, et c'était le clip 9 qu'il fallait retirer : le
+    /// numéro désignait la mauvaise ligne, ce qui est pire que pas de numéro.
+    ///
+    /// Un clip posé deux fois porte donc le même numéro à ses deux passages —
+    /// c'est la vérité : c'est le même clip.
+    /// Colorimétrie COMMUNE du montage, ou "inconnue" si les clips diffèrent.
+    ///
+    /// Un montage tout SDR peut déclarer son espace sans rien supposer. Dès
+    /// qu'un clip HDR s'y mêle, plus aucune valeur unique n'est vraie : on
+    /// laisse alors AVFoundation propager, comme avant.
+    private var montageColorimetry: String {
+        // SUR LES CLIPS RÉELLEMENT PLACÉS, comme à l'export : un clip écarté du
+        // plan ne doit pas décider de l'espace d'un montage où il ne figure pas.
+        let ordered = project.orderedPassages
+        let population: [Passage]
+        if let plan {
+            population = Set(plan.placements.map { $0.clipID }).sorted()
+                .compactMap { $0 >= 0 && $0 < ordered.count ? ordered[$0] : nil }
+        } else {
+            population = ordered
+        }
+        let all = Set(population.map { $0.colorimetry })
+        return all.count == 1 ? (all.first ?? "inconnue") : "inconnue"
+    }
+
+    private var currentClipNumber: Int? {
+        guard let plan, !plan.placements.isEmpty else { return nil }
+        let now = CMTime(seconds: previewTime, preferredTimescale: 600)
+        // Recherche à rebours : le dernier placement commencé est celui qu'on
+        // regarde. Les vides entre deux créneaux gardent le numéro précédent,
+        // ce qui vaut mieux qu'un affichage qui clignote.
+        for placement in plan.placements.reversed() {
+            if CMTimeCompare(placement.timelineStart, now) <= 0 {
+                return placement.clipID + 1
+            }
+        }
+        return plan.placements.first.map { $0.clipID + 1 }
+    }
+
     /// Taille orientée du rush qui fournit le PREMIER clip placé — celle qui
     /// décide du cadre en mode automatique et du facteur d'agrandissement.
     ///
@@ -1282,15 +1401,43 @@ struct MontageView: View {
         // la fermeture de l'écran : supprimer un clip pendant qu'il tourne
         // décalerait les index, et le fichier lissé d'un clip atterrirait sur
         // un autre — un contenu faux, présenté comme valide.
-        let passageIDs = project.orderedPassages.map(\.persistentModelID)
+        let passageIDs = planPassageIDs
+        // LES CLIPS RÉELLEMENT MONTÉS, et eux seuls.
+        //
+        // Un clip écarté du plan — trop court pour son créneau, média absent —
+        // n'a pas à peser sur des décisions qui portent sur le montage :
+        // décider du suréchantillonnage ou de l'espace colorimétrique sur un
+        // clip qui n'y figure pas revenait à laisser un absent trancher.
+        let placedPassages = Set(plan.placements.map { $0.clipID })
+            .sorted()
+            .compactMap { index -> Passage? in
+                let ordered = project.orderedPassages
+                return index >= 0 && index < ordered.count ? ordered[index] : nil
+            }
+        let placedColorimetry: String = {
+            let all = Set(placedPassages.map { $0.colorimetry })
+            return all.count == 1 ? (all.first ?? "inconnue") : "inconnue"
+        }()
+        // CLIPS À ENFILER : ni ceux déjà dans Photos, ni les rejetés — le même
+        // filtre que le bouton d'export manuel. Sans lui, chaque montage
+        // déposait une seconde copie de chaque clip déjà exporté.
+        let clipsToQueue = project.exportClipsWithMontage
+            ? placedPassages
+                .filter { $0.exportState != .exported && $0.status != .rejete }
+                .map { $0.persistentModelID }
+            : []
         MontageExportController.shared.start(
             plan: plan,
             sources: clipSources,
             crops: clipCrops,
+            // TOUT EXPORTER D'UN COUP : le montage fini, puis les clips isolés.
+            // La file part d'elle-même une fois le montage enregistré.
+            clipsAfterwards: clipsToQueue,
             musicURL: MusicStore.url(forMusicFilename: filename),
             overlays: resolvedOverlays,
             outputFormat: project.outputFormat,
             cropToFill: project.cropToFillOutput,
+            colorimetry: placedColorimetry,
             // SECONDE PASSE RÉSERVÉE AU SDR.
             //
             // L'agrandisseur décode en BGRA 8 bits et réécrit en Rec.709 : sur
@@ -1300,7 +1447,7 @@ struct MontageView: View {
             // AVFoundation agrandir en une passe et garder la plage dynamique
             // intacte, sans rien demander à l'utilisateur.
             upscale: project.upscaleOnExport
-                && project.orderedPassages.allSatisfy { $0.colorimetry == "sdr" },
+                && placedPassages.allSatisfy { $0.colorimetry == "sdr" },
             sourceOriented: firstPlacedRushSize,
             smoothing: smoothing,
             onSmoothed: { produced in

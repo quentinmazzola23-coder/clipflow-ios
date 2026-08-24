@@ -1273,6 +1273,9 @@ struct ProjectEditorView: View {
             }
             MontageSmoothing.discard(passage)
             modelContext.delete(passage)
+            // Rangs consécutifs : `validationIndex` reste la POSITION du clip,
+            // donc tous les écrans affichent le même numéro pour le même clip.
+            project.renumberPassages()
             try? modelContext.save()
         } restore: {
             passage.isPendingDeletion = false

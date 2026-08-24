@@ -114,6 +114,16 @@ final class ClipProject {
     /// definition finale — au prix d'un second encodage complet.
     var upscaleOnExport: Bool = true
 
+    /// Exporter AUSSI les clips un par un après le montage.
+    ///
+    /// Le montage est le produit fini ; les clips isolés servent à en refaire
+    /// autre chose ailleurs. Les vouloir tous les deux était possible mais
+    /// demandait de revenir lancer la file d'export à la main, une fois le
+    /// montage terminé — donc de rester devant. La file part toute seule
+    /// APRÈS le montage : jamais pendant, sous peine de faire se disputer
+    /// l'encodeur à deux rendus 4K.
+    var exportClipsWithMontage: Bool = false
+
     // Paramètres de sélection / export.
     /// Durée FINALE (après ralentissement), en centièmes de seconde. 130 = 1,30 s.
     var finalDurationCentiseconds: Int = 130
@@ -248,6 +258,36 @@ final class ClipProject {
     var orderedPassages: [Passage] {
         passages.filter { !$0.isPendingDeletion }
             .sorted { $0.validationIndex < $1.validationIndex }
+    }
+
+    /// Redonne à chaque clip un rang UNIQUE et CONSÉCUTIF, sursis compris.
+    ///
+    /// Deux clips au même rang, et leur ordre dans le montage n'est plus décidé
+    /// par un geste mais par celui, arbitraire, du tableau de relation SwiftData.
+    /// Le cas s'atteint sans rien faire d'exotique : supprimer un clip (il garde
+    /// son rang pendant les cinq secondes de sursis), réordonner la liste
+    /// pendant ce temps — la renumérotation ne voyait que les visibles — puis
+    /// annuler la suppression.
+    ///
+    /// Les clips EN SURSIS sont renumérotés eux aussi, à leur place courante :
+    /// c'est ce qui leur permet de revenir à un rang libre si l'annulation
+    /// arrive.
+    ///
+    /// Effet secondaire recherché : `validationIndex` redevient la POSITION du
+    /// clip. Les autres écrans qui affichent `validationIndex + 1` racontent
+    /// alors la même chose que la liste du montage.
+    func renumberPassages() {
+        let all = passages.sorted {
+            if $0.validationIndex != $1.validationIndex {
+                return $0.validationIndex < $1.validationIndex
+            }
+            // Départage stable : à rang égal, celui qui est encore là passe
+            // devant celui qui attend d'être effacé.
+            return !$0.isPendingDeletion && $1.isPendingDeletion
+        }
+        for (index, passage) in all.enumerated() where passage.validationIndex != index {
+            passage.validationIndex = index
+        }
     }
 }
 

@@ -123,6 +123,10 @@ struct ProjectSettingsSheet: View {
                         get: { project.opticalFlowEnabled },
                         set: { project.opticalFlowEnabled = $0; onTouch() }
                     ))
+                    Toggle("Exporter aussi les clips après le montage", isOn: Binding(
+                        get: { project.exportClipsWithMontage },
+                        set: { project.exportClipsWithMontage = $0; onTouch() }
+                    ))
                     Toggle("Album Photos par projet", isOn: Binding(
                         get: { project.albumPerProject },
                         set: { project.albumPerProject = $0; onTouch() }
@@ -134,7 +138,11 @@ struct ProjectSettingsSheet: View {
                     Text("Le flux optique fabrique les images intermédiaires : "
                          + "mouvement plus fluide, artefacts possibles. Sans lui, "
                          + "chaque image du ralenti est une vraie image du rush, "
-                         + "répétée.")
+                         + "répétée.
+
+Les clips isolés partent dans la file une fois "
+                         + "le montage enregistré — jamais pendant, pour ne pas faire "
+                         + "se disputer l'encodeur.")
                 }
 
                 Section {
