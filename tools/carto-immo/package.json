@@ -1,0 +1,29 @@
+{
+  "name": "carto-immo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent de veille immobiliere : leboncoin -> lacquereur.fr -> tableur + carte interactive",
+  "bin": {
+    "carto-immo": "src/cli.js"
+  },
+  "scripts": {
+    "login": "node src/cli.js login",
+    "run": "node src/cli.js run",
+    "map": "node src/cli.js map",
+    "install-browser": "playwright install chromium",
+    "test": "node test/smoke.mjs && node test/dedup.mjs && node test/geoloc.mjs && node test/integration.mjs && node test/agent.mjs && node test/interface.mjs",
+    "annonces": "node src/cli.js annonces",
+    "carte": "node scripts/carte-annonces.mjs",
+    "recaler": "node src/cli.js recaler",
+    "carte-agent": "node src/cli.js carte"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "leaflet": "^1.9.4",
+    "playwright": "^1.49.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
