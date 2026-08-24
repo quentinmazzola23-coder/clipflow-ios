@@ -65,6 +65,31 @@ final class DeletionUndo {
                   restore: @escaping () -> Void) {
         let item = PendingDeletion(label: label, commit: commit, restore: restore)
         items.append(item)
+        schedule(timerFor: item)
+    }
+
+    /// Suspend tous les sursis en cours.
+    ///
+    /// À APPELER QUAND LE BOUTON « ANNULER » DEVIENT INATTEIGNABLE. Ouvrir un
+    /// aperçu par-dessus la liste masque le bouton — or vérifier ce qu'on vient
+    /// de supprimer est précisément le moment où l'on veut annuler. Le sursis
+    /// s'écoulait derrière la feuille, et la suppression était consommée
+    /// pendant qu'on regardait.
+    ///
+    /// Les minuteurs sont annulés, PAS les suppressions : elles restent en
+    /// attente jusqu'à la reprise.
+    func hold() {
+        for timer in timers.values { timer.cancel() }
+        timers.removeAll()
+    }
+
+    /// Rend leur délai plein aux sursis suspendus.
+    func resume() {
+        guard timers.isEmpty else { return }
+        for item in items { schedule(timerFor: item) }
+    }
+
+    private func schedule(timerFor item: PendingDeletion) {
         timers[item.id] = Task { @MainActor in
             try? await Task.sleep(for: .seconds(Self.graceSeconds))
             guard !Task.isCancelled,

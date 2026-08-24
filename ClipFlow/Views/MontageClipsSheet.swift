@@ -34,13 +34,15 @@ struct MontageClipsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var undo = DeletionUndo()
     @State private var blockedMessage: String?
-    /// Un déplacement ou une suppression a-t-il eu lieu ?
+    /// Un déplacement, un rejet ou une suppression a-t-il eu lieu ?
     ///
-    /// Sans ce drapeau, refermer la liste reconstruisait le plan et jetait le
-    /// lecteur MÊME quand on n'avait rien touché — or ouvrir la liste pour y
-    /// lire un numéro, hésiter, et ressortir est exactement le geste que cet
-    /// écran doit rendre possible. On perdait sa position de lecture et
-    /// plusieurs secondes de reconstruction pour rien.
+    /// UNE SEULE RECONSTRUCTION, À LA FERMETURE, et seulement si quelque chose
+    /// a changé. Chaque geste déclenchait la sienne : réordonner huit lignes
+    /// rouvrait huit fois les cent cinquante fichiers du projet, et
+    /// l'annulation d'une reconstruction n'interrompt pas sa boucle. Rien du
+    /// plan n'étant visible tant que cette liste est ouverte, il n'y a aucune
+    /// raison de le refaire avant d'en sortir — ni, si l'on n'a fait que
+    /// regarder, d'en sortir en jetant le lecteur.
     @State private var didChange = false
     /// Clip dont on regarde l'aperçu.
     @State private var preview: Passage?
@@ -93,6 +95,12 @@ struct MontageClipsSheet: View {
             }
             .sheet(item: $preview) { passage in
                 MontageClipPreview(passage: passage)
+            }
+            // L'APERÇU MASQUE LE BOUTON « ANNULER » : le sursis est suspendu
+            // tant qu'il est ouvert. Vérifier ce qu'on vient de supprimer est
+            // exactement le moment où l'on veut pouvoir revenir en arrière.
+            .onChange(of: preview?.persistentModelID) { _, shown in
+                if shown != nil { undo.hold() } else { undo.resume() }
             }
             .overlay(alignment: .bottomTrailing) {
                 if let pending = undo.pending {
@@ -148,7 +156,6 @@ struct MontageClipsSheet: View {
         project.renumberPassages()
         didChange = true
         try? modelContext.save()
-        onChanged()
     }
 
     /// Bascule « rejeté » — un clip écarté du montage, mais conservé.
@@ -157,9 +164,14 @@ struct MontageClipsSheet: View {
     /// réversible d'un second balayage, et rien n'est effacé.
     private func toggleRejected(_ passage: Passage) {
         passage.status = passage.status == .rejete ? .principal : .rejete
+        // Un clip rejeté après sa mise en file y resterait : la file ne relit
+        // jamais le statut au moment de dépiler. On le retire de la file tant
+        // qu'il n'a pas commencé à rendre.
+        if passage.status == .rejete, passage.exportState == .queued {
+            passage.exportState = .notExported
+        }
         didChange = true
         try? modelContext.save()
-        onChanged()
     }
 
     private func delete(at offsets: IndexSet) {
@@ -191,13 +203,12 @@ struct MontageClipsSheet: View {
             } restore: {
                 passage.isPendingDeletion = false
                 project.renumberPassages()
+                didChange = true
                 try? modelContext.save()
-                onChanged()
             }
         }
         didChange = true
         try? modelContext.save()
-        onChanged()
     }
 }
 
@@ -258,7 +269,11 @@ private struct MontageClipRow: View {
             ThumbnailCache.shared.requestThumbnail(
                 fileURL: source.url,
                 key: source.url.lastPathComponent,
-                time: source.rangeInFile.start
+                time: source.rangeInFile.start,
+                // La plage cachée commence à l'image clé qui PRÉCÈDE le clip :
+                // sans exigence de précision, la vignette montrerait un instant
+                // antérieur, parfois une autre action.
+                preciseTime: true
             ) { image in
                 thumbnail = image
             }

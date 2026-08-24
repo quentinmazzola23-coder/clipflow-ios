@@ -312,6 +312,20 @@ final class RenderQueueController {
                 snapshot.failedJobs += 1
                 continue
             }
+            // REJETÉ ENTRE-TEMPS : on ne l'exporte pas.
+            //
+            // La file ne relisait jamais le statut au moment de dépiler. Un
+            // clip mis en file puis rejeté — parce qu'on vient de voir que la
+            // prise est ratée — partait quand même dans Photos, et il fallait
+            // aller l'y supprimer à la main.
+            //
+            // Ce n'est PAS un échec : c'est un geste de l'utilisateur, il ne
+            // doit pas figurer au compteur des ratés.
+            if passage.status == .rejete {
+                passage.exportState = .notExported
+                try? context.save()
+                continue
+            }
 
             // Préparation du job sur le MainActor (lecture SwiftData), rendu hors MainActor.
             guard let source = MediaAvailabilityService.exportSource(for: passage) else {

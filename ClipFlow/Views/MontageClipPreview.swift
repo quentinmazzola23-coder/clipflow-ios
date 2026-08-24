@@ -70,14 +70,31 @@ struct MontageClipPreview: View {
             unavailable = true
             return
         }
+        let rate = Float(passage.speedNumerator) / Float(max(1, passage.speedDenominator))
         let asset = AVURLAsset(url: source.url)
         let item = AVPlayerItem(asset: asset)
         // BORNÉ À LA PLAGE DU CLIP : sans cela on regarderait toute la plage
         // cachée, marges comprises, et on jugerait un plan qu'on n'a pas monté.
         item.forwardPlaybackEndTime = source.rangeInFile.end
         let created = AVPlayer(playerItem: item)
+        // PUBLIÉ AVANT LE SEEK, et c'est la correction d'un vrai piège.
+        //
+        // Un seek à tolérance nulle sur du 4K prend plusieurs centaines de
+        // millisecondes. Refermer la feuille pendant ce temps — geste banal,
+        // on s'est trompé de ligne — faisait passer `onDisappear` sur un
+        // `player` encore nil : il n'avait rien à arrêter. La suite du
+        // chargement installait ensuite un lecteur et un observateur que plus
+        // aucune vue ne détenait, et le son continuait sans moyen de l'arrêter.
+        player = created
         await created.seek(to: source.rangeInFile.start,
                            toleranceBefore: .zero, toleranceAfter: .zero)
+        // La feuille a pu partir pendant le seek.
+        guard !Task.isCancelled else {
+            created.pause()
+            created.replaceCurrentItem(with: nil)
+            player = nil
+            return
+        }
         loopObserver = NotificationCenter.default.addObserver(
             forName: AVPlayerItem.didPlayToEndTimeNotification,
             object: item, queue: .main
@@ -85,10 +102,16 @@ struct MontageClipPreview: View {
             Task { @MainActor in
                 await created.seek(to: source.rangeInFile.start,
                                    toleranceBefore: .zero, toleranceAfter: .zero)
-                created.play()
+                created.rate = rate > 0 ? rate : 1
             }
         }
-        player = created
-        created.play()
+        // VITESSE DU CLIP, pas la vitesse réelle.
+        //
+        // Un clip à 0,5× prélève une demi-seconde de rush pour une seconde de
+        // montage : le jouer à vitesse normale montrait la bonne image mais
+        // deux fois trop vite, et la boucle durait la moitié de la durée
+        // annoncée juste au-dessus dans la liste. On jugeait un plan sur un
+        // rythme qui n'est pas le sien.
+        created.rate = rate > 0 ? rate : 1
     }
 }

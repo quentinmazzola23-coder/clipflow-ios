@@ -478,6 +478,16 @@ struct MontageView: View {
             return "Aucun créneau à cette position — déplacez la fenêtre vers le début du morceau."
         }
         if plan.skippedClipIDs.isEmpty {
+            // LE REJET D'ABORD : un clip rejeté n'entre jamais dans les
+            // candidats, donc ni dans les placements ni dans les écartés. Sans
+            // ce test, l'écran accusait les fichiers d'un projet dont tous les
+            // clips étaient simplement mis de côté — et rien n'indiquait où
+            // les reprendre.
+            let visible = project.orderedPassages
+            if !visible.isEmpty, visible.allSatisfy({ $0.status == .rejete }) {
+                return "Tous vos clips sont rejetés : ouvrez la liste des clips "
+                    + "et balayez vers la droite pour en reprendre."
+            }
             return "Aucun clip exploitable ici : leurs fichiers n'ont pas pu être ouverts."
         }
         return "\(plan.skippedClipIDs.count) clip(s) écarté(s) : à cette densité, chaque coupe demande "
@@ -955,10 +965,17 @@ struct MontageView: View {
             return
         }
         silence()
-        let musicChanged = MontageVariantStore.apply(variant, to: project, in: modelContext)
-        if musicChanged, let filename = variant.musicFilename {
-            startAnalysis(filename: filename)
+        switch MontageVariantStore.apply(variant, to: project, in: modelContext) {
+        case .musicMissing:
+            errorMessage = "La musique de ce montage n'est plus sur l'appareil — "
+                + "vos réglages actuels sont conservés. Réimportez-la, "
+                + "ou enregistrez ce montage à nouveau avec une autre musique."
             return
+        case .applied(let musicChanged):
+            if musicChanged, let filename = variant.musicFilename {
+                startAnalysis(filename: filename)
+                return
+            }
         }
         // Même musique : la grille rythmique reste valable, seul le plan est à
         // refaire — départ, densité et format ont pu changer.

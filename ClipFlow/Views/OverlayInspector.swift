@@ -235,6 +235,19 @@ struct OverlayInspector: View {
     }
 
     // MARK: - Portée
+    //
+    // ON COMPTE LES COUPES DU MONTAGE, PAS LES CLIPS.
+    //
+    // La portée d'une incrustation est un rang de PLACEMENT : la n-ième coupe
+    // du montage. Le numéro affiché sur l'aperçu, lui, est celui du CLIP dans
+    // la liste. Les deux coïncident tant que tous les clips sont placés, et
+    // divergent dès qu'un seul est écarté — trop court pour son créneau, ou
+    // rejeté. Les dire tous les deux « clip » invitait à régler une portée
+    // d'après un numéro lu à l'écran, et à décorer la mauvaise image.
+    //
+    // On ne les aligne pas : ce sont deux grandeurs différentes, et une
+    // incrustation couvre bien une portion du montage, pas un clip identifié.
+    // On les nomme.
 
     private var scopeControl: some View {
         VStack(spacing: 8) {
@@ -261,7 +274,7 @@ struct OverlayInspector: View {
                                 commit()
                             }
                         ), in: 0...max(scopeBound, realFirst)) {
-                            Text("Du clip \(realFirst + 1)")
+                            Text("De la coupe \(realFirst + 1)")
                                 .font(.caption.monospacedDigit())
                         }
                         Stepper(value: Binding(
@@ -271,7 +284,7 @@ struct OverlayInspector: View {
                                 commit()
                             }
                         ), in: realFirst...max(scopeBound, realLast)) {
-                            Text("au clip \(realLast + 1)")
+                            Text("à la coupe \(realLast + 1)")
                                 .font(.caption.monospacedDigit())
                         }
                     }
@@ -313,7 +326,7 @@ struct OverlayInspector: View {
         let base = "Ce montage ne compte que \(clipCount) clip(s). "
         let detail = realFirst > lastIndex
             ? "L'incrustation ne sera visible que sur le clip \(clipCount), le dernier. "
-            : "Elle s'arrêtera au clip \(clipCount). "
+            : "Elle s'arrêtera à la coupe \(clipCount). "
         return base + detail
             + "La portée enregistrée est gardée telle quelle et se rétablira "
             + "si le montage s'allonge."

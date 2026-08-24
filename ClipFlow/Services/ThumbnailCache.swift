@@ -60,9 +60,16 @@ final class ThumbnailCache: @unchecked Sendable {
     }
 
     /// Génère (si nécessaire) depuis `fileURL` puis rappelle sur le MainActor.
+    /// - `preciseTime` : n'accepte que l'image demandée, sans remonter à
+    ///   l'image clé précédente. Indispensable pour la vignette d'un CLIP : une
+    ///   plage cachée est un remux sans réencodage, donc elle commence à
+    ///   l'image clé située AVANT le début du clip. Avec la tolérance large,
+    ///   la vignette montrait un instant qui précède le clip — parfois une
+    ///   seconde plus tôt, sur une autre action.
     func requestThumbnail(fileURL: URL,
                           key: String,
                           time: CMTime,
+                          preciseTime: Bool = false,
                           completion: @MainActor @escaping (UIImage?) -> Void) {
         let ck = cacheKey(key, time: time)
         if let hit = cache.object(forKey: ck) {
@@ -75,7 +82,11 @@ final class ThumbnailCache: @unchecked Sendable {
             return
         }
         inFlight.insert(ck as String)
-        let generator = self.generator(for: fileURL, key: key)
+        // CLÉ DISTINCTE PAR MODE : un générateur à tolérance large déjà en
+        // cache pour ce fichier rendrait la demande précise inutile.
+        let generatorKey = preciseTime ? key + "#exact" : key
+        let generator = self.generator(for: fileURL, key: generatorKey,
+                                       precise: preciseTime)
         lock.unlock()
 
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -112,7 +123,8 @@ final class ThumbnailCache: @unchecked Sendable {
     }
 
     /// Appelé sous `lock`.
-    private func generator(for fileURL: URL, key: String) -> AVAssetImageGenerator {
+    private func generator(for fileURL: URL, key: String,
+                           precise: Bool) -> AVAssetImageGenerator {
         if let existing = generators[key] {
             // LRU : replacer la clé en fin de file.
             generatorOrder.removeAll { $0 == key }
@@ -122,6 +134,21 @@ final class ThumbnailCache: @unchecked Sendable {
         let asset = AVURLAsset(url: fileURL)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
+        if precise {
+            // Décodage jusqu'à l'image demandée : plus lent, mais c'est la
+            // bonne image. Réservé aux vignettes qui doivent représenter un
+            // instant précis, pas un rush entier.
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
+            generator.maximumSize = CGSize(width: 640, height: 360)
+            generators[key] = generator
+            generatorOrder.append(key)
+            while generatorOrder.count > maxGenerators {
+                let evicted = generatorOrder.removeFirst()
+                generators.removeValue(forKey: evicted)
+            }
+            return generator
+        }
         // Une seule image représentative par rush : tolérance large, l'image
         // clé la plus proche suffit et se décode vite même en 4K.
         generator.requestedTimeToleranceBefore = .positiveInfinity

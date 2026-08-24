@@ -56,8 +56,13 @@ struct ProjectEditorView: View {
     /// Le garder au-delà le ferait fuir d'un rush au suivant pendant un
     /// défilement, et on cadrerait un rush qu'on n'a jamais touché.
     @State private var liveCropCenter: CGPoint?
-    /// Une pose automatique attend la fin de l'analyse en cours.
-    @State private var pendingPeakPlacement = false
+    /// Rush POUR LEQUEL une pose automatique attend la fin de l'analyse.
+    ///
+    /// Une clé, et non un booléen : le rush affiché change au moindre
+    /// défilement, et l'analyse dure plusieurs secondes. Un simple drapeau
+    /// faisait poser les clips sur le rush qui se trouvait là au retour — pas
+    /// sur celui qu'on avait désigné.
+    @State private var pendingPeakPlacementKey: String?
     /// Stats développeur (menu ⋯).
     @AppStorage("devStatsEnabled") private var devStatsEnabled = false
 
@@ -161,11 +166,17 @@ struct ProjectEditorView: View {
     private func analyzeCurrentRush() {
         guard let rush = currentRush,
               let path = rush.localSourceRelativePath else {
+            // Aucune tâche ne naîtra : rien ne consommerait une pose laissée
+            // armée, qui repartirait plus tard sur un tout autre rush.
+            pendingPeakPlacementKey = nil
             errorMessage = "Ce rush n'a plus sa copie locale — analyse impossible."
             return
         }
         let key = motionKey(for: rush)
-        guard analyzingRushKey == nil else { return }
+        guard analyzingRushKey == nil else {
+            pendingPeakPlacementKey = nil
+            return
+        }
 
         let url = StorageManager.url(forSourceRelativePath: path)
         let spacing = sourceDuration(for: rush).seconds
@@ -173,11 +184,15 @@ struct ProjectEditorView: View {
         analysisTask = Task {
             defer {
                 analyzingRushKey = nil
-                // Une pose automatique attendait ces repères : elle reprend
-                // ici, sans que l'utilisateur ait à retoucher le bouton.
-                if pendingPeakPlacement {
-                    pendingPeakPlacement = false
-                    placeClipsOnPeaks()
+                // Une pose automatique attendait CES repères-ci : elle reprend
+                // sur le rush analysé, jamais sur celui qui se trouve à
+                // l'écran. La clé est consommée dans TOUS les cas — abandon
+                // compris — sinon une analyse ultérieure, demandée pour tout
+                // autre chose, déclencherait une pose que personne n'attend.
+                let awaited = pendingPeakPlacementKey
+                pendingPeakPlacementKey = nil
+                if awaited == key, !Task.isCancelled {
+                    placeClipsOnPeaks(rush: rush)
                 }
             }
             do {
@@ -189,14 +204,15 @@ struct ProjectEditorView: View {
                 motionPeaks[key] = peaks
                 MotionPeakStore.save(peaks, key: key, spacing: spacing)
                 if peaks.isEmpty {
-                    // Rien à poser non plus : la reprise n'aurait rien à faire.
-                    pendingPeakPlacement = false
+                    // Rien à poser non plus : la reprise n'aurait rien à faire,
+                    // et relancerait une analyse en boucle.
+                    pendingPeakPlacementKey = nil
                     errorMessage = "Aucun moment ne se détache nettement dans ce rush : le mouvement y est régulier."
                 }
             } catch is CancellationError {
-                pendingPeakPlacement = false
+                pendingPeakPlacementKey = nil
             } catch {
-                pendingPeakPlacement = false
+                pendingPeakPlacementKey = nil
                 errorMessage = error.localizedDescription
             }
         }
@@ -562,6 +578,10 @@ struct ProjectEditorView: View {
             // et une analyse en cours n'a plus de destinataire.
             playback.pause()
             analysisTask?.cancel()
+            // Une pose qui attendait cette analyse n'a plus d'écran pour
+            // s'afficher : la laisser armée ferait apparaître des clips au
+            // retour, sans que le geste ait été redemandé.
+            pendingPeakPlacementKey = nil
             analysisTask = nil
             // Un sursis ne survit pas à l'écran qui l'affichait : sans le
             // bandeau, plus rien ne pourrait l'annuler et l'objet resterait
@@ -1426,10 +1446,16 @@ struct ProjectEditorView: View {
     /// de viser juste du premier coup.
     private func placeClipsOnPeaks() {
         guard let rush = currentRush else { return }
+        placeClipsOnPeaks(rush: rush)
+    }
+
+    private func placeClipsOnPeaks(rush: Rush) {
         let key = motionKey(for: rush)
         guard let peaks = motionPeaks[key], !peaks.isEmpty else {
-            // Pas encore de repères : les calculer, puis reprendre ici même.
-            pendingPeakPlacement = true
+            // Pas encore de repères : les calculer, puis reprendre sur CE rush.
+            // Cette branche n'est atteinte que depuis le menu, où le rush visé
+            // est celui qui est affiché — l'analyse porte donc bien sur lui.
+            pendingPeakPlacementKey = key
             analyzeCurrentRush()
             return
         }
@@ -1441,9 +1467,17 @@ struct ProjectEditorView: View {
         var occupied = rush.passages.map { $0.sourceRange }
         var created: [Passage] = []
 
-        // Du plus marqué au moins marqué : quand deux moments forts sont trop
-        // proches pour tenir tous les deux, c'est le plus net qui gagne la
-        // place, et non celui qui arrive le premier dans le rush.
+        // DEUX TEMPS, ET L'ORDRE DE CHACUN COMPTE.
+        //
+        // On CHOISIT du plus marqué au moins marqué : quand deux moments forts
+        // sont trop proches pour tenir tous les deux, c'est le plus net qui
+        // garde la place, et non celui qui arrive le premier dans le rush.
+        //
+        // On POSE ensuite dans l'ordre du rush. L'ordre de validation EST
+        // l'ordre du montage : créer les clips par score donnerait un montage
+        // qui saute d'un bout à l'autre de la séquence, ce que personne n'a
+        // demandé.
+        var retained: [CMTimeRange] = []
         for peak in peaks.sorted(by: { $0.score > $1.score }) {
             let touch = CMTime(seconds: peak.time, preferredTimescale: 600)
             guard let range = try? SelectionEngine.makeSelection(
@@ -1457,10 +1491,32 @@ struct ProjectEditorView: View {
             }
             guard !overlaps else { continue }
             occupied.append(range)
-            created.append(makePassage(rush: rush, range: range))
+            retained.append(range)
         }
 
-        guard !created.isEmpty else { return }
+        // RANG CALCULÉ UNE FOIS PUIS INCRÉMENTÉ, jamais relu à chaque clip.
+        //
+        // `makePassage` déduit le rang de `project.passages`, dont la relation
+        // inverse n'est pas garantie à jour avant un enregistrement : posés en
+        // rafale, les cent clips auraient pu recevoir le MÊME rang, et leur
+        // ordre dans le montage aurait été décidé par le hasard du tri.
+        var nextIndex = (project.passages.map(\.validationIndex).max() ?? -1) + 1
+        for range in retained.sorted(by: { CMTimeCompare($0.start, $1.start) < 0 }) {
+            let passage = makePassage(rush: rush, range: range, validationIndex: nextIndex)
+            nextIndex += 1
+            created.append(passage)
+        }
+
+        guard !created.isEmpty else {
+            // LE SILENCE N'EST PAS UNE RÉPONSE. Rien posé peut vouloir dire
+            // deux choses très différentes, et l'utilisateur vient d'attendre
+            // une analyse : il a droit à savoir laquelle.
+            errorMessage = retained.isEmpty && !peaks.isEmpty
+                ? "Les moments forts de ce rush sont déjà couverts par des clips, "
+                    + "ou le rush est trop court pour un clip de \(project.finalDuration.label)."
+                : "Aucun clip n'a pu être posé sur ce rush."
+            return
+        }
         touch()
         rebuildSegments()
         validateHaptic.notificationOccurred(.success)
@@ -1484,10 +1540,16 @@ struct ProjectEditorView: View {
     /// l'état de sélection de l'écran : poser cent clips d'un coup aurait
     /// demandé de simuler cent sélections, ou de recopier ces vingt lignes —
     /// donc de laisser diverger deux façons de fabriquer un clip.
+    ///
+    /// - `validationIndex` : rang imposé par l'appelant quand il en pose
+    ///   plusieurs d'affilée. Laissé nil, il est déduit des clips existants —
+    ///   ce qui ne vaut que pour une création isolée.
     @discardableResult
-    private func makePassage(rush: Rush, range: CMTimeRange) -> Passage {
+    private func makePassage(rush: Rush, range: CMTimeRange,
+                             validationIndex: Int? = nil) -> Passage {
         let passage = Passage()
-        passage.validationIndex = (project.passages.map(\.validationIndex).max() ?? -1) + 1
+        passage.validationIndex = validationIndex
+            ?? ((project.passages.map(\.validationIndex).max() ?? -1) + 1)
         passage.setStart(range.start)
         passage.sourceDurationValue = range.duration.value
         passage.sourceDurationTimescale = range.duration.timescale

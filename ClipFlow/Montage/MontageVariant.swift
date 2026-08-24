@@ -79,15 +79,34 @@ enum MontageVariantStore {
         return variant
     }
 
+    /// Résultat d'un rappel.
+    enum ApplyOutcome {
+        case applied(musicChanged: Bool)
+        /// La musique de la variante n'est plus sur le disque : RIEN n'a été
+        /// écrit. Écraser les réglages courants aurait fait perdre une musique
+        /// valide en échange d'une qui n'existe plus.
+        case musicMissing
+    }
+
     /// Rend au projet les réglages d'une variante.
     ///
-    /// Retourne VRAI si la musique a changé — l'appelant doit alors relancer
+    /// Signale si la musique a changé — l'appelant doit alors relancer
     /// l'analyse rythmique, sans quoi l'écran garderait la grille de beats de
     /// l'ancien morceau sur le nouveau.
     @discardableResult
     static func apply(_ variant: MontageVariant,
                       to project: ClipProject,
-                      in context: ModelContext) -> Bool {
+                      in context: ModelContext) -> ApplyOutcome {
+        // FICHIER VÉRIFIÉ AVANT LA MOINDRE ÉCRITURE. Une musique supprimée de
+        // la bibliothèque ne prévient pas les variantes qui s'en servaient :
+        // rappeler ce montage aurait remplacé la musique courante — bien
+        // vivante — par un nom qui ne désigne plus rien, et le projet se serait
+        // retrouvé sans montage possible.
+        if let filename = variant.musicFilename,
+           !FileManager.default.fileExists(
+               atPath: MusicStore.url(forMusicFilename: filename).path) {
+            return .musicMissing
+        }
         let musicChanged = project.musicFilename != variant.musicFilename
         project.musicFilename = variant.musicFilename
         project.musicTitle = variant.musicTitle
@@ -97,7 +116,7 @@ enum MontageVariantStore {
         project.cropToFillOutput = variant.cropToFillOutput
         project.upscaleOnExport = variant.upscaleOnExport
         try? context.save()
-        return musicChanged
+        return .applied(musicChanged: musicChanged)
     }
 
     /// Met à jour une variante existante depuis les réglages courants.
