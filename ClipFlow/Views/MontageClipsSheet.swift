@@ -42,13 +42,34 @@ struct MontageClipsSheet: View {
     /// écran doit rendre possible. On perdait sa position de lecture et
     /// plusieurs secondes de reconstruction pour rien.
     @State private var didChange = false
+    /// Clip dont on regarde l'aperçu.
+    @State private var preview: Passage?
 
     var body: some View {
         NavigationStack {
             List {
                 ForEach(Array(project.orderedPassages.enumerated()),
                         id: \.element.persistentModelID) { index, passage in
-                    MontageClipRow(number: index + 1, passage: passage)
+                    Button {
+                        preview = passage
+                    } label: {
+                        MontageClipRow(number: index + 1, passage: passage)
+                    }
+                    .buttonStyle(.plain)
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                        // REJET AU BALAYAGE, dans l'autre sens que la
+                        // suppression : rejeter écarte le clip du montage et le
+                        // garde sur le disque ; supprimer l'efface. Deux gestes
+                        // opposés méritent deux bords opposés.
+                        Button {
+                            toggleRejected(passage)
+                        } label: {
+                            Label(passage.status == .rejete ? "Reprendre" : "Rejeter",
+                                  systemImage: passage.status == .rejete
+                                    ? "arrow.uturn.backward" : "xmark.circle")
+                        }
+                        .tint(passage.status == .rejete ? .green : .orange)
+                    }
                 }
                 .onMove(perform: move)
                 .onDelete(perform: delete)
@@ -57,16 +78,22 @@ struct MontageClipsSheet: View {
             .navigationTitle("Clips (\(project.orderedPassages.count))")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                // GLISSER TOUJOURS ACTIF, pas de bouton « Modifier ».
+                // BOUTON « MODIFIER » PLUTÔT QU'UN MODE PERMANENT.
                 //
-                // `EditMode` permanent évite le tap supplémentaire qui précède
-                // chaque réorganisation, et les poignées disent d'elles-mêmes
-                // que les lignes se déplacent.
+                // Le mode d'édition permanent évitait un tap avant chaque
+                // réorganisation — mais il rend les lignes inertes, et taper un
+                // clip pour le revoir devenait impossible. Or c'est le geste le
+                // plus fréquent ici : on lit un numéro à l'écran, on vient
+                // vérifier de quel plan il s'agit. Réordonner est plus rare et
+                // supporte un tap de plus.
+                ToolbarItem(placement: .navigationBarLeading) { EditButton() }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Fermer") { dismiss() }
                 }
             }
-            .environment(\.editMode, .constant(.active))
+            .sheet(item: $preview) { passage in
+                MontageClipPreview(passage: passage)
+            }
             .overlay(alignment: .bottomTrailing) {
                 if let pending = undo.pending {
                     UndoButton(pending: pending, count: undo.count) { undo.undo() }
@@ -119,6 +146,17 @@ struct MontageClipsSheet: View {
         // rang que l'un d'elles venait de reprendre. L'annuler ensuite posait
         // deux clips au même rang, et leur ordre cessait d'être le nôtre.
         project.renumberPassages()
+        didChange = true
+        try? modelContext.save()
+        onChanged()
+    }
+
+    /// Bascule « rejeté » — un clip écarté du montage, mais conservé.
+    ///
+    /// Aucun sursis ici, contrairement à la suppression : le geste est
+    /// réversible d'un second balayage, et rien n'est effacé.
+    private func toggleRejected(_ passage: Passage) {
+        passage.status = passage.status == .rejete ? .principal : .rejete
         didChange = true
         try? modelContext.save()
         onChanged()
@@ -203,12 +241,17 @@ private struct MontageClipRow: View {
 
             Spacer(minLength: 0)
 
-            if passage.exportState == .exported {
+            if passage.status == .rejete {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else if passage.exportState == .exported {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.caption)
                     .foregroundStyle(.green)
             }
         }
+        .opacity(passage.status == .rejete ? 0.45 : 1)
         .task {
             guard thumbnail == nil else { return }
             guard let source = MediaAvailabilityService.exportSource(for: passage) else { return }

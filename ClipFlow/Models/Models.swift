@@ -203,6 +203,15 @@ final class ClipProject {
     @Relationship(deleteRule: .cascade, inverse: \Passage.project)
     var passages: [Passage] = []
 
+    /// Montages enregistrés de ce projet — une version 16:9, une 9:16, etc.
+    @Relationship(deleteRule: .cascade, inverse: \MontageVariant.project)
+    var montageVariants: [MontageVariant] = []
+
+    /// Variantes du plus récent au plus ancien enregistrement.
+    var orderedVariants: [MontageVariant] {
+        montageVariants.sorted { $0.createdAt > $1.createdAt }
+    }
+
     /// Incrustations du montage (logo, filigrane, texte). En cascade : elles
     /// n'ont aucun sens hors du projet qui les porte.
     @Relationship(deleteRule: .cascade, inverse: \OverlayLayer.project)

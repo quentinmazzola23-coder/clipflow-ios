@@ -56,6 +56,8 @@ struct ProjectEditorView: View {
     /// Le garder au-delà le ferait fuir d'un rush au suivant pendant un
     /// défilement, et on cadrerait un rush qu'on n'a jamais touché.
     @State private var liveCropCenter: CGPoint?
+    /// Une pose automatique attend la fin de l'analyse en cours.
+    @State private var pendingPeakPlacement = false
     /// Stats développeur (menu ⋯).
     @AppStorage("devStatsEnabled") private var devStatsEnabled = false
 
@@ -169,7 +171,15 @@ struct ProjectEditorView: View {
         let spacing = sourceDuration(for: rush).seconds
         analyzingRushKey = key
         analysisTask = Task {
-            defer { analyzingRushKey = nil }
+            defer {
+                analyzingRushKey = nil
+                // Une pose automatique attendait ces repères : elle reprend
+                // ici, sans que l'utilisateur ait à retoucher le bouton.
+                if pendingPeakPlacement {
+                    pendingPeakPlacement = false
+                    placeClipsOnPeaks()
+                }
+            }
             do {
                 let samples = try await Task.detached(priority: .userInitiated) {
                     try await MotionAnalyzer.samples(for: url)
@@ -179,11 +189,14 @@ struct ProjectEditorView: View {
                 motionPeaks[key] = peaks
                 MotionPeakStore.save(peaks, key: key, spacing: spacing)
                 if peaks.isEmpty {
+                    // Rien à poser non plus : la reprise n'aurait rien à faire.
+                    pendingPeakPlacement = false
                     errorMessage = "Aucun moment ne se détache nettement dans ce rush : le mouvement y est régulier."
                 }
             } catch is CancellationError {
-                // Abandon volontaire : rien à signaler.
+                pendingPeakPlacement = false
             } catch {
+                pendingPeakPlacement = false
                 errorMessage = error.localizedDescription
             }
         }
@@ -915,6 +928,15 @@ struct ProjectEditorView: View {
                               systemImage: "waveform.badge.magnifyingglass")
                     }
                     .disabled(analyzingRushKey != nil || currentRush == nil)
+                    // POSE AUTOMATIQUE : un clip par moment fort, d'un geste.
+                    // Elle lance l'analyse elle-même si elle manque.
+                    Button {
+                        placeClipsOnPeaks()
+                    } label: {
+                        Label("Poser un clip sur chaque moment fort",
+                              systemImage: "wand.and.stars")
+                    }
+                    .disabled(analyzingRushKey != nil || currentRush == nil)
                     if !globalMarkers.isEmpty {
                         Button {
                             jumpToNextPeak()
@@ -1378,7 +1400,92 @@ struct ProjectEditorView: View {
         // La validation arrête la boucle de prévisualisation.
         playback.pause()
         let rush = project.orderedRushes[index]
+        let passage = makePassage(rush: rush, range: range)
+        touch()
 
+        validateHaptic.notificationOccurred(.success)
+        selectionRange = nil
+        selectionRushIndex = nil
+        return (passage, rush)
+    }
+
+    /// Pose un clip sur CHAQUE moment fort du rush affiché.
+    ///
+    /// L'analyse de mouvement existait déjà, mais ne servait qu'à naviguer :
+    /// elle disait où regarder, et il fallait quand même taper la timeline une
+    /// fois par clip. Sur un rush de trois minutes, c'est la différence entre
+    /// un quart d'heure et une minute.
+    ///
+    /// ELLE ANALYSE D'ABORD SI BESOIN. Un bouton qui réclamerait une analyse
+    /// préalable serait un geste de plus pour une dépendance que l'app connaît
+    /// déjà.
+    ///
+    /// Les clips posés sont des clips ORDINAIRES : même durée, même ancrage,
+    /// même vitesse, même cadrage que si on les avait posés au doigt. Le tri se
+    /// fait après, en rejetant ceux qui ne valent rien — c'est plus rapide que
+    /// de viser juste du premier coup.
+    private func placeClipsOnPeaks() {
+        guard let rush = currentRush else { return }
+        let key = motionKey(for: rush)
+        guard let peaks = motionPeaks[key], !peaks.isEmpty else {
+            // Pas encore de repères : les calculer, puis reprendre ici même.
+            pendingPeakPlacement = true
+            analyzeCurrentRush()
+            return
+        }
+        playback.pause()
+
+        let wanted = sourceDuration(for: rush)
+        // PLAGES DÉJÀ PRISES, y compris celles des clips en sursis : reposer un
+        // clip là où l'utilisateur vient d'en retirer un défait son geste.
+        var occupied = rush.passages.map { $0.sourceRange }
+        var created: [Passage] = []
+
+        // Du plus marqué au moins marqué : quand deux moments forts sont trop
+        // proches pour tenir tous les deux, c'est le plus net qui gagne la
+        // place, et non celui qui arrive le premier dans le rush.
+        for peak in peaks.sorted(by: { $0.score > $1.score }) {
+            let touch = CMTime(seconds: peak.time, preferredTimescale: 600)
+            guard let range = try? SelectionEngine.makeSelection(
+                touchTime: touch,
+                sourceDuration: wanted,
+                rushDuration: rush.duration,
+                anchorCenter: project.touchAnchorIsCenter
+            ) else { continue }
+            let overlaps = occupied.contains { existing in
+                existing.intersection(range).duration.seconds > 0.01
+            }
+            guard !overlaps else { continue }
+            occupied.append(range)
+            created.append(makePassage(rush: rush, range: range))
+        }
+
+        guard !created.isEmpty else { return }
+        touch()
+        rebuildSegments()
+        validateHaptic.notificationOccurred(.success)
+
+        // MISE EN CACHE EN SÉRIE, comme pour un clip validé à la main : sans
+        // plage cachée, l'export retomberait sur la copie source, qu'une
+        // libération d'espace peut avoir emportée. En série et non en parallèle :
+        // chaque copie lit le même fichier, les paralléliser les ferait se
+        // disputer le décodeur.
+        Task {
+            for passage in created {
+                _ = await cacheSourceRange(for: passage, rush: rush)
+            }
+        }
+    }
+
+    /// Crée un clip pour une plage donnée d'un rush.
+    ///
+    /// CŒUR PARTAGÉ par la validation au doigt et la pose automatique sur les
+    /// moments forts. Il n'y avait qu'un seul chemin de création, et il lisait
+    /// l'état de sélection de l'écran : poser cent clips d'un coup aurait
+    /// demandé de simuler cent sélections, ou de recopier ces vingt lignes —
+    /// donc de laisser diverger deux façons de fabriquer un clip.
+    @discardableResult
+    private func makePassage(rush: Rush, range: CMTimeRange) -> Passage {
         let passage = Passage()
         passage.validationIndex = (project.passages.map(\.validationIndex).max() ?? -1) + 1
         passage.setStart(range.start)
@@ -1409,12 +1516,7 @@ struct ProjectEditorView: View {
         passage.rush = rush
         passage.project = project
         modelContext.insert(passage)
-        touch()
-
-        validateHaptic.notificationOccurred(.success)
-        selectionRange = nil
-        selectionRushIndex = nil
-        return (passage, rush)
+        return passage
     }
 
     private func validateSelection() {

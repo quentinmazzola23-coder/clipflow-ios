@@ -731,6 +731,41 @@ struct MontageView: View {
                 } label: {
                     Label("Importer un fichier audio", systemImage: "folder")
                 }
+                // MONTAGES ENREGISTRÉS : une version 16:9, une 9:16, chacune
+                // avec sa musique, sa fenêtre et sa densité.
+                Section("Montages de ce projet") {
+                    Button {
+                        let name = MontageVariantStore.suggestedName(
+                            for: project, existing: project.montageVariants)
+                        MontageVariantStore.capture(from: project, name: name,
+                                                    in: modelContext)
+                    } label: {
+                        Label("Enregistrer ce montage", systemImage: "square.and.arrow.down")
+                    }
+                    .disabled(project.musicFilename == nil)
+                    ForEach(project.orderedVariants) { variant in
+                        Button {
+                            applyVariant(variant)
+                        } label: {
+                            Label("\(variant.name) — \(variant.summary)",
+                                  systemImage: "rectangle.stack")
+                        }
+                    }
+                    if !project.montageVariants.isEmpty {
+                        Menu {
+                            ForEach(project.orderedVariants) { variant in
+                                Button(role: .destructive) {
+                                    MontageVariantStore.delete(variant, in: modelContext)
+                                } label: {
+                                    Label(variant.name, systemImage: "trash")
+                                }
+                            }
+                        } label: {
+                            Label("Supprimer un montage enregistré", systemImage: "trash")
+                        }
+                    }
+                }
+
                 Button {
                     prepareOverlayShape(imageToo: true)
                     showOverlays = true
@@ -909,6 +944,35 @@ struct MontageView: View {
     /// Morceau choisi dans la BIBLIOTHÈQUE : son fichier est déjà là et son
     /// analyse est en cache. Le projet ne fait que le désigner — aucune copie,
     /// aucune attente. C'est tout l'intérêt de la bibliothèque.
+    /// Rappelle un montage enregistré.
+    ///
+    /// La musique n'est réanalysée QUE si elle change : relancer l'analyse pour
+    /// un simple changement de format coûterait plusieurs secondes et jetterait
+    /// la fenêtre de départ qu'on vient justement de rappeler.
+    private func applyVariant(_ variant: MontageVariant) {
+        guard !isExporting else {
+            errorMessage = "Export du montage en cours — rappelez un montage une fois l'export terminé."
+            return
+        }
+        silence()
+        let musicChanged = MontageVariantStore.apply(variant, to: project, in: modelContext)
+        if musicChanged, let filename = variant.musicFilename {
+            startAnalysis(filename: filename)
+            return
+        }
+        // Même musique : la grille rythmique reste valable, seul le plan est à
+        // refaire — départ, densité et format ont pu changer.
+        if let map = beatMap {
+            let restored = project.montageStartCentiseconds.map { Double($0) / 100 }
+                ?? map.suggestedWindowStart
+            windowStart = map.beatTimes.min(by: {
+                abs($0 - restored) < abs($1 - restored)
+            }) ?? restored
+        }
+        rebuildTask?.cancel()
+        rebuildTask = Task { await rebuildPlan() }
+    }
+
     private func useTrack(_ track: MusicTrack) {
         guard !isExporting else {
             errorMessage = "Export du montage en cours — changez de musique une fois l'export terminé."
@@ -1077,6 +1141,19 @@ struct MontageView: View {
         var smoothing: [Int: MontageSmoothingRequest] = [:]
 
         for (index, passage) in passages.enumerated() {
+            // CLIP REJETÉ : écarté du montage, mais IL GARDE SON RANG.
+            //
+            // Le statut existait dans le modèle et excluait déjà le clip de
+            // l'export un par un ; le montage, lui, ne l'a jamais consulté — on
+            // pouvait rejeter un plan et le retrouver dans le fichier final.
+            //
+            // Le `continue` est posé APRÈS que `index` a été attribué, comme
+            // pour un clip sans média : `clipID` reste la position du clip dans
+            // la liste complète, donc le numéro lu à l'écran désigne toujours
+            // la même ligne. Filtrer la liste en amont aurait décalé tous les
+            // numéros suivants.
+            guard passage.status != .rejete else { continue }
+
             // VERSION LISSÉE D'ABORD si elle existe, plage cachée ensuite
             // (autonome), copie source en dernier recours.
             //
