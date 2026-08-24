@@ -426,8 +426,7 @@ final class RenderQueueController {
                     source: result.outputURL,
                     outputFormat: project.outputFormat,
                     cropToFill: project.cropToFillOutput,
-                    cropCenter: passage.cropCenter,
-                    colorimetry: passage.colorimetry
+                    cropCenter: passage.cropCenter
                 ) {
                     try? FileManager.default.removeItem(at: result.outputURL)
                     exportURL = framed

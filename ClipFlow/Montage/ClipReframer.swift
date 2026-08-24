@@ -40,8 +40,7 @@ enum ClipReframer {
     static func reframe(source: URL,
                         outputFormat: MontageOutputFormat,
                         cropToFill: Bool,
-                        cropCenter: CGPoint,
-                        colorimetry: String) async throws -> URL? {
+                        cropCenter: CGPoint) async throws -> URL? {
         let asset = AVURLAsset(url: source)
         guard let track = try? await asset.loadTracks(withMediaType: .video).first,
               let naturalSize = try? await track.load(.naturalSize),
@@ -83,24 +82,13 @@ enum ClipReframer {
             value: 1, timescale: CMTimeScale(max(1, nominal.rounded()))
         )
 
-        // ESPACE DÉCLARÉ EXPLICITEMENT EN SDR.
-        //
-        // Laissé à nil, AVFoundation propage celui de la source — ce qui est
-        // correct, mais implicite : le rendu et l'étiquetage dépendent alors de
-        // ce que la piste porte, et le fichier rendu en amont est le seul à le
-        // savoir. Le poser ici rend cette passe DÉTERMINISTE sur le chemin qui
-        // représente la quasi-totalité des exports.
-        //
-        // EN HDR, ON NE TOUCHE À RIEN. Les combinaisons acceptées par
-        // AVVideoComposition sont limitées, et forcer un triplet BT.2020 sur ce
-        // chemin risquerait d'abîmer des montages HDR qui, eux, n'ont jamais
-        // été signalés comme fautifs. La propagation reste le comportement le
-        // moins présomptueux.
-        if colorimetry == "sdr" {
-            composition.colorPrimaries = kCVImageBufferColorPrimaries_ITU_R_709_2 as String
-            composition.colorTransferFunction = kCVImageBufferTransferFunction_ITU_R_709_2 as String
-            composition.colorYCbCrMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String
-        }
+        // AUCUN ESPACE FORCÉ, pour la même raison qu'au montage : ces
+        // propriétés imposeraient une matrice, et la colorimétrie d'un rush est
+        // déduite de sa seule fonction de transfert. Un fichier à matrice non
+        // standard serait classé « sdr » puis forcé en 709 — la façon la plus
+        // sûre de fabriquer la dominante qu'on cherche à éliminer. On laisse
+        // AVFoundation propager celle de la source, qui est étiquetée par le
+        // pipeline de rendu une étape plus tôt.
 
         let instruction = AVMutableVideoCompositionInstruction()
         let duration = try await asset.load(.duration)

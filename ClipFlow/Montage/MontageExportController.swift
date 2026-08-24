@@ -134,7 +134,16 @@ final class MontageExportController {
                 // résultat identique.
                 let factor = outputFormat.upscaleFactor(sourceOriented: sourceOriented,
                                                         cropToFill: cropToFill)
+                // GARDE-FOU HDR TENU ICI, et plus seulement dans la vue.
+                //
+                // L'agrandisseur travaille en 8 bits : un montage HLG ou PQ y
+                // perdrait sa plage dynamique. Le commentaire de ce fichier
+                // affirmait déjà que « le contrôleur renonce à la seconde
+                // passe » pour eux — c'était faux, la condition vivait dans
+                // l'écran de montage. Un second appelant, ou un remaniement de
+                // la vue, aurait suffi à la perdre en silence.
                 let twoPass = upscale && sourceOriented != .zero
+                    && colorimetry == "sdr"
                     && factor >= MontageUpscaler.minimumUsefulFactor
 
                 let montage = try await MontageComposer.build(
@@ -144,7 +153,6 @@ final class MontageExportController {
                     // agrandir avec l'image, donc flouter.
                     overlays: twoPass ? [] : overlays,
                     outputFormat: outputFormat, cropToFill: cropToFill,
-                    colorimetry: colorimetry,
                     renderAtNativeSize: twoPass,
                     forExport: true
                 )

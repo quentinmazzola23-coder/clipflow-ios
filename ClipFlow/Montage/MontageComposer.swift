@@ -75,9 +75,6 @@ enum MontageComposer {
                       overlays: [ResolvedOverlay] = [],
                       outputFormat: MontageOutputFormat = .auto,
                       cropToFill: Bool = true,
-                      /// Colorimétrie COMMUNE des clips ("sdr" si tous le sont).
-                      /// Sert uniquement à déclarer l'espace de la composition.
-                      colorimetry: String = "inconnue",
                       renderAtNativeSize: Bool = false,
                       forExport: Bool = false) async throws -> MontageComposition {
         guard !plan.placements.isEmpty else { throw MontageComposerError.emptyPlan }
@@ -255,20 +252,25 @@ enum MontageComposer {
         let videoComposition = AVMutableVideoComposition()
         videoComposition.instructions = [instruction]
         videoComposition.renderSize = renderSize
-        // ESPACE DÉCLARÉ EXPLICITEMENT EN SDR, comme au recadrage clip par clip.
+        // AUCUN ESPACE FORCÉ ICI, et c'est un retour en arrière assumé.
         //
-        // À nil, AVFoundation propage celui des pistes — correct, mais implicite,
-        // et la piste réunit des segments venus de fichiers différents (plage
-        // cachée, version lissée, copie source). Le déclarer supprime cette
-        // inconnue là où elle n'a pas lieu d'être.
+        // J'avais déclaré le Rec.709 quand tous les clips sont SDR, par hygiène,
+        // sans qu'aucune cause ne le justifie. Deux faits l'ont condamné :
         //
-        // EN HDR, RIEN N'EST FORCÉ : les combinaisons acceptées sont limitées, et
-        // un montage HDR n'a jamais été signalé comme fautif.
-        if colorimetry == "sdr" {
-            videoComposition.colorPrimaries = kCVImageBufferColorPrimaries_ITU_R_709_2 as String
-            videoComposition.colorTransferFunction = kCVImageBufferTransferFunction_ITU_R_709_2 as String
-            videoComposition.colorYCbCrMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String
-        }
+        // 1. Ces propriétés décrivent la SORTIE de la composition. L'exporteur
+        //    les consomme — il a un fichier à étiqueter et une conversion à
+        //    décider ; le lecteur, lui, les ignore et dessine depuis les
+        //    attachements des tampons sources. Code partagé, effet réservé à
+        //    l'export : exactement la forme du défaut de teinte recherché.
+        // 2. C'est le SEUL endroit du projet qui impose une matrice YCbCr, donc
+        //    le seul capable de faire pivoter une teinte. Or la colorimétrie
+        //    d'un rush est déduite de sa seule fonction de transfert : un
+        //    fichier à primaires ou matrice non standard est classé « sdr » puis
+        //    forcé en 709 — et une matrice 601 relue en 709 donne précisément
+        //    un voile chaud dans les tons moyens.
+        //
+        // La propagation depuis les pistes reste donc la règle, comme depuis
+        // toujours. On ne remplace pas une inconnue par une affirmation.
         // 60 i/s, demandé explicitement, avec la conséquence assumée : un clip
         // ralenti 0,5× depuis une source 60 i/s ne produit une image NOUVELLE
         // qu'une fois sur deux, et l'encodeur duplique l'autre. Le fichier est

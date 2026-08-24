@@ -66,6 +66,15 @@ enum MontageUpscaler {
             throw MontageUpscalerError.noVideoTrack
         }
         let duration = try await asset.load(.duration)
+        // COLORIMÉTRIE LUE SUR LA PISTE, jamais supposée.
+        //
+        // Cette passe posait 709 en quatre endroits — espace de travail, espace
+        // de sortie, attachements du tampon, réglages de l'écrivain — sans
+        // jamais regarder ce que l'intermédiaire portait vraiment. Tant qu'il
+        // est en 709 l'aller-retour est neutre ; dès qu'il ne l'est pas, la
+        // passe grave l'étiquette fausse dans le fichier final et rend le
+        // défaut indétectable en aval. Conserver vaut mieux qu'affirmer.
+        let sourceColor = ColorTags(track: try? await track.load(.formatDescriptions))
         let audioTrack = try await asset.loadTracks(withMediaType: .audio).first
 
         let output = source.deletingLastPathComponent()
@@ -120,20 +129,11 @@ enum MontageUpscaler {
                     AVVideoAverageBitRateKey: bitrate(for: targetSize, fps: frameRate),
                     AVVideoExpectedSourceFrameRateKey: Int(frameRate),
                 ],
-                // FICHIER ÉTIQUETÉ. Sans ces clés, le .mov sort sans
-                // description de couleur : un lecteur retombe alors sur une
-                // convention de son choix, et le montage suréchantillonné
-                // n'avait pas le même rendu que le même montage exporté en une
-                // passe. Cette passe travaille en BGRA 8 bits converti en sRGB
-                // par CoreImage — c'est du Rec.709, autant le dire.
-                //
-                // Les montages HDR ne passent pas par ici : le contrôleur
-                // renonce à la seconde passe pour eux plutôt que de les aplatir.
-                AVVideoColorPropertiesKey: [
-                    AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                    AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                    AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
-                ],
+                // FICHIER ÉTIQUETÉ COMME LA SOURCE. Sans ces clés, le .mov
+                // sort sans description de couleur et le lecteur retombe sur
+                // une convention. Avec une valeur choisie plutôt que lue, il
+                // sort avec une description FAUSSE — bien pire.
+                AVVideoColorPropertiesKey: sourceColor.writerProperties,
             ])
         videoInput.expectsMediaDataInRealTime = false
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
@@ -169,29 +169,23 @@ enum MontageUpscaler {
         }
         writer.startSession(atSourceTime: .zero)
 
-        // ESPACE DE SORTIE IMPOSÉ, et c'est indispensable.
+        // ESPACE DE COREIMAGE ACCORDÉ SUR LA SOURCE.
         //
-        // Sans lui, CoreImage rend dans SON espace par défaut — du sRGB — sur un
-        // tampon qui ne porte aucune étiquette, pendant que l'écrivain déclare
-        // le fichier en Rec.709. Les deux partagent leurs primaires mais PAS
-        // leur courbe de transfert : les mêmes octets relus comme du 709
-        // sortent plus contrastés, et les tons chauds ressortent. Sur du POV —
-        // bitume, terre, végétation — cela se voit comme un voile rougeâtre.
+        // Sans espace déclaré, CoreImage rendait dans le sien — du sRGB — sur un
+        // tampon nu, pendant que l'écrivain déclarait autre chose. sRGB et
+        // Rec.709 partageant leurs primaires et leur blanc, l'écart était
+        // purement une courbe de transfert, donc ACHROMATIQUE : quelques pour
+        // cent de contraste, jamais une dominante de couleur. La corriger était
+        // juste ; y voir la cause d'un voile rougeâtre était une erreur, et ce
+        // commentaire existe pour ne pas la refaire.
         //
-        // Le défaut ne touchait QUE le montage suréchantillonné : l'aperçu ne
-        // passe jamais par cette seconde passe, et l'export en une seule passe
-        // ne fait pas transiter les pixels par CoreImage. C'est exactement la
-        // forme du symptôme rapporté — montage teinté, aperçu intact.
-        //
-        // Poser l'espace de travail en plus de celui de sortie garde
-        // l'agrandissement Lanczos linéaire, donc sans dérive de gamma sur les
-        // bords à fort contraste.
-        let rec709 = CGColorSpace(name: CGColorSpace.itur_709)
+        // En accordant l'espace de travail ET celui de sortie sur ce que porte
+        // la source, la passe devient l'IDENTITÉ colorimétrique : les octets la
+        // traversent sans conversion, quelle que soit l'étiquette d'origine.
+
         var contextOptions: [CIContextOption: Any] = [.useSoftwareRenderer: false]
-        if let rec709 {
-            contextOptions[.workingColorSpace] = rec709
-            contextOptions[.outputColorSpace] = rec709
-        }
+        contextOptions[.workingColorSpace] = sourceColor.colorSpace
+        contextOptions[.outputColorSpace] = sourceColor.colorSpace
         let context = CIContext(options: contextOptions)
         let overlayCache = OverlayImageCache(overlays: overlays, size: targetSize)
         let total = max(duration.seconds, 0.001)
@@ -281,21 +275,13 @@ enum MontageUpscaler {
                                 "tampon de sortie indisponible"))
                             return
                         }
-                        // ÉTIQUETTES POSÉES SUR LE TAMPON, pas seulement sur
-                        // le fichier : l'encodeur lit d'abord celles-ci, et un
-                        // tampon nu le laisse deviner. Elles disent la même
-                        // chose que l'espace de sortie du contexte ci-dessus et
-                        // que les réglages de l'écrivain — les trois doivent
-                        // s'accorder, sinon l'un dément l'autre.
-                        CVBufferSetAttachment(outBuffer, kCVImageBufferColorPrimariesKey,
-                                              kCVImageBufferColorPrimaries_ITU_R_709_2,
-                                              .shouldPropagate)
-                        CVBufferSetAttachment(outBuffer, kCVImageBufferTransferFunctionKey,
-                                              kCVImageBufferTransferFunction_ITU_R_709_2,
-                                              .shouldPropagate)
-                        CVBufferSetAttachment(outBuffer, kCVImageBufferYCbCrMatrixKey,
-                                              kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-                                              .shouldPropagate)
+                        // ÉTIQUETTES RECOPIÉES DE LA SOURCE sur le tampon :
+                        // l'encodeur lit d'abord celles-ci, et un tampon nu le
+                        // laisse deviner. Elles disent la même chose que
+                        // l'espace du contexte et que les réglages de
+                        // l'écrivain — les trois s'accordent, sur la valeur
+                        // lue et non sur une valeur choisie.
+                        sourceColor.apply(to: outBuffer)
                         context.render(image, to: outBuffer)
                         guard adaptor.append(outBuffer, withPresentationTime: time) else {
                             reader.cancelReading(); videoInput.markAsFinished()
@@ -361,6 +347,77 @@ enum MontageUpscaler {
         let pixels = Double(size.width * size.height)
         let perPixelPerFrame = 0.09   // HEVC, contenu d'action
         return Int(pixels * Double(fps) * perPixelPerFrame)
+    }
+}
+
+/// Les étiquettes de couleur d'une piste, telles qu'elle les porte.
+///
+/// LUES, JAMAIS CHOISIES. La seconde passe du montage décode, redimensionne et
+/// réencode : c'est un aller-retour, pas une conversion. Tout ce qu'elle a à
+/// faire, c'est rendre les octets là où elle les a pris — et pour cela il faut
+/// savoir ce qu'ils disent, pas décider à leur place.
+///
+/// Le repli est le Rec.709, qui est ce qu'un lecteur suppose déjà devant une
+/// piste haute définition sans description. Il ne change donc rien à
+/// l'interprétation ; il la rend seulement explicite.
+private struct ColorTags {
+    var primaries: String
+    var transferFunction: String
+    var yCbCrMatrix: String
+
+    init(track formatDescriptions: [CMFormatDescription]?) {
+        func extension_(_ key: CFString) -> String? {
+            guard let description = formatDescriptions?.first,
+                  let value = CMFormatDescriptionGetExtension(description, extensionKey: key)
+            else { return nil }
+            return value as? String
+        }
+        primaries = extension_(kCMFormatDescriptionExtension_ColorPrimaries)
+            ?? (kCVImageBufferColorPrimaries_ITU_R_709_2 as String)
+        transferFunction = extension_(kCMFormatDescriptionExtension_TransferFunction)
+            ?? (kCVImageBufferTransferFunction_ITU_R_709_2 as String)
+        yCbCrMatrix = extension_(kCMFormatDescriptionExtension_YCbCrMatrix)
+            ?? (kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String)
+    }
+
+    /// Espace à donner à CoreImage pour que la passe soit l'identité.
+    var colorSpace: CGColorSpace {
+        let attachments: [CFString: Any] = [
+            kCVImageBufferColorPrimariesKey: primaries as CFString,
+            kCVImageBufferTransferFunctionKey: transferFunction as CFString,
+            kCVImageBufferYCbCrMatrixKey: yCbCrMatrix as CFString,
+        ]
+        if let space = CVImageBufferCreateColorSpaceFromAttachments(
+            attachments as CFDictionary
+        )?.takeRetainedValue() {
+            return space
+        }
+        // Espace introuvable (combinaison exotique) : le Rec.709 est la
+        // convention que le lecteur appliquerait de toute façon.
+        return CGColorSpace(name: CGColorSpace.itur_709)
+            ?? CGColorSpaceCreateDeviceRGB()
+    }
+
+    /// Ce que l'écrivain doit déclarer sur le fichier produit.
+    var writerProperties: [String: Any] {
+        [
+            AVVideoColorPrimariesKey: primaries,
+            AVVideoTransferFunctionKey: transferFunction,
+            AVVideoYCbCrMatrixKey: yCbCrMatrix,
+        ]
+    }
+
+    /// Recopie les étiquettes sur un tampon de sortie.
+    ///
+    /// Reposées à CHAQUE image : un tampon recyclé par le pool garde les
+    /// siennes, mais un tampon neuf sort nu, et l'encodeur lit d'abord celles-ci.
+    func apply(to buffer: CVPixelBuffer) {
+        CVBufferSetAttachment(buffer, kCVImageBufferColorPrimariesKey,
+                              primaries as CFString, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey,
+                              transferFunction as CFString, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey,
+                              yCbCrMatrix as CFString, .shouldPropagate)
     }
 }
 

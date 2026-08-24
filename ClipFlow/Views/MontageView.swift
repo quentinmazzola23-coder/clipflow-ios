@@ -1446,7 +1446,11 @@ struct MontageView: View {
             // ternes — pour gagner de la définition. Mieux vaut laisser
             // AVFoundation agrandir en une passe et garder la plage dynamique
             // intacte, sans rien demander à l'utilisateur.
+            // `allSatisfy` vaut VRAI sur une collection vide : sans le test
+            // d'existence, un plan dont plus aucun clip ne se résout aurait
+            // activé la seconde passe sur une composition non étiquetée.
             upscale: project.upscaleOnExport
+                && !placedPassages.isEmpty
                 && placedPassages.allSatisfy { $0.colorimetry == "sdr" },
             sourceOriented: firstPlacedRushSize,
             smoothing: smoothing,
