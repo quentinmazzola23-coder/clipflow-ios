@@ -11,6 +11,7 @@
 import Foundation
 import SwiftData
 import CoreMedia
+import AVFoundation
 import Observation
 import UIKit
 import ActivityKit
