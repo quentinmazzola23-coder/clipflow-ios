@@ -27,6 +27,8 @@
 import Foundation
 import AVFoundation
 import CoreImage
+import CoreVideo
+import CoreGraphics
 import UIKit
 
 enum MontageUpscalerError: Error, LocalizedError {
@@ -167,7 +169,30 @@ enum MontageUpscaler {
         }
         writer.startSession(atSourceTime: .zero)
 
-        let context = CIContext(options: [.useSoftwareRenderer: false])
+        // ESPACE DE SORTIE IMPOSÉ, et c'est indispensable.
+        //
+        // Sans lui, CoreImage rend dans SON espace par défaut — du sRGB — sur un
+        // tampon qui ne porte aucune étiquette, pendant que l'écrivain déclare
+        // le fichier en Rec.709. Les deux partagent leurs primaires mais PAS
+        // leur courbe de transfert : les mêmes octets relus comme du 709
+        // sortent plus contrastés, et les tons chauds ressortent. Sur du POV —
+        // bitume, terre, végétation — cela se voit comme un voile rougeâtre.
+        //
+        // Le défaut ne touchait QUE le montage suréchantillonné : l'aperçu ne
+        // passe jamais par cette seconde passe, et l'export en une seule passe
+        // ne fait pas transiter les pixels par CoreImage. C'est exactement la
+        // forme du symptôme rapporté — montage teinté, aperçu intact.
+        //
+        // Poser l'espace de travail en plus de celui de sortie garde
+        // l'agrandissement Lanczos linéaire, donc sans dérive de gamma sur les
+        // bords à fort contraste.
+        let rec709 = CGColorSpace(name: CGColorSpace.itur_709)
+        var contextOptions: [CIContextOption: Any] = [.useSoftwareRenderer: false]
+        if let rec709 {
+            contextOptions[.workingColorSpace] = rec709
+            contextOptions[.outputColorSpace] = rec709
+        }
+        let context = CIContext(options: contextOptions)
         let overlayCache = OverlayImageCache(overlays: overlays, size: targetSize)
         let total = max(duration.seconds, 0.001)
 
@@ -256,6 +281,21 @@ enum MontageUpscaler {
                                 "tampon de sortie indisponible"))
                             return
                         }
+                        // ÉTIQUETTES POSÉES SUR LE TAMPON, pas seulement sur
+                        // le fichier : l'encodeur lit d'abord celles-ci, et un
+                        // tampon nu le laisse deviner. Elles disent la même
+                        // chose que l'espace de sortie du contexte ci-dessus et
+                        // que les réglages de l'écrivain — les trois doivent
+                        // s'accorder, sinon l'un dément l'autre.
+                        CVBufferSetAttachment(outBuffer, kCVImageBufferColorPrimariesKey,
+                                              kCVImageBufferColorPrimaries_ITU_R_709_2,
+                                              .shouldPropagate)
+                        CVBufferSetAttachment(outBuffer, kCVImageBufferTransferFunctionKey,
+                                              kCVImageBufferTransferFunction_ITU_R_709_2,
+                                              .shouldPropagate)
+                        CVBufferSetAttachment(outBuffer, kCVImageBufferYCbCrMatrixKey,
+                                              kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                                              .shouldPropagate)
                         context.render(image, to: outBuffer)
                         guard adaptor.append(outBuffer, withPresentationTime: time) else {
                             reader.cancelReading(); videoInput.markAsFinished()
