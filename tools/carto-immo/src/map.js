@@ -465,6 +465,8 @@ input[type=search]{padding-left:10px}
 .zonepop b{display:block;font-size:13.5px;margin-bottom:2px}
 .zonepop button{margin-top:8px;width:100%;border:none;background:var(--accent);color:#fff;border-radius:8px;padding:8px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer}
 .zonepop code{display:block;margin-top:7px;padding:7px 8px;background:#f4f1ea;border-radius:7px;font-size:11px;word-break:break-all;user-select:all}
+.zonepop .copier{background:#fff;color:var(--accent);border:1px solid var(--line);font-weight:500}
+.zonepop b{display:inline;font-size:inherit;font-weight:600}
 .zonepop .quoi{color:var(--muted);font-size:11.5px;margin-top:4px;line-height:1.45}
 .zonepop .chiffre{color:var(--ink);font-variant-numeric:tabular-nums}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
@@ -1756,12 +1758,20 @@ function montrerZone(lat, lon, com){
   if (quand) lignes.push('Dernier balayage le ' + quand + '.');
 
   const libelle = c.connue ? 'Rebalayer toute la commune' : 'Analyser toutes les annonces';
+  const commande = 'node src/cli.js annonces --zone "' + com.nom + '"';
+  // Sans agent, la carte ne peut pas collecter : les sites d'annonces et les
+  // registres publics ne répondent pas à une page. Plutôt qu'un bouton mort,
+  // on donne la commande — et de quoi la prendre d'un geste depuis le
+  // téléphone, sans la recopier à la main.
   const action = SERVEUR
     ? '<button type="button" data-zone="' + esc(com.nom) + '">' + libelle + '</button>' +
       '<div class="quoi">Reprend toutes les annonces de la commune, sans plafond, et' +
       ' n’ajoute que ce qui manque.</div>'
-    : '<div class="quoi">À lancer depuis le terminal :</div>' +
-      '<code>node src/cli.js annonces --zone "' + esc(com.nom) + '"</code>';
+    : '<div class="quoi">Carte en lecture seule. Pour analyser cette commune, ' +
+      'lance <b>node src/cli.js carte</b> sur ton ordinateur — le bouton apparaîtra ici.' +
+      '</div><code>' + esc(commande) + '</code>' +
+      '<button type="button" class="copier" data-commande="' + esc(commande) + '">' +
+      'Copier la commande</button>';
 
   L.popup({ closeButton: true, autoPanPadding: [30, 30] })
     .setLatLng([lat, lon])
@@ -1775,6 +1785,19 @@ document.addEventListener('click', (ev) => {
   if (!b) return;
   ev.preventDefault();
   lancerZone(b.dataset.zone);
+});
+
+document.addEventListener('click', async (ev) => {
+  const b = ev.target.closest('[data-commande]');
+  if (!b) return;
+  ev.preventDefault();
+  try {
+    await navigator.clipboard.writeText(b.dataset.commande);
+    b.textContent = 'Commande copiée';
+  } catch {
+    // Presse-papiers refusé : la commande reste sélectionnable au doigt.
+    b.textContent = 'Sélectionne la ligne au-dessus';
+  }
 });
 
 async function lancerZone(zone){

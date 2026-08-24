@@ -359,8 +359,14 @@ try {
     assert.match(t, /9 avec certitude/);
     assert.match(t, /1 bien situé ici/);
     assert.match(t, /Dernier balayage le 23\/08\/2026/);
-    // Sans agent, la carte ne promet rien qu'elle ne puisse tenir.
+    // Sans agent, la carte ne promet rien qu'elle ne puisse tenir : pas de
+    // bouton d'analyse, mais la commande et de quoi la prendre d'un geste.
+    assert.match(t, /lecture seule/);
     assert.match(t, /annonces --zone "Marciac"/);
+    assert.equal(await page.locator('.zonepop button[data-zone]').count(), 0);
+    await page.click('.zonepop .copier');
+    await page.waitForTimeout(250);
+    assert.match(await page.textContent('.zonepop .copier'), /copiée|Sélectionne/);
   });
 
   await check('aucune erreur au terme de la séance', () => assert.deepEqual(erreurs, []));
