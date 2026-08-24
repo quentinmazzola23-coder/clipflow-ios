@@ -74,7 +74,7 @@ enum MontageUpscaler {
         // est en 709 l'aller-retour est neutre ; dès qu'il ne l'est pas, la
         // passe grave l'étiquette fausse dans le fichier final et rend le
         // défaut indétectable en aval. Conserver vaut mieux qu'affirmer.
-        let sourceColor = ColorTags(track: try? await track.load(.formatDescriptions))
+        let sourceColor = ColorTags(track: try? await videoTrack.load(.formatDescriptions))
         let audioTrack = try await asset.loadTracks(withMediaType: .audio).first
 
         let output = source.deletingLastPathComponent()

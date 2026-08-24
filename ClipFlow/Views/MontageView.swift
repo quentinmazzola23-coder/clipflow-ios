@@ -1230,7 +1230,6 @@ struct MontageView: View {
         let generation = planGeneration
         let sources = clipSources
         let crops = clipCrops
-        let colorimetry = montageColorimetry
         let token = UUID()
         previewToken = token
         isBuildingPreview = true
@@ -1245,8 +1244,7 @@ struct MontageView: View {
                     musicURL: MusicStore.url(forMusicFilename: filename),
                     overlays: resolvedOverlays, // dessinées par-dessus, pas incrustées ici
                     outputFormat: project.outputFormat,
-                    cropToFill: project.cropToFillOutput,
-                    colorimetry: colorimetry
+                    cropToFill: project.cropToFillOutput
                 )
                 // La construction dure plusieurs secondes : l'écran a pu être
                 // fermé, ou le plan reconstruit, entre-temps. Installer ce
@@ -1325,6 +1323,17 @@ struct MontageView: View {
 
     // MARK: - Export
 
+    /// Numéro du clip actuellement à l'écran, tel qu'il apparaît dans la liste.
+    ///
+    /// C'EST `clipID + 1`, c'est-à-dire le rang du PASSAGE — jamais le rang du
+    /// placement dans le montage. Les deux coïncident tant que tous les clips
+    /// sont placés, et divergent dès qu'un seul est écarté faute de matière
+    /// (l'en-tête l'annonce : « 39/40 clips »). On lisait alors 8 à l'écran, on
+    /// supprimait la ligne 8, et c'était le clip 9 qu'il fallait retirer : le
+    /// numéro désignait la mauvaise ligne, ce qui est pire que pas de numéro.
+    ///
+    /// Un clip posé deux fois porte donc le même numéro à ses deux passages —
+    /// c'est la vérité : c'est le même clip.
     /// Numéro du clip actuellement à l'écran, tel qu'il apparaît dans la liste.
     ///
     /// C'EST `clipID + 1`, c'est-à-dire le rang du PASSAGE — jamais le rang du
