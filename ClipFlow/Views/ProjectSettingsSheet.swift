@@ -138,9 +138,8 @@ struct ProjectSettingsSheet: View {
                     Text("Le flux optique fabrique les images intermédiaires : "
                          + "mouvement plus fluide, artefacts possibles. Sans lui, "
                          + "chaque image du ralenti est une vraie image du rush, "
-                         + "répétée.
-
-Les clips isolés partent dans la file une fois "
+                         + "répétée. "
+                         + "Les clips isolés partent dans la file une fois "
                          + "le montage enregistré — jamais pendant, pour ne pas faire "
                          + "se disputer l'encodeur.")
                 }
